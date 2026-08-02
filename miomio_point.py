@@ -530,8 +530,8 @@ async def factory_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text += f"🔒 {pdata['name']} (نیازمند لول {pdata['min_fac_level']} کارخانه)\n"
 
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
-    # ==================================================
-# 🟢 بخش ۶-الف: کازینو، پنل ادمین، راهنما و پردازشگر متنی
+# ==================================================
+# 🟢 بخش ۶-الف: کازینو، پروفایل، پنل ادمین، راهنما و پردازشگر متنی
 # ==================================================
 
 # لابی‌های فعال کازینو
@@ -553,7 +553,46 @@ async def casino_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # ==================================================
-# 👑 ۲. پنل ادمین جامع
+# 👤 ۲. نمایش پروفایل کاربر + میو/مع مانده تا لول بعدی
+# ==================================================
+async def profile_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # بررسی ریپلی یا کاربر جاری
+    target_user = update.message.reply_to_message.from_user if update.message.reply_to_message else update.effective_user
+    user_id = target_user.id
+
+    conn = sqlite3.connect("meow_point.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT wallet, bank, cat_level, cat_name, meow_count FROM users WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+
+    if not row:
+        await update.message.reply_text("❌ اطلاعات کاربر در دیتابیس یافت نشد.")
+        return
+
+    wallet, bank, cat_level, cat_name, meow_count = row[0] or 0, row[1] or 0, row[2] or 1, row[3] or "پیشی", row[4] or 0
+
+    # محاسبه لول و تعداد میو مانده تا لول بعدی (هر ۱۰ میو = ۱ لول)
+    user_level = (meow_count // 10) + 1
+    meows_needed = 10 - (meow_count % 10)
+    if meows_needed == 0:
+        meows_needed = 10
+
+    profile_text = (
+        f"👤 **پروفایل کاربر:** {target_user.first_name}\n"
+        f"🆔 **شناسه:** `{user_id}`\n"
+        f"🏆 **سطح (لول) کاربر:** {user_level}\n"
+        f"🐾 **تعداد میو/مع ثبت‌شده:** {meow_count:,}\n"
+        f"🎯 **میو/مع مانده تا لول بعدی:** **{meows_needed}** عدد\n\n"
+        f"💵 **موجودی کیف پول:** {int(wallet):,} میو\n"
+        f"🏦 **موجودی بانک:** {int(bank):,} میو\n"
+        f"🐱 **پیشی:** {cat_name} (لول {cat_level})"
+    )
+
+    await update.message.reply_text(profile_text, parse_mode="Markdown")
+
+# ==================================================
+# 👑 ۳. پنل ادمین جامع (افزایش دلخواه سطح گربه + مکس)
 # ==================================================
 async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
@@ -567,6 +606,8 @@ async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "👑 **پنل مدیریت ادمین ربات**\n\n"
             "▫️ `/give_points [user_id] [مبلغ]` - اهدای میوپوینت\n"
+            "▫️ `/add_cat [user_id] [تعداد]` - افزایش لول گربه به تعداد دلخواه\n"
+            "▫️ `/set_cat [user_id] [سطح]` - تنظیم دقیق سطح گربه کاربر\n"
             "▫️ `/max_cat [user_id]` - فول ارتقا دادن گربه کاربر (لول ۱۰۰)\n"
             "▫️ `/bc [متن پیام]` - ارسال پیام همگانی\n"
             "▫️ `/stats` - مشاهده آمار کامل کاربران و موجودی‌ها",
@@ -604,6 +645,35 @@ async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             await update.message.reply_text(f"✅ مبلغ **{int(amt):,}** میوپوینت به کاربر `{target}` داده شد.", parse_mode="Markdown")
             await send_pv_notify(context, target, f"🎁 مبلغ **{int(amt):,}** میوپوینت توسط ادمین به کیف پول شما اضافه شد!")
+
+    # افزایش لول گربه به تعداد دلخواه
+    elif cmd == "/add_cat":
+        sub_parts = update.message.text.split()
+        if len(sub_parts) >= 3:
+            target = int(sub_parts[1])
+            add_levels = int(sub_parts[2])
+            
+            conn = sqlite3.connect("meow_point.db")
+            conn.cursor().execute("UPDATE users SET cat_level = cat_level + ? WHERE user_id = ?", (add_levels, target))
+            conn.commit()
+            conn.close()
+
+            await update.message.reply_text(f"✅ سطح گربه کاربر `{target}` به تعداد **{add_levels}** لول افزایش یافت.", parse_mode="Markdown")
+            await send_pv_notify(context, target, f"🚀 سطح گربه شما **{add_levels}** لول توسط ادمین ارتقا یافت!")
+
+    # تنظیم دقیق لول گربه
+    elif cmd == "/set_cat":
+        sub_parts = update.message.text.split()
+        if len(sub_parts) >= 3:
+            target = int(sub_parts[1])
+            new_level = int(sub_parts[2])
+            
+            conn = sqlite3.connect("meow_point.db")
+            conn.cursor().execute("UPDATE users SET cat_level = ? WHERE user_id = ?", (new_level, target))
+            conn.commit()
+            conn.close()
+
+            await update.message.reply_text(f"✅ سطح گربه کاربر `{target}` روی **{new_level}** تنظیم شد.", parse_mode="Markdown")
 
     # فول ارتقا دادن گربه کاربر
     elif cmd == "/max_cat":
@@ -650,7 +720,7 @@ async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ **پایان ارسال پیام همگانی:**\n\n🟢 موفق: {success}\n🔴 ناموفق: {failed}")
 
 # ==================================================
-# 📜 ۳. راهنمای دستورات
+# 📜 ۴. راهنمای دستورات
 # ==================================================
 async def help_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -669,7 +739,7 @@ async def help_command_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     )
 
 # ==================================================
-# 📩 ۴. پردازش ورودی‌های متنی اختصاصی (تغییر نام گربه + مبلغ دلخواه کازینو)
+# 📩 ۵. پردازش ورودی‌های متنی اختصاصی (تغییر نام گربه + مبلغ دلخواه کازینو)
 # ==================================================
 async def custom_text_inputs_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -778,7 +848,7 @@ async def custom_text_inputs_handler(update: Update, context: ContextTypes.DEFAU
                 reply_markup=InlineKeyboardMarkup(buttons),
                 parse_mode="Markdown"
     )
-        # ==================================================
+            # ==================================================
 # 🟢 بخش ۶-ب: کلیدهای شیشه‌ای (Callback Router) و تابع main()
 # ==================================================
 
@@ -786,7 +856,11 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data
     user_id = query.from_user.id
-    await query.answer()
+    
+    try:
+        await query.answer()
+    except Exception:
+        pass
 
     # --- ۱. تایید یا لغو انتقال مستقیم ---
     if data == "confirm_direct_transfer":
@@ -815,7 +889,15 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop('pending_transfer', None)
         await query.edit_message_text("❌ **انتقال لغو شد.**")
 
-    # --- ۲. مدیریت ارتقا، برداشت و تغییر نام گربه ---
+    # --- ۲. مدیریت ارتقا، برداشت و تغییر نام گربه (با پوشش تمام نام‌های دکمه) ---
+    elif data in ["cat_change_name", "cat_rename", "rename_cat", "cat_name_change", "cat_name"]:
+        context.user_data['waiting_for_cat_name'] = True
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text="✍️ **لطفاً نام جدید پیشی خود را ارسال کنید:**\n\n(برای انصراف کلمه «انصراف» را بفرستید)",
+            parse_mode="Markdown"
+        )
+
     elif data == "cat_upgrade":
         user = get_user(user_id)
         cost = user[7] * 500
@@ -841,10 +923,6 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.commit()
         conn.close()
         await query.message.reply_text(f"✅ مبلغ {produced:,} میوپوینت تولید شده دریافت شد.")
-
-    elif data == "cat_change_name":
-        context.user_data['waiting_for_cat_name'] = True
-        await query.message.reply_text("✍️ **لطفاً نام جدید پیشی خود را ارسال کنید:**\n\n(برای انصراف کلمه «انصراف» را بفرستید)", parse_mode="Markdown")
 
     # --- ۳. عملیات ماهی ---
     elif data.startswith("fish_sell_"):
@@ -944,7 +1022,11 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'game_type': parts[2],
             'players': int(parts[3])
         }
-        await query.edit_message_text("✍️ **لطفاً مبلغ شرط‌بندی دلخواه خود را ارسال کنید:**\n\n(مثال: `25k` یا `15000` | برای انصراف کلمه «انصراف» را بفرستید)", parse_mode="Markdown")
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text="✍️ **لطفاً مبلغ شرط‌بندی دلخواه خود را ارسال کنید:**\n\n(مثال: `25k` یا `15000` | برای انصراف کلمه «انصراف» را بفرستید)",
+            parse_mode="Markdown"
+        )
 
     elif data.startswith("casino_start_"):
         parts = data.split("_")
@@ -1097,7 +1179,7 @@ def main():
     app.add_handler(MessageHandler(filters.Regex(r"^دستورات ربات$"), help_command_handler))
 
     # دستورات ادمین
-    app.add_handler(CommandHandler(["admin", "give_points", "max_cat", "stats", "bc"], admin_handler))
+    app.add_handler(CommandHandler(["admin", "give_points", "add_cat", "set_cat", "max_cat", "stats", "bc"], admin_handler))
 
     # دکمه‌های شیشه‌ای
     app.add_handler(CallbackQueryHandler(callback_router))
@@ -1107,4 +1189,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-                                     
+    
