@@ -1,578 +1,205 @@
+# ==================================================
+# 🟢 بخش ۱-الف: کتابخانه‌ها، ثابت‌ها و ساخت کامل دیتابیس
+# ==================================================
+import logging
 import sqlite3
-import random
-import time
 import asyncio
-from datetime import datetime
+import time
+import random
+import re
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    Application, CommandHandler, MessageHandler, CallbackQueryHandler, 
-    ContextTypes, filters
+    Application,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    filters,
 )
 
-# ==================================================
-# 🔑 اطلاعات اصلی ربات و ادمین
-# ==================================================
-TOKEN = "8832161480:AAG3LFT5wMDdSFRPzb16gKSW31Ocdh1ao2w"
+# تنظیمات لاگ‌گیری برای عیب‌یابی دقیق
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# 🔑 اطلاعات اختصاصی شما
+TOKEN = "8971798729:AAGY8Hw8osbpHdglddpckGSnDUgIR8bywfw"
 ADMIN_ID = 8918154552
 
 # ==================================================
-# 🗄️ راه‌اندازی کامل دیتابیس SQLite
+# 🗄️ مقداردهی اولیه و ساخت جداول دیتابیس SQLite
 # ==================================================
 def init_db():
     conn = sqlite3.connect("meow_point.db")
     cursor = conn.cursor()
     
-    # جدول اصلی کاربران
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            wallet REAL DEFAULT 0,
-            bank REAL DEFAULT 0,
-            acc_num TEXT UNIQUE,
-            meow_count INTEGER DEFAULT 0,
-            cat_name TEXT DEFAULT 'پیشی کوچولو',
-            cat_level INTEGER DEFAULT 1,
-            cat_food INTEGER DEFAULT 100,
-            last_meow_time REAL DEFAULT 0,
-            cat_last_claim REAL DEFAULT 0,
-            factory_level INTEGER DEFAULT 1,
-            factory_capacity INTEGER DEFAULT 10000,
-            producing_item TEXT DEFAULT NULL,
-            produce_amount INTEGER DEFAULT 0,
-            produce_start_time REAL DEFAULT 0,
-            produce_duration INTEGER DEFAULT 0,
-            produce_cost REAL DEFAULT 0,
-            last_bank_interest REAL DEFAULT 0
-        )
-    ''')
-    
-    # جدول انبار یخچال (ماهی‌ها)
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS fridge (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            fish_type TEXT,
-            count INTEGER DEFAULT 1
-        )
-    ''')
-    
+    # جدول کاربران
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        user_id INTEGER PRIMARY KEY,
+        wallet REAL DEFAULT 0,
+        bank REAL DEFAULT 0,
+        card_number TEXT UNIQUE,
+        cat_level INTEGER DEFAULT 1,
+        cat_name TEXT DEFAULT 'پیشی',
+        cat_food INTEGER DEFAULT 100,
+        cat_last_claim REAL DEFAULT 0,
+        meow_count INTEGER DEFAULT 0,
+        last_meow_time REAL DEFAULT 0,
+        factory_level INTEGER DEFAULT 1,
+        producing_item TEXT DEFAULT NULL,
+        produce_amount INTEGER DEFAULT 0,
+        produce_start_time REAL DEFAULT 0,
+        produce_cost REAL DEFAULT 0
+    )
+    """)
+
+    # جدول یخچال ماهی‌ها
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS fridge (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        fish_type TEXT,
+        count INTEGER DEFAULT 0
+    )
+    """)
+
     conn.commit()
     conn.close()
 
 init_db()
+# ==================================================
+# 🟢 بخش ۱-ب: داده‌های پایه و توابع محاسباتی
+# ==================================================
 
-# ==================================================
-# 🛠️ توابع کمکی محاسباتی و اعلانات
-# ==================================================
-def get_user(user_id):
+FISH_DATA = {
+    "🐟": {"name": "ماهی معمولی", "price": 150, "food": 10},
+    "🐠": {"name": "ماهی گرمسیری", "price": 350, "food": 20},
+    "🐡": {"name": "بادکنک ماهی", "price": 800, "food": 35},
+    "🦈": {"name": "کوسه‌ماهی نایاب", "price": 2500, "food": 60}
+}
+
+PRODUCTS = {
+    "1": {"name": "کنسرو ماهی", "cost": 500, "time": 60, "base_sell": 800, "min_level": 1},
+    "2": {"name": "اسباب‌بازی پیشی", "cost": 2000, "time": 180, "base_sell": 3200, "min_level": 2},
+    "3": {"name": "برج خارش گربه", "cost": 8000, "time": 600, "base_sell": 14000, "min_level": 3}
+}
+
+# تولید شماره حساب اختصاصی ۱۰ رقمی منحصر به فرد با پیش‌فرض 6037
+def generate_card_number(user_id: int) -> str:
+    prefix = "6037"
+    suffix = str(user_id).zfill(6)[-6:]
+    return f"{prefix}{suffix}"
+
+# ثبت یا دریافت اطلاعات کاربر با ساخت دیتابیس امن
+def get_user(user_id: int):
     conn = sqlite3.connect("meow_point.db")
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
     user = cursor.fetchone()
+
+    if not user:
+        card_num = generate_card_number(user_id)
+        cursor.execute(
+            "INSERT INTO users (user_id, card_number, cat_last_claim) VALUES (?, ?, ?)",
+            (user_id, card_num, time.time())
+        )
+        conn.commit()
+        cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+        user = cursor.fetchone()
+
     conn.close()
     return user
 
-def register_user(user_id, username):
-    conn = sqlite3.connect("meow_point.db")
-    cursor = conn.cursor()
-    # تولید شماره حساب رندوم ۱۲ رقمی
-    acc_num = f"{random.randint(1000, 9999)}-{random.randint(1000, 9999)}-{random.randint(1000, 9999)}"
-    now = time.time()
-    cursor.execute(
-        "INSERT OR IGNORE INTO users (user_id, username, acc_num, cat_last_claim, last_bank_interest) VALUES (?, ?, ?, ?, ?)",
-        (user_id, username, acc_num, now, now)
-    )
-    conn.commit()
-    conn.close()
+# پارس کردن دقیق مبالغ (پشتیبانی از k, m, ک, م و اعداد فارسی/انگلیسی)
+def parse_amount(text: str) -> float:
+    text = str(text).strip().lower()
+    text = text.replace("ک", "k").replace("م", "m")
+    
+    # تبدیل اعداد فارسی به انگلیسی
+    persian_digits = "۰۱۲۳۴۵۶۷۸۹"
+    english_digits = "0123456789"
+    translation_table = str.maketrans(persian_digits, english_digits)
+    text = text.translate(translation_table)
 
-def parse_amount(text):
-    text = str(text).lower().replace("کا", "000").replace("k", "000").replace(",", "").strip()
-    try:
-        return float(text)
-    except ValueError:
-        return 0.0
+    match = re.match(r"^(\d+(?:\.\d+)?)\s*([km]?)$", text)
+    if not match:
+        raise ValueError("فرمت مبلغ وارد شده معتبر نیست.")
 
-def get_user_level(meow_count):
-    # محاسبات لول کاربر بر اساس تعداد میو
-    return (meow_count // 10) + 1
+    val, unit = float(match.group(1)), match.group(2)
+    if unit == 'k':
+        val *= 1000
+    elif unit == 'm':
+        val *= 1000000
+    return val
 
+# ارسال اطلاع‌رسانی پی‌وی به‌صورت امن
 async def send_pv_notify(context: ContextTypes.DEFAULT_TYPE, user_id: int, message: str):
     try:
-        await context.bot.send_message(chat_id=user_id, text=f"🔔 **اعلان مالی ربات:**\n\n{message}", parse_mode="Markdown")
-    except Exception:
-        pass
+        await context.bot.send_message(chat_id=user_id, text=message, parse_mode="Markdown")
+    except Exception as e:
+        logger.warning(f"Could not send PV notify to {user_id}: {e}")
 
-def get_cat_title(level):
-    if level < 10:
-        return "گربه کوچولو 🐾"
-    elif level < 20:
-        return "گربه باهوش 🐱"
-    elif level < 30:
-        return "گربه زرنگ 😼"
-    elif level < 50:
-        return "گربه سلطان 🦁"
-    else:
-        return "گربه اسطوره⚡️"
+# نرخ نوسانی فروش کارخانه
+def calculate_dynamic_sell_price(base_price: float) -> int:
+    multiplier = random.uniform(0.85, 1.45)
+    return int(base_price * multiplier)
 # ==================================================
-# 🐱 سیستم میو / مع زدن (با تایمر ۳ دقیقه‌ای دقیق)
+# 🟢 بخش ۲-الف: دستور میو/مع و پروفایل
 # ==================================================
+
 async def meow_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    username = update.effective_user.first_name
     user = get_user(user_id)
-    if not user:
-        register_user(user_id, username)
-        user = get_user(user_id)
-
-    last_meow = user[9]
+    
+    last_time = user[9] or 0
     now = time.time()
-    cooldown = 180  # 3 دقیقه (180 ثانیه)
+    cooldown = 180  # ۳ دقیقه = ۱۸۰ ثانیه دقیق
 
-    if now - last_meow < cooldown:
-        rem = int(cooldown - (now - last_meow))
-        mins, secs = divmod(rem, 60)
+    if now - last_time < cooldown:
+        rem_seconds = int(cooldown - (now - last_time))
+        mins = rem_seconds // 60
+        secs = rem_seconds % 60
+        
+        time_str = ""
+        if mins > 0:
+            time_str += f"{mins} دقیقه و "
+        time_str += f"{secs} ثانیه"
+
         await update.message.reply_text(
-            f"⏱ هنوز **{mins} دقیقه و {secs} ثانیه** تا میو بعدی مونده!\n"
-            f"تو میوت نمیاد 😸 فعلاً صبر کن!",
+            f"⏳ **پیشی شما هنوز خسته است!**\nلطفاً **{time_str}** دیگر صبر کنید و مجدداً «میو» کنید.",
             parse_mode="Markdown"
         )
         return
 
-    reward = 100
+    # تولید عدد رندوم بین ۶۰ تا ۲۲۰ میوپوینت
+    random_points = random.randint(60, 220)
+
     conn = sqlite3.connect("meow_point.db")
     cursor = conn.cursor()
     cursor.execute(
         "UPDATE users SET wallet = wallet + ?, meow_count = meow_count + 1, last_meow_time = ? WHERE user_id = ?",
-        (reward, now, user_id)
+        (random_points, now, user_id)
     )
     conn.commit()
     conn.close()
 
-    new_wallet = user[2] + reward
     await update.message.reply_text(
-        f"✨ **به شما ۱۰۰ میوپوینت داده شد!** 🎉\n\n"
-        f"💵 میوپوینت‌های داخل جیبت: **{int(new_wallet):,}** میوپوینت",
+        f"🐾 **مییییئو!** شما **{random_points:,}** میوپوینت به دست آوردید!\n"
+        f"⏱️ تایمر بعدی: ۳ دقیقه دیگر.",
         parse_mode="Markdown"
     )
 
-# ==================================================
-# 👤 سیستم پروفایل (خود کاربر یا ریپلی روی بقیه)
-# ==================================================
 async def profile_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    target_user_id = update.effective_user.id
-    target_name = update.effective_user.first_name
-
-    if update.message.reply_to_message:
-        target_user_id = update.message.reply_to_message.from_user.id
-        target_name = update.message.reply_to_message.from_user.first_name
-
-    user = get_user(target_user_id)
-    if not user:
-        await update.message.reply_text("❌ کاربر مورد نظر هنوز در ربات ثبت‌نام نکرده است.")
-        return
-
-    level = get_user_level(user[5])
-    await update.message.reply_text(
-        f"👤 **پروفایل میویی کاربر:** {target_name}\n\n"
-        f"👤 **اسم کاربر:** {user[1]}\n"
-        f"🐱 **اسم گربه:** {user[6]}\n"
-        f"💵 **میوپوینت جیب:** {int(user[2]):,} میو\n"
-        f"🐾 **تعداد میوها/مع‌ها:** {user[5]} بار\n"
-        f"⭐️ **سطح (لول):** {level}\n"
-        f"💳 **شماره حساب بانک:** `{user[4]}`",
-        parse_mode="Markdown"
-    )
-
-# ==================================================
-# 🐾 داشبورد مدیریت گربه (Triggers: پیشی / گربه / اسم گربه)
-# ==================================================
-async def cat_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    user = get_user(user_id)
-    if not user:
-        register_user(user_id, update.effective_user.first_name)
-        user = get_user(user_id)
-
-    cat_name = user[6]
-    cat_level = user[7]
-    cat_title = get_cat_title(cat_level)
-    mps = cat_level * 2  # میزان تولید میوپوینت در ثانیه
-    
-    now = time.time()
-    last_claim = user[10]
-    produced = int((now - last_claim) * mps)
-    
-    food_level = user[8]
-    food_status = "سیره 🟢" if food_level > 50 else ("گشنشه 🟡" if food_level > 20 else "خیلی گشنشه 🔴")
-
-    buttons = [
-        [
-            InlineKeyboardButton("⭐️ ارتقا گربه", callback_data="cat_upgrade"),
-            InlineKeyboardButton("💰 برداشت میوپوینت", callback_data="cat_claim")
-        ],
-        [
-            InlineKeyboardButton("✏️ تغییر اسم گربه", callback_data="cat_rename")
-        ]
-    ]
-
-    await update.message.reply_text(
-        f"🐱 **صفحه اختصاصی پیشی شما**\n\n"
-        f"📛 **اسم گربه:** {cat_name} ({cat_title})\n"
-        f"⭐️ **لول گربه:** {cat_level}\n"
-        f"⚡️ **تولید در ثانیه:** {mps} میوپوینت\n"
-        f"📦 **میوپوینت تولید شده:** {produced:,} میوپوینت\n"
-        f"🍖 **وضعیت غذا:** {food_status} ({food_level}%)\n",
-        reply_markup=InlineKeyboardMarkup(buttons),
-        parse_mode="Markdown"
-    )
-    # ==================================================
-# 🏦 سیستم بانک (باز شدن در لول ۲)
-# ==================================================
-async def bank_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    user = get_user(user_id)
-    if not user:
-        register_user(user_id, update.effective_user.first_name)
-        user = get_user(user_id)
-
-    level = get_user_level(user[5])
-    if level < 2:
-        await update.message.reply_text("❌ سیستم بانک در **لول ۲** باز می‌شود! (با میو زدن لول خود را افزایش دهید)")
-        return
-
-    # محاسبه سود روزانه ۳ درصد
-    now = time.time()
-    last_interest = user[18]
-    bank_balance = user[3]
-    
-    # اگر ۲۴ ساعت (۸۶۴۰۰ ثانیه) گذشته باشد
-    if now - last_interest >= 86400 and bank_balance > 0:
-        days = int((now - last_interest) // 86400)
-        interest_added = bank_balance * ((1.03 ** days) - 1)
-        new_balance = bank_balance + interest_added
-        
-        conn = sqlite3.connect("meow_point.db")
-        cursor = conn.cursor()
-        cursor.execute("UPDATE users SET bank = ?, last_bank_interest = ? WHERE user_id = ?", (new_balance, now, user_id))
-        conn.commit()
-        conn.close()
-        
-        bank_balance = new_balance
-        await send_pv_notify(context, user_id, f"📈 مبلغ {int(interest_added):,} میوپوینت سود روزانه ۳٪ به حساب بانک شما اضافه شد!")
-
-    buttons = [
-        [
-            InlineKeyboardButton("📥 واریز به بانک", callback_data="bank_deposit_prompt"),
-            InlineKeyboardButton("📤 برداشت از بانک", callback_data="bank_withdraw_prompt")
-        ],
-        [
-            InlineKeyboardButton("💸 انتقال با شماره حساب", callback_data="bank_transfer_prompt")
-        ]
-    ]
-
-    await update.message.reply_text(
-        f"🏦 **پنل مدیریت بانک میو**\n\n"
-        f"💳 **شماره حساب اختصاصی شما:**\n`{user[4]}`\n\n"
-        f"💰 **موجودی حساب بانک:** **{int(bank_balance):,}** میوپوینت\n"
-        f"💵 **موجودی جیب:** **{int(user[2]):,}** میوپوینت\n"
-        f"📈 **نرخ سود روزانه:** ۳ درصد",
-        reply_markup=InlineKeyboardMarkup(buttons),
-        parse_mode="Markdown"
-    )
-
-# ==================================================
-# 📥 واریز و برداشت بانک
-# ==================================================
-async def process_bank_action(update: Update, context: ContextTypes.DEFAULT_TYPE, action_type, amount):
-    user_id = update.effective_user.id
-    user = get_user(user_id)
-    
-    if amount <= 0:
-        return "⚠️ لطفاً مبلغ معتبری وارد کنید."
-
-    conn = sqlite3.connect("meow_point.db")
-    cursor = conn.cursor()
-
-    if action_type == "deposit":
-        if user[2] < amount:
-            conn.close()
-            return "❌ موجودی جیب شما کافی نیست!"
-        cursor.execute("UPDATE users SET wallet = wallet - ?, bank = bank + ? WHERE user_id = ?", (amount, amount, user_id))
-        conn.commit()
-        conn.close()
-        await send_pv_notify(context, user_id, f"📥 مبلغ {int(amount):,} میوپوینت به بانک واریز شد.")
-        return f"✅ مبلغ **{int(amount):,}** میوپوینت با موفقیت به بانک واریز شد."
-
-    elif action_type == "withdraw":
-        if user[3] < amount:
-            conn.close()
-            return "❌ موجودی بانک شما کافی نیست!"
-        cursor.execute("UPDATE users SET bank = bank - ?, wallet = wallet + ? WHERE user_id = ?", (amount, amount, user_id))
-        conn.commit()
-        conn.close()
-        await send_pv_notify(context, user_id, f"📤 مبلغ {int(amount):,} میوپوینت از بانک برداشت شد.")
-        return f"✅ مبلغ **{int(amount):,}** میوپوینت با موفقیت از بانک برداشت شد."
-    # ==================================================
-# 🎣 سیستم ماهیگیری و ایموجی‌های ماهی
-# ==================================================
-FISH_DATA = {
-    "🐟": {"name": "ماهی معمولی", "price": 200, "food": 15},
-    "🐠": {"name": "ماهی طلایی", "price": 500, "food": 30},
-    "🦐": {"name": "میگو کوچک", "price": 300, "food": 20},
-    "🦈": {"name": "کوسه کمیاب", "price": 2500, "food": 60},
-    "🐡": {"name": "بادکنک ماهی", "price": 800, "food": 35},
-    "🦑": {"name": "اختاپوس", "price": 1200, "food": 40},
-    "🦦": {"name": "سمور آبی", "price": 1800, "food": 50},
-    "🐙": {"name": "هشت‌پا غول‌پیکر", "price": 3000, "food": 70}
-}
-
-async def fish_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    fish_emoji = random.choice(list(FISH_DATA.keys()))
-    fish_info = FISH_DATA[fish_emoji]
-
-    msg = await update.message.reply_text(f"🎣 در حال انداختن قلاب به آب...\n\n{fish_emoji}")
-    await asyncio.sleep(1.5)
-
-    buttons = [
-        [
-            InlineKeyboardButton("💰 فروش فوری", callback_data=f"fish_sell_{fish_emoji}"),
-            InlineKeyboardButton("🍖 بده پیشی بخوره", callback_data=f"fish_feed_{fish_emoji}")
-        ],
-        [
-            InlineKeyboardButton("❄️ ببر تو یخچال", callback_data=f"fish_keep_{fish_emoji}")
-        ]
-    ]
-
-    await msg.edit_text(
-        f"🎉 **شما یک {fish_info['name']} ({fish_emoji}) صید کردید!**\n\n"
-        f"💵 ارزش فروش: **{fish_info['price']:,}** میوپوینت\n"
-        f"🍖 میزان سیرکنندگی: **{fish_info['food']}%**\n\n"
-        f"انتخاب کنید چی کارش کنم؟",
-        reply_markup=InlineKeyboardMarkup(buttons),
-        parse_mode="Markdown"
-    )
-
-# ==================================================
-# ❄️ سیستم یخچال (نمایش و انتخاب ماهی‌ها)
-# ==================================================
-async def fridge_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    conn = sqlite3.connect("meow_point.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT fish_type, count FROM fridge WHERE user_id = ?", (user_id,))
-    items = cursor.fetchall()
-    conn.close()
-
-    if not items:
-        await update.message.reply_text("❄️ **یخچال شما خالی است!** می‌توانید با دستور `ماهی` صید کنید.")
-        return
-
-    text = "❄️ **محتویات یخچال شما:**\n\n"
-    buttons = []
-    for fish_emoji, count in items:
-        if count > 0:
-            fish_info = FISH_DATA.get(fish_emoji, {"name": "ماهی"})
-            text += f"{fish_emoji} **{fish_info['name']}:** {count} عدد\n"
-            buttons.append([
-                InlineKeyboardButton(f"🍖 دادن {fish_emoji} به پیشی", callback_data=f"fridge_feed_{fish_emoji}"),
-                InlineKeyboardButton(f"💰 فروش {fish_emoji}", callback_data=f"fridge_sell_{fish_emoji}")
-            ])
-
-    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
-
-# ==================================================
-# 💸 انتقال مستقیم در چت (انتقال میویی - حداکثر ۶۰۰کا)
-# ==================================================
-async def direct_transfer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    user = get_user(user_id)
-    
-    if not update.message.reply_to_message:
-        await update.message.reply_text("⚠️ لطفاً این دستور را روی پیام فردی که می‌خواهید برایش واریز کنید ریپلی کنید.")
-        return
-
-    target_id = update.message.reply_to_message.from_user.id
-    target_name = update.message.reply_to_message.from_user.first_name
-
-    if target_id == user_id:
-        await update.message.reply_text("❌ نمی‌توانید به خودتان انتقال دهید!")
-        return
-
-    parts = update.message.text.split()
-    amount = parse_amount(parts[-1])
-
-    if amount <= 0:
-        await update.message.reply_text("⚠️ لطفاً یک مبلغ معتبر وارد کنید.")
-        return
-
-    if amount > 600000:
-        await update.message.reply_text("❌ سقف انتقال مستقیم چت **۶۰۰,۰۰۰ (۶۰۰کا)** است!\nبرای انتقال مبالغ بالاتر از **بانک و شماره حساب** استفاده کنید.")
-        return
-
-    if user[2] < amount:
-        await update.message.reply_text("❌ موجودی کیف پول (جیب) شما کافی نیست!")
-        return
-
-    # ذخیره در context برای تایید
-    context.user_data['pending_transfer'] = {
-        'target_id': target_id,
-        'target_name': target_name,
-        'amount': amount
-    }
-
-    buttons = [[
-        InlineKeyboardButton("✅ تایید", callback_data="confirm_direct_transfer"),
-        InlineKeyboardButton("❌ کنسل", callback_data="cancel_direct_transfer")
-    ]]
-
-    await update.message.reply_text(
-        f"❓ **آیا اطمینان دارید از انتقال؟**\n\n"
-        f"👤 به کاربر: **{target_name}**\n"
-        f"💵 مبلغ: **{int(amount):,}** میوپوینت",
-        reply_markup=InlineKeyboardMarkup(buttons),
-        parse_mode="Markdown"
-    )
-    # ==================================================
-# 🏭 سیستم کارخانه (باز شدن در لول ۴)
-# ==================================================
-PRODUCTS = {
-    1: {"name": "شکلات 🍫", "cost": 3, "base_sell": 6, "time": 60, "min_fac_level": 1},
-    2: {"name": "آبنبات 🍬", "cost": 10, "base_sell": 20, "time": 120, "min_fac_level": 2},
-    3: {"name": "پشمک 🍥", "cost": 30, "base_sell": 60, "time": 300, "min_fac_level": 3},
-    4: {"name": "کیک 🎂", "cost": 100, "base_sell": 220, "time": 600, "min_fac_level": 4},
-    5: {"name": "هواپیمای مسافربری ✈️", "cost": 1000, "base_sell": 2500, "time": 1800, "min_fac_level": 5},
-    6: {"name": "جنگنده 🚀", "cost": 5000, "base_sell": 12000, "time": 3600, "min_fac_level": 6},
-    7: {"name": "ساختمان 🏢", "cost": 20000, "base_sell": 50000, "time": 7200, "min_fac_level": 7}
-}
-
-def calculate_dynamic_sell_price(base_sell):
-    # تغییر قیمت بر اساس ساعت واقعی سیستم
-    current_hour = datetime.now().hour
-    if current_hour == 22:  # ۱۰ شب
-        return int(base_sell)
-    elif current_hour == 6:  # ۶ صبح
-        return int(base_sell * 1.5)
-    elif current_hour == 1:  # ۱ بامداد
-        return int(base_sell * 1.2)
-    else:
-        # نوسان رندوم در بقیه ساعات
-        factor = random.choice([0.9, 1.1, 1.3, 0.85, 1.15])
-        return max(1, int(base_sell * factor))
-
-async def factory_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    user = get_user(user_id)
-    if not user:
-        register_user(user_id, update.effective_user.first_name)
-        user = get_user(user_id)
-
-    level = get_user_level(user[5])
-    if level < 4:
-        await update.message.reply_text("❌ سیستم کارخانه در **لول ۴** باز می‌شود! (با میو زدن لول بگیرید)")
-        return
-
-    fac_level = user[11]
-    capacity = user[12]
-    producing_item = user[13]
-
-    if producing_item:
-        produce_start = user[15]
-        duration = user[16]
-        elapsed = time.time() - produce_start
-        rem = duration - elapsed
-
-        if rem > 0:
-            mins, secs = divmod(int(rem), 60)
-            buttons = [[InlineKeyboardButton("🛑 اتمام تولید (انصراف و بازگشت پول)", callback_data="factory_cancel")]]
-            await update.message.reply_text(
-                f"🏭 **کارخانه در حال ساخت محصول:** {producing_item}\n\n"
-                f"⏱ زمان باقی‌مانده تا اتمام: **{mins} دقیقه و {secs} ثانیه**\n"
-                f"📦 تعداد: {user[14]:,} عدد",
-                reply_markup=InlineKeyboardMarkup(buttons),
-                parse_mode="Markdown"
-            )
-            return
-        else:
-            # ساخت تمام شده
-            item_info = next((v for k, v in PRODUCTS.items() if v['name'] == producing_item), None)
-            current_sell_price = calculate_dynamic_sell_price(item_info['base_sell']) if item_info else 10
-            total_sell = current_sell_price * user[14]
-
-            buttons = [[InlineKeyboardButton(f"💰 فروش محصول ({current_sell_price} میو per/item)", callback_data="factory_sell")]]
-            await update.message.reply_text(
-                f"🎉 **تولید محصول {producing_item} با موفقیت به پایان رسید!**\n\n"
-                f"📦 تعداد تولید شده: **{user[14]:,}** عدد\n"
-                f"📊 قیمت فعلی بازار (ساعت {datetime.now().hour}): **{current_sell_price}** میوپوینت بر دانه\n"
-                f"💵 سود کل پیشنهادی: **{total_sell:,}** میوپوینت",
-                reply_markup=InlineKeyboardMarkup(buttons),
-                parse_mode="Markdown"
-            )
-            return
-
-    # منوی ساخت محصول
-    buttons = [
-        [InlineKeyboardButton("⚙️ ارتقا کارخانه (افزایش سرعت و ظرفیت)", callback_data="factory_upgrade")]
-    ]
-
-    text = f"🏭 **پنل مدیریت کارخانه**\n\n"
-    text += f"⭐️ **سطح کارخانه:** {fac_level}\n"
-    text += f"📦 **ظرفیت انبار:** {capacity:,} کالا\n\n"
-    text += "🛠 **محصولات قابل ساخت:**\n"
-
-    for pid, pdata in PRODUCTS.items():
-        if fac_level >= pdata['min_fac_level']:
-            total_cost = pdata['cost'] * capacity
-            text += f"🔹 {pdata['name']} | هزینه ساخت: {total_cost:,} میو\n"
-            buttons.append([InlineKeyboardButton(f"ساخت {pdata['name']}", callback_data=f"factory_start_{pid}")])
-        else:
-            text += f"🔒 {pdata['name']} (نیازمند لول {pdata['min_fac_level']} کارخانه)\n"
-
-    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
-# ==================================================
-# 🟢 بخش ۶-الف: کازینو، پروفایل، پنل ادمین، راهنما و پردازشگر متنی
-# ==================================================
-
-# لابی‌های فعال کازینو
-CASINO_LOBBIES = {}
-
-# ==================================================
-# 🎰 ۱. منوی اصلی کازینو
-# ==================================================
-async def casino_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    buttons = [
-        [InlineKeyboardButton("🎰 اسلات", callback_data="casino_select_slot")],
-        [InlineKeyboardButton("🎲 تاس", callback_data="casino_select_dice")],
-        [InlineKeyboardButton("🎳 بولینگ", callback_data="casino_select_bowling")]
-    ]
-    await update.message.reply_text(
-        "🎰 **به کازینو میوپوینت خوش آمدید!**\n\nلطفاً بازی مورد نظر خود را انتخاب کنید:",
-        reply_markup=InlineKeyboardMarkup(buttons),
-        parse_mode="Markdown"
-    )
-
-# ==================================================
-# 👤 ۲. نمایش پروفایل کاربر + میو/مع مانده تا لول بعدی
-# ==================================================
-async def profile_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # بررسی ریپلی یا کاربر جاری
     target_user = update.message.reply_to_message.from_user if update.message.reply_to_message else update.effective_user
-    user_id = target_user.id
+    user = get_user(target_user.id)
 
-    conn = sqlite3.connect("meow_point.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT wallet, bank, cat_level, cat_name, meow_count FROM users WHERE user_id = ?", (user_id,))
-    row = cursor.fetchone()
-    conn.close()
+    wallet, bank, card_num = user[1], user[2], user[3]
+    cat_level, cat_name, meow_count = user[4], user[5], user[8]
 
-    if not row:
-        await update.message.reply_text("❌ اطلاعات کاربر در دیتابیس یافت نشد.")
-        return
-
-    wallet, bank, cat_level, cat_name, meow_count = row[0] or 0, row[1] or 0, row[2] or 1, row[3] or "پیشی", row[4] or 0
-
-    # محاسبه لول و تعداد میو مانده تا لول بعدی (هر ۱۰ میو = ۱ لول)
+    # محاسبه دقیق لول کاربر
     user_level = (meow_count // 10) + 1
     meows_needed = 10 - (meow_count % 10)
     if meows_needed == 0:
@@ -580,183 +207,404 @@ async def profile_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     profile_text = (
         f"👤 **پروفایل کاربر:** {target_user.first_name}\n"
-        f"🆔 **شناسه:** `{user_id}`\n"
+        f"🆔 **شناسه تلگرام:** `{target_user.id}`\n"
+        f"💳 **شماره حساب بانکی:** `{card_num}`\n"
         f"🏆 **سطح (لول) کاربر:** {user_level}\n"
-        f"🐾 **تعداد میو/مع ثبت‌شده:** {meow_count:,}\n"
+        f"🐾 **تعداد کل میو/مع:** {meow_count:,}\n"
         f"🎯 **میو/مع مانده تا لول بعدی:** **{meows_needed}** عدد\n\n"
-        f"💵 **موجودی کیف پول:** {int(wallet):,} میو\n"
-        f"🏦 **موجودی بانک:** {int(bank):,} میو\n"
-        f"🐱 **پیشی:** {cat_name} (لول {cat_level})"
+        f"💵 **کیف پول:** {int(wallet):,} میو\n"
+        f"🏦 **بانک:** {int(bank):,} میو\n"
+        f"🐱 **پیشی شما:** {cat_name} (لول {cat_level})"
     )
 
     await update.message.reply_text(profile_text, parse_mode="Markdown")
+    # ==================================================
+# 🟢 بخش ۲-ب: مدیریت اختصاصی پیشی
+# ==================================================
 
+async def cat_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user = get_user(user_id)
+
+    cat_level = user[4]
+    cat_name = user[5]
+    cat_food = user[6]
+    last_claim = user[7]
+
+    mps = cat_level * 2
+    now = time.time()
+    produced = int((now - last_claim) * mps) if last_claim > 0 else 0
+
+    upgrade_cost = cat_level * 500
+
+    buttons = [
+        [InlineKeyboardButton(f"📥 برداشت تولیدات ({produced:,} میو)", callback_data="cat_claim")],
+        [InlineKeyboardButton(f"🚀 ارتقا لول گربه ({upgrade_cost:,} میو)", callback_data="cat_upgrade")],
+        [InlineKeyboardButton("✍️ تغییر نام پیشی", callback_data="cat_change_name")]
+    ]
+
+    text = (
+        f"🐱 **پنل اختصاصی {cat_name}**\n\n"
+        f"⭐ **سطح گربه:** {cat_level}\n"
+        f"🍗 **سیر بودن:** {cat_food}%\n"
+        f"⚡ **نرخ تولید:** {mps} میوپوینت در ثانیه\n"
+        f"💰 **میوپوینت آماده برداشت:** **{produced:,}** میو"
+    )
+
+    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
+                        # ==================================================
+# 🟢 بخش ۳-الف: سیستم کامل بانک
 # ==================================================
-# 👑 ۳. پنل ادمین جامع (افزایش دلخواه سطح گربه + مکس)
-# ==================================================
-async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
+
+async def bank_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user = get_user(user_id)
+
+    meow_count = user[8]
+    user_level = (meow_count // 10) + 1
+
+    if user_level < 2:
+        await update.message.reply_text("🔒 **بخش بانک نیازمند رسیدن کاربر به لول ۲ است!**")
         return
 
-    text = update.message.text.split(maxsplit=1)
-    cmd = text[0]
+    wallet, bank, card_num = user[1], user[2], user[3]
 
-    # راهنمای پنل ادمین
-    if cmd == "/admin":
-        await update.message.reply_text(
-            "👑 **پنل مدیریت ادمین ربات**\n\n"
-            "▫️ `/give_points [user_id] [مبلغ]` - اهدای میوپوینت\n"
-            "▫️ `/add_cat [user_id] [تعداد]` - افزایش لول گربه به تعداد دلخواه\n"
-            "▫️ `/set_cat [user_id] [سطح]` - تنظیم دقیق سطح گربه کاربر\n"
-            "▫️ `/max_cat [user_id]` - فول ارتقا دادن گربه کاربر (لول ۱۰۰)\n"
-            "▫️ `/bc [متن پیام]` - ارسال پیام همگانی\n"
-            "▫️ `/stats` - مشاهده آمار کامل کاربران و موجودی‌ها",
-            parse_mode="Markdown"
-        )
+    text = (
+        f"🏦 **بانک مرکزی میوپوینت**\n\n"
+        f"💳 **شماره حساب شما:** `{card_num}`\n"
+        f"💵 **موجودی کیف پول:** {int(wallet):,} میو\n"
+        f"🏦 **موجودی حساب بانک:** {int(bank):,} میو\n"
+        f"📈 **سود روزانه بانک:** ۳٪\n\n"
+        f"🔹 **دستورات بانک:**\n"
+        f"▫️ `واریز [مبلغ]`\n"
+        f"▫️ `برداشت [مبلغ]`\n"
+        f"▫️ `انتقال بانکی [شماره حساب] [مبلغ]`"
+    )
 
-    # مشاهده آمار ربات
-    elif cmd == "/stats":
-        conn = sqlite3.connect("meow_point.db")
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*), SUM(wallet), SUM(bank) FROM users")
-        row = cursor.fetchone()
-        total_users, total_wallet, total_bank = row[0] or 0, row[1] or 0, row[2] or 0
-        conn.close()
+    await update.message.reply_text(text, parse_mode="Markdown")
 
-        await update.message.reply_text(
-            f"📊 **آمار کلی ربات:**\n\n"
-            f"👥 تعداد کل کاربران: **{total_users:,}** نفر\n"
-            f"💵 کل میوپوینت جیب کاربران: **{int(total_wallet):,}** میو\n"
-            f"🏦 کل میوپوینت بانک کاربران: **{int(total_bank):,}** میو",
-            parse_mode="Markdown"
-        )
+async def bank_deposit_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    text_parts = update.message.text.split()
 
-    # دادن میوپوینت به کاربر
-    elif cmd == "/give_points":
-        sub_parts = update.message.text.split()
-        if len(sub_parts) >= 3:
-            target = int(sub_parts[1])
-            amt = parse_amount(sub_parts[2])
-            
-            conn = sqlite3.connect("meow_point.db")
-            conn.cursor().execute("UPDATE users SET wallet = wallet + ? WHERE user_id = ?", (amt, target))
-            conn.commit()
-            conn.close()
+    if len(text_parts) < 2:
+        await update.message.reply_text("⚠️ لطفاً مبلغ را وارد کنید. مثال: `واریز 5000` یا `واریز 10k`", parse_mode="Markdown")
+        return
 
-            await update.message.reply_text(f"✅ مبلغ **{int(amt):,}** میوپوینت به کاربر `{target}` داده شد.", parse_mode="Markdown")
-            await send_pv_notify(context, target, f"🎁 مبلغ **{int(amt):,}** میوپوینت توسط ادمین به کیف پول شما اضافه شد!")
+    try:
+        amount = parse_amount(text_parts[1])
+    except Exception:
+        await update.message.reply_text("❌ مبلغ وارد شده معتبر نیست.")
+        return
 
-    # افزایش لول گربه به تعداد دلخواه
-    elif cmd == "/add_cat":
-        sub_parts = update.message.text.split()
-        if len(sub_parts) >= 3:
-            target = int(sub_parts[1])
-            add_levels = int(sub_parts[2])
-            
-            conn = sqlite3.connect("meow_point.db")
-            conn.cursor().execute("UPDATE users SET cat_level = cat_level + ? WHERE user_id = ?", (add_levels, target))
-            conn.commit()
-            conn.close()
+    user = get_user(user_id)
+    if user[1] < amount:
+        await update.message.reply_text(f"❌ موجودی کیف پول کافی نیست! موجودی: {int(user[1]):,} میو")
+        return
 
-            await update.message.reply_text(f"✅ سطح گربه کاربر `{target}` به تعداد **{add_levels}** لول افزایش یافت.", parse_mode="Markdown")
-            await send_pv_notify(context, target, f"🚀 سطح گربه شما **{add_levels}** لول توسط ادمین ارتقا یافت!")
+    conn = sqlite3.connect("meow_point.db")
+    cursor = conn.cursor()
+    cursor.execute("UPDATE users SET wallet = wallet - ?, bank = bank + ? WHERE user_id = ?", (amount, amount, user_id))
+    conn.commit()
+    conn.close()
 
-    # تنظیم دقیق لول گربه
-    elif cmd == "/set_cat":
-        sub_parts = update.message.text.split()
-        if len(sub_parts) >= 3:
-            target = int(sub_parts[1])
-            new_level = int(sub_parts[2])
-            
-            conn = sqlite3.connect("meow_point.db")
-            conn.cursor().execute("UPDATE users SET cat_level = ? WHERE user_id = ?", (new_level, target))
-            conn.commit()
-            conn.close()
+    await update.message.reply_text(f"✅ مبلغ **{int(amount):,}** میوپوینت به حساب بانک واریز شد.", parse_mode="Markdown")
 
-            await update.message.reply_text(f"✅ سطح گربه کاربر `{target}` روی **{new_level}** تنظیم شد.", parse_mode="Markdown")
+async def bank_withdraw_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    text_parts = update.message.text.split()
 
-    # فول ارتقا دادن گربه کاربر
-    elif cmd == "/max_cat":
-        sub_parts = update.message.text.split()
-        if len(sub_parts) >= 2:
-            target = int(sub_parts[1])
-            
-            conn = sqlite3.connect("meow_point.db")
-            conn.cursor().execute("UPDATE users SET cat_level = 100 WHERE user_id = ?", (target,))
-            conn.commit()
-            conn.close()
+    if len(text_parts) < 2:
+        await update.message.reply_text("⚠️ لطفاً مبلغ را وارد کنید. مثال: `برداشت 5000`", parse_mode="Markdown")
+        return
 
-            await update.message.reply_text(f"🚀 لول گربه کاربر `{target}` به **۱۰۰ (حداکثر)** رسید.", parse_mode="Markdown")
-            await send_pv_notify(context, target, "🚀 گربه شما توسط ادمین به حداکثر سطح (لول ۱۰۰) ارتقا یافت!")
+    try:
+        amount = parse_amount(text_parts[1])
+    except Exception:
+        await update.message.reply_text("❌ مبلغ وارد شده معتبر نیست.")
+        return
 
-    # ارسال پیام همگانی
-    elif cmd == "/bc":
-        if len(text) < 2:
-            await update.message.reply_text("⚠️ لطفاً متن پیام همگانی را وارد کنید.\nمثال: `/bc سلام به همه`", parse_mode="Markdown")
-            return
+    user = get_user(user_id)
+    if user[2] < amount:
+        await update.message.reply_text(f"❌ موجودی بانک کافی نیست! موجودی: {int(user[2]):,} میو")
+        return
 
-        bc_message = text[1]
-        conn = sqlite3.connect("meow_point.db")
-        cursor = conn.cursor()
-        cursor.execute("SELECT user_id FROM users")
-        users = cursor.fetchall()
-        conn.close()
+    conn = sqlite3.connect("meow_point.db")
+    cursor = conn.cursor()
+    cursor.execute("UPDATE users SET bank = bank - ?, wallet = wallet + ? WHERE user_id = ?", (amount, amount, user_id))
+    conn.commit()
+    conn.close()
 
-        success, failed = 0, 0
-        await update.message.reply_text(f"⏳ در حال ارسال پیام به {len(users)} کاربر...")
-
-        for u in users:
-            try:
-                await context.bot.send_message(
-                    chat_id=u[0], 
-                    text=f"📢 **پیام عمومی مدیریت:**\n\n{bc_message}", 
-                    parse_mode="Markdown"
-                )
-                success += 1
-                await asyncio.sleep(0.04)
-            except Exception:
-                failed += 1
-
-        await update.message.reply_text(f"✅ **پایان ارسال پیام همگانی:**\n\n🟢 موفق: {success}\n🔴 ناموفق: {failed}")
-
+    await update.message.reply_text(f"✅ مبلغ **{int(amount):,}** میوپوینت از بانک برداشت شد.", parse_mode="Markdown")
+        # ==================================================
+# 🟢 بخش ۳-ب: سیستم انتقال وجه بدون خطا
 # ==================================================
-# 📜 ۴. راهنمای دستورات
-# ==================================================
-async def help_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+async def bank_transfer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    text_parts = update.message.text.split()
+
+    if len(text_parts) < 3:
+        await update.message.reply_text("⚠️ فرمت صحیح: `انتقال بانکی [شماره حساب] [مبلغ]`\nمثال: `انتقال بانکی 6037001234 10k`", parse_mode="Markdown")
+        return
+
+    target_card = text_parts[1].strip()
+    try:
+        amount = parse_amount(text_parts[2])
+    except Exception:
+        await update.message.reply_text("❌ مبلغ وارد شده معتبر نیست.")
+        return
+
+    if amount < 100:
+        await update.message.reply_text("⚠️ حداقل مبلغ برای انتقال بانکی ۱۰۰ میوپوینت است.")
+        return
+
+    sender = get_user(user_id)
+    if sender[2] < amount:
+        await update.message.reply_text(f"❌ موجودی حساب بانک شما کافی نیست! موجودی بانک: {int(sender[2]):,} میو")
+        return
+
+    conn = sqlite3.connect("meow_point.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id FROM users WHERE card_number = ?", (target_card,))
+    target_row = cursor.fetchone()
+
+    if not target_row:
+        conn.close()
+        await update.message.reply_text("❌ شماره حساب مقصد در سیستم پیدا نشد!")
+        return
+
+    target_id = target_row[0]
+
+    if target_id == user_id:
+        conn.close()
+        await update.message.reply_text("❌ انتقال به شماره حساب خودتان امکان‌پذیر نیست!")
+        return
+
+    # کسر از بانک فرستنده و افزوده شدن به بانک گیرنده
+    cursor.execute("UPDATE users SET bank = bank - ? WHERE user_id = ?", (amount, user_id))
+    cursor.execute("UPDATE users SET bank = bank + ? WHERE user_id = ?", (amount, target_id))
+    conn.commit()
+    conn.close()
+
     await update.message.reply_text(
-        "📖 **راهنمای جامع دستورات ربات میوپوینت:**\n\n"
-        "🐾 `میو` یا `مع` - دریافت ۱۰۰ میوپوینت رایگان (هر ۳ دقیقه)\n"
-        "👤 `پروفایل` یا `میوهاش` - مشاهده پروفایل و لول (با ریپلی)\n"
-        "🐱 `پیشی` یا `گربه` - پنل مدیریت پیشی و ارتقا\n"
-        "🏦 `بانک` - پنل بانک، سود روزانه ۳٪ و انتقال (لول ۲)\n"
-        "🎣 `ماهی` - صید ماهی‌های مختلف و کمیاب\n"
-        "❄️ `یخچال` - انبار ماهی‌های صید شده\n"
-        "🏭 `کارخونه` - ساخت محصولات و فروش با نرخ متغیر (لول ۴)\n"
-        "🎰 `کازینو` - بازی‌های شرطی اسلات، تاس و بولینگ ۱ تا ۳ نفره\n"
-        "💸 `انتقال میویی [مبلغ]` - انتقال چت مستقیم (با ریپلی)\n"
-        "📜 `دستورات ربات` - نمایش همین راهنما",
+        f"✅ **انتقال بانکی با موفقیت انجام شد!**\n\n"
+        f"💳 شماره حساب مقصد: `{target_card}`\n"
+        f"💰 مبلغ: **{int(amount):,}** میوپوینت",
         parse_mode="Markdown"
     )
 
+    await send_pv_notify(
+        context, target_id,
+        f"🏦 **واریز به حساب بانک!**\nمبلغ **{int(amount):,}** میوپوینت از شماره حساب `{sender[3]}` به حساب شما واریز شد."
+    )
+
+async def direct_transfer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.reply_to_message:
+        await update.message.reply_text("⚠️ این دستور را روی پیام کاربر مقصد ریپلی کنید!\nمثال: `انتقال میویی 5000`", parse_mode="Markdown")
+        return
+
+    user_id = update.effective_user.id
+    target_user = update.message.reply_to_message.from_user
+    
+    if target_user.id == user_id:
+        await update.message.reply_text("❌ انتقال میوپوینت به خودتان مجاز نیست!")
+        return
+
+    parts = update.message.text.split()
+    if len(parts) < 2:
+        await update.message.reply_text("⚠️ لطفاً مبلغ را وارد کنید. مثال: `انتقال میویی 10k`", parse_mode="Markdown")
+        return
+
+    try:
+        amount = parse_amount(parts[1])
+    except Exception:
+        await update.message.reply_text("❌ مبلغ وارد شده معتبر نیست.")
+        return
+
+    user = get_user(user_id)
+    if user[1] < amount:
+        await update.message.reply_text(f"❌ موجودی کیف پول کافی نیست! موجودی: {int(user[1]):,} میو")
+        return
+
+    context.user_data['pending_transfer'] = {
+        'target_id': target_user.id,
+        'target_name': target_user.first_name,
+        'amount': amount
+    }
+
+    buttons = [
+        [
+            InlineKeyboardButton("✅ تایید انتقال", callback_data="confirm_direct_transfer"),
+            InlineKeyboardButton("❌ لغو", callback_data="cancel_direct_transfer")
+        ]
+    ]
+
+    await update.message.reply_text(
+        f"❓ **آیا از انتقال مبلغ {int(amount):,} میوپوینت به {target_user.first_name} اطمینان دارید؟**",
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode="Markdown"
+                                                                                          )
+    # ==================================================
+# 🟢 بخش ۴-الف: سیستم صید ماهی و یخچال
 # ==================================================
-# 📩 ۵. پردازش ورودی‌های متنی اختصاصی (تغییر نام گربه + مبلغ دلخواه کازینو)
+
+async def fish_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+
+    rand = random.random()
+    if rand < 0.50:
+        emoji = "🐟"
+    elif rand < 0.80:
+        emoji = "🐠"
+    elif rand < 0.95:
+        emoji = "🐡"
+    else:
+        emoji = "🦈"
+
+    fish_info = FISH_DATA[emoji]
+
+    buttons = [
+        [InlineKeyboardButton(f"💰 فروش ({fish_info['price']:,} میو)", callback_data=f"fish_sell_{emoji}")],
+        [InlineKeyboardButton(f"🍖 دادن به پیشی (+{fish_info['food']}% غذا)", callback_data=f"fish_feed_{emoji}")],
+        [InlineKeyboardButton("❄️ ذخیره در یخچال", callback_data=f"fish_keep_{emoji}")]
+    ]
+
+    await update.message.reply_text(
+        f"🎣 **شما یک {fish_info['name']} ({emoji}) صید کردید!**\n\nاقدام مورد نظر را انتخاب کنید:",
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode="Markdown"
+    )
+
+async def fridge_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    conn = sqlite3.connect("meow_point.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT fish_type, count FROM fridge WHERE user_id = ? AND count > 0", (user_id,))
+    rows = cursor.fetchall()
+    conn.close()
+
+    if not rows:
+        await update.message.reply_text("❄️ **یخچال شما خالی است!**")
+        return
+
+    text = "❄️ **محتویات یخچال ماهی شما:**\n\n"
+    for row in rows:
+        f_type, count = row[0], row[1]
+        info = FISH_DATA.get(f_type, {"name": "ماهی"})
+        text += f"▫️ {f_type} {info['name']}: **{count}** عدد\n"
+
+    await update.message.reply_text(text, parse_mode="Markdown")
+    # ==================================================
+# 🟢 بخش ۴-ب: مدیریت تولید و فروش محصولات کارخانه
 # ==================================================
+
+async def factory_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user = get_user(user_id)
+
+    meow_count = user[8]
+    user_level = (meow_count // 10) + 1
+
+    if user_level < 4:
+        await update.message.reply_text("🔒 **بخش کارخانه نیازمند لول ۴ است!**")
+        return
+
+    factory_level = user[10]
+    producing_item = user[11]
+    produce_amount = user[12]
+    produce_start_time = user[13]
+
+    if producing_item:
+        item_info = next((v for k, v in PRODUCTS.items() if v['name'] == producing_item), None)
+        elapsed = time.time() - produce_start_time
+        total_time = item_info['time'] if item_info else 100
+
+        if elapsed >= total_time:
+            dynamic_price = calculate_dynamic_sell_price(item_info['base_sell']) if item_info else 1000
+            total_sell = dynamic_price * produce_amount
+
+            buttons = [[InlineKeyboardButton(f"💰 فروش محصولات ({total_sell:,} میو)", callback_data="factory_sell")]]
+            await update.message.reply_text(
+                f"🏭 **تولید محصول {producing_item} به پایان رسید!**\n"
+                f"📦 تعداد: {produce_amount} عدد\n"
+                f"📈 نرخ فعلی بازار: {dynamic_price:,} میو بر هر عدد\n\n"
+                f"جهت دریافت سود کلیک کنید:",
+                reply_markup=InlineKeyboardMarkup(buttons),
+                parse_mode="Markdown"
+            )
+        else:
+            rem = int(total_time - elapsed)
+            buttons = [[InlineKeyboardButton("🛑 لغو تولید (بازگشت اصل پول)", callback_data="factory_cancel")]]
+            await update.message.reply_text(
+                f"🏭 **کارخانه در حال تولید {producing_item} است...**\n"
+                f"⏱️ زمان باقی‌مانده: {rem} ثانیه",
+                reply_markup=InlineKeyboardMarkup(buttons),
+                parse_mode="Markdown"
+            )
+    else:
+        text = f"🏭 **پنل کارخانه (لول {factory_level})**\n\nمحصول مورد نظر جهت ساخت را انتخاب کنید:"
+        buttons = []
+        for k, v in PRODUCTS.items():
+            buttons.append([InlineKeyboardButton(f"📦 {v['name']} (هزینه: {v['cost']:,} میو)", callback_data=f"factory_start_{k}")])
+
+        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
+        # ==================================================
+# 🟢 بخش ۵-الف: ساختار کازینو و انتخاب پیش‌بینی
+# ==================================================
+
+CASINO_LOBBIES = {}
+
+async def casino_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    buttons = [
+        [InlineKeyboardButton("🎰 اسلات", callback_data="casino_select_slot")],
+        [InlineKeyboardButton("🎲 تاس (عادی + پیش‌بینی زوج/فرد)", callback_data="casino_select_dice")],
+        [InlineKeyboardButton("🎳 بولینگ", callback_data="casino_select_bowling")]
+    ]
+    await update.message.reply_text(
+        "🎰 **کازینو میوپوینت:**\nلطفاً بازی مورد نظر خود را انتخاب کنید:",
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode="Markdown"
+    )
+
+async def casino_dice_options(query):
+    buttons = [
+        [
+            InlineKeyboardButton("🎯 ۱ نفره عادی", callback_data="casino_mode_dice_1"),
+            InlineKeyboardButton("👥 ۲ نفره", callback_data="casino_mode_dice_2"),
+            InlineKeyboardButton("👨‍👩‍👦 ۳ نفره", callback_data="casino_mode_dice_3")
+        ],
+        [
+            InlineKeyboardButton("🔵 پیش‌بینی تاس «زوج» (۲x)", callback_data="casino_dice_even"),
+            InlineKeyboardButton("🔴 پیش‌بینی تاس «فرد» (۲x)", callback_data="casino_dice_odd")
+        ]
+    ]
+    await query.edit_message_text(
+        "🎲 **تنظیمات بازی تاس:**\nحالت بازی یا پیش‌بینی زوج/فرد را انتخاب کنید:",
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode="Markdown"
+    )
+    # ==================================================
+# 🟢 بخش ۵-ب: پردازشگر متنی بدون خطا (گروه اولویت بالا)
+# ==================================================
+
 async def custom_text_inputs_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
 
-    # قابلیت انصراف سریع
+    # انصراف در صورت ارسال کلمات خاص
     if text.lower() in ["انصراف", "لغو", "/cancel"]:
         if context.user_data.get('waiting_for_cat_name') or context.user_data.get('casino_custom'):
             context.user_data.pop('waiting_for_cat_name', None)
             context.user_data.pop('casino_custom', None)
-            await update.message.reply_text("❌ عملیات جاری با موفقیت لغو شد.")
+            await update.message.reply_text("❌ عملیات جاری لغو گردید.")
             return
 
-    # ۱. پردازش تغییر نام گربه
+    # پردازش تغییر نام پیشی
     if context.user_data.get('waiting_for_cat_name'):
         if len(text) > 15 or len(text) < 1:
-            await update.message.reply_text("❌ نام گربه باید بین ۱ تا ۱۵ کاراکتر باشد. لطفاً دوباره ارسال کنید:")
+            await update.message.reply_text("❌ نام گربه باید بین ۱ تا ۱۵ کاراکتر باشد.")
             return
 
         conn = sqlite3.connect("meow_point.db")
@@ -765,113 +613,114 @@ async def custom_text_inputs_handler(update: Update, context: ContextTypes.DEFAU
         conn.close()
 
         context.user_data.pop('waiting_for_cat_name', None)
-        await update.message.reply_text(f"🎉 **نام پیشی شما با موفقیت به «{text}» تغییر یافت!**", parse_mode="Markdown")
+        await update.message.reply_text(f"🎉 نام پیشی به **«{text}»** تغییر کرد!", parse_mode="Markdown")
         return
 
-    # ۲. پردازش مبلغ دلخواه شرط‌بندی کازینو
+    # پردازش شرط دلخواه کازینو
     casino_data = context.user_data.get('casino_custom')
     if casino_data:
         try:
             bet_amount = parse_amount(text)
         except Exception:
-            await update.message.reply_text("❌ مبلغ وارد شده معتبر نیست! لطفاً عددی مانند `20k` یا `15000` فرستاده یا «انصراف» را ارسال کنید.")
+            await update.message.reply_text("❌ مبلغ معتبر نیست! مثلاً `20k` یا «انصراف» را بفرستید.")
             return
 
         if bet_amount < 100:
-            await update.message.reply_text("⚠️ حداقل مبلغ شرط‌بندی ۱۰۰ میوپوینت است.")
+            await update.message.reply_text("⚠️ حداقل شرط ۱۰۰ میوپوینت است.")
             return
 
         user = get_user(user_id)
-        if user[2] < bet_amount:
-            await update.message.reply_text(f"❌ موجودی شما کافی نیست! موجودی فعلی: {int(user[2]):,} میو")
+        if user[1] < bet_amount:
+            await update.message.reply_text(f"❌ موجودی کافی نیست! موجودی: {int(user[1]):,} میو")
             return
 
         context.user_data.pop('casino_custom', None)
         game_type = casino_data['game_type']
         players_count = casino_data['players']
+        prediction = casino_data.get('prediction', None)
 
-        # کسر ورودی
         conn = sqlite3.connect("meow_point.db")
         conn.cursor().execute("UPDATE users SET wallet = wallet - ? WHERE user_id = ?", (bet_amount, user_id))
         conn.commit()
         conn.close()
 
-        game_emoji = {"slot": "🎰", "dice": "🎲", "bowling": "🎳"}.get(game_type, "🎲")
-
-        if players_count == 1:
-            await update.message.reply_text(f"🎮 **بازی {game_type.upper()} تک‌نفره با شرط {int(bet_amount):,} میو شروع شد...**", parse_mode="Markdown")
-            msg = await context.bot.send_dice(chat_id=update.message.chat_id, emoji=game_emoji)
+        # اجرای شرط‌بندی زوج/فرد
+        if prediction in ["even", "odd"]:
+            await update.message.reply_text(f"🎲 **پرتاب تاس برای پیش‌بینی «{'زوج' if prediction == 'even' else 'فرد'}» با شرط {int(bet_amount):,}...**", parse_mode="Markdown")
+            msg = await context.bot.send_dice(chat_id=update.message.chat_id, emoji="🎲")
             val = msg.dice.value
-
             await asyncio.sleep(2.5)
 
-            is_win = False
-            win_amount = 0
+            is_even = (val % 2 == 0)
+            win = (prediction == "even" and is_even) or (prediction == "odd" and not is_even)
 
-            if game_type == "slot":
-                if val == 64:
-                    is_win = True
-                    win_amount = bet_amount * 5
-                elif val in [1, 22, 43, 16, 32, 48]:
-                    is_win = True
-                    win_amount = bet_amount * 2
+            if win:
+                win_amt = bet_amount * 2
+                conn = sqlite3.connect("meow_point.db")
+                conn.cursor().execute("UPDATE users SET wallet = wallet + ? WHERE user_id = ?", (win_amt, user_id))
+                conn.commit()
+                conn.close()
+                await update.message.reply_text(f"🎉 **تاس عدد {val} آمد!** شما برنده **{int(win_amt):,}** میوپوینت شدید!", parse_mode="Markdown")
             else:
-                if val >= 4:
-                    is_win = True
-                    win_amount = bet_amount * 2
+                await update.message.reply_text(f"❌ **تاس عدد {val} آمد!** پیش‌بینی شما اشتباه بود.", parse_mode="Markdown")
+            return
+
+        # تک‌نفره عادی
+        game_emoji = {"slot": "🎰", "dice": "🎲", "bowling": "🎳"}.get(game_type, "🎲")
+        if players_count == 1:
+            await update.message.reply_text(f"🎮 **بازی تک‌نفره با شرط {int(bet_amount):,} میو...**", parse_mode="Markdown")
+            msg = await context.bot.send_dice(chat_id=update.message.chat_id, emoji=game_emoji)
+            val = msg.dice.value
+            await asyncio.sleep(2.5)
+
+            is_win = (val == 64 if game_type == "slot" else val >= 4)
+            win_amt = bet_amount * 2
 
             if is_win:
                 conn = sqlite3.connect("meow_point.db")
-                conn.cursor().execute("UPDATE users SET wallet = wallet + ? WHERE user_id = ?", (win_amount, user_id))
+                conn.cursor().execute("UPDATE users SET wallet = wallet + ? WHERE user_id = ?", (win_amt, user_id))
                 conn.commit()
                 conn.close()
-                await update.message.reply_text(f"🎉 **تبریک!** شما برنده **{int(win_amount):,}** میوپوینت شدید!", parse_mode="Markdown")
+                await update.message.reply_text(f"🎉 **برنده شدید!** مبلغ **{int(win_amt):,}** میوپوینت دریافت کردید.", parse_mode="Markdown")
             else:
-                await update.message.reply_text(f"❌ متأسفانه این بار برنده نشدید و **{int(bet_amount):,}** میوپوینت کسر شد.", parse_mode="Markdown")
+                await update.message.reply_text(f"❌ این بار متأسفانه برنده نشدید.", parse_mode="Markdown")
         else:
             lobby_id = f"{user_id}_{int(time.time())}"
             CASINO_LOBBIES[lobby_id] = {
-                "type": game_type,
-                "max_players": players_count,
-                "bet": bet_amount,
-                "players": [user_id],
-                "names": [update.effective_user.first_name],
-                "pot": bet_amount
+                "type": game_type, "max_players": players_count, "bet": bet_amount,
+                "players": [user_id], "names": [update.effective_user.first_name], "pot": bet_amount
             }
-
             buttons = [[InlineKeyboardButton("➕ ورود به بازی", callback_data=f"casino_join_{lobby_id}")]]
             await update.message.reply_text(
-                f"🎮 **لابی {game_type.upper()} ({players_count} نفره) ساخته شد!**\n"
-                f"💰 **مبلغ ورودی:** {int(bet_amount):,} میوپوینت\n\n"
-                f"👤 **بازیکن ۱:** {update.effective_user.first_name}\n"
-                f"⏳ منتظر ورود سایر بازیکنان...",
-                reply_markup=InlineKeyboardMarkup(buttons),
-                parse_mode="Markdown"
+                f"🎮 **لابی {players_count} نفره ساخته شد!**\n💰 ورودی: {int(bet_amount):,} میو\n⏳ منتظر اعضا...",
+                reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown"
     )
             # ==================================================
-# 🟢 بخش ۶-ب: کلیدهای شیشه‌ای (Callback Router) و تابع main()
+# 🟢 بخش ۶-الف: کالبک‌روتر جامع و کامل (بدون خلاصه‌سازی)
 # ==================================================
 
 async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data
     user_id = query.from_user.id
-    
+
     try:
         await query.answer()
     except Exception:
         pass
 
-    # --- ۱. تایید یا لغو انتقال مستقیم ---
+    # --------------------------------------------------
+    # ۱. مدیریت انتقال مستقیم میوپوینت
+    # --------------------------------------------------
     if data == "confirm_direct_transfer":
         pt = context.user_data.get('pending_transfer')
         if not pt:
-            await query.edit_message_text("❌ زمان انجام این تراکنش منقضی شده است.")
+            await query.edit_message_text("❌ تراکنش منقضی شده یا نامعتبر است.")
             return
-        
+
         user = get_user(user_id)
-        if user[2] < pt['amount']:
-            await query.edit_message_text("❌ موجودی شما کافی نیست!")
+        if user[1] < pt['amount']:
+            await query.edit_message_text("❌ موجودی کیف پول شما کافی نیست!")
             return
 
         conn = sqlite3.connect("meow_point.db")
@@ -881,67 +730,89 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.commit()
         conn.close()
 
-        await query.edit_message_text(f"✅ **انتقال انجام شد!**\nمبلغ {int(pt['amount']):,} میوپوینت به {pt['target_name']} منتقل گردید.")
-        await send_pv_notify(context, pt['target_id'], f"💸 مبلغ {int(pt['amount']):,} میوپوینت از طرف {query.from_user.first_name} دریافت شد.")
+        await query.edit_message_text(
+            f"✅ **انتقال موفقیت‌آمیز بود!**\n\n"
+            f"👤 دریافت‌کننده: {pt['target_name']}\n"
+            f"💰 مبلغ: **{int(pt['amount']):,}** میوپوینت",
+            parse_mode="Markdown"
+        )
+        await send_pv_notify(
+            context,
+            pt['target_id'],
+            f"💸 **دریافت میوپوینت!**\nمبلغ **{int(pt['amount']):,}** میوپوینت از طرف {query.from_user.first_name} به کیف پول شما واریز شد."
+        )
         context.user_data.pop('pending_transfer', None)
 
     elif data == "cancel_direct_transfer":
         context.user_data.pop('pending_transfer', None)
-        await query.edit_message_text("❌ **انتقال لغو شد.**")
+        await query.edit_message_text("❌ عملیات انتقال مستقیم لغو شد.")
 
-    # --- ۲. مدیریت ارتقا، برداشت و تغییر نام گربه (با پوشش تمام نام‌های دکمه) ---
-    elif data in ["cat_change_name", "cat_rename", "rename_cat", "cat_name_change", "cat_name"]:
+    # --------------------------------------------------
+    # ۲. مدیریت داشبورد گربه
+    # --------------------------------------------------
+    elif data in ["cat_change_name", "cat_rename"]:
         context.user_data['waiting_for_cat_name'] = True
         await context.bot.send_message(
             chat_id=query.message.chat_id,
-            text="✍️ **لطفاً نام جدید پیشی خود را ارسال کنید:**\n\n(برای انصراف کلمه «انصراف» را بفرستید)",
+            text="✍️ **لطفاً نام جدید پیشی خود را ارسال کنید:**\n(حداکثر ۱۵ کاراکتر - برای انصراف کلمه «انصراف» را بفرستید)",
             parse_mode="Markdown"
         )
 
     elif data == "cat_upgrade":
         user = get_user(user_id)
-        cost = user[7] * 500
-        if user[2] < cost:
-            await query.message.reply_text(f"❌ میوپوینت کافی نیست! هزینه ارتقا: {cost:,} میو")
+        cost = user[4] * 500
+        if user[1] < cost:
+            await query.message.reply_text(f"❌ موجودی کافی نیست! هزینه ارتقا: {cost:,} میوپوینت")
             return
+
         conn = sqlite3.connect("meow_point.db")
-        conn.cursor().execute("UPDATE users SET wallet = wallet - ?, cat_level = cat_level + 1 WHERE user_id = ?", (cost, user_id))
+        cursor = conn.cursor()
+        cursor.execute("UPDATE users SET wallet = wallet - ?, cat_level = cat_level + 1 WHERE user_id = ?", (cost, user_id))
         conn.commit()
         conn.close()
-        await query.message.reply_text(f"🎉 گربه شما به لول {user[7] + 1} ارتقا یافت!")
+
+        await query.message.reply_text(f"🎉 **تبریک!** سطح پیشی شما به **{user[4] + 1}** ارتقا یافت.\nنرخ تولید جدید: {(user[4] + 1) * 2} میو/ثانیه", parse_mode="Markdown")
 
     elif data == "cat_claim":
         user = get_user(user_id)
-        mps = user[7] * 2
+        mps = user[4] * 2
         now = time.time()
-        produced = int((now - user[10]) * mps)
+        produced = int((now - user[7]) * mps) if user[7] > 0 else 0
+
         if produced <= 0:
-            await query.message.reply_text("❌ هنوز میوپوینتی تولید نشده است!")
+            await query.message.reply_text("❌ هنوز میوپوینتی برای برداشت تولید نشده است!")
             return
+
         conn = sqlite3.connect("meow_point.db")
-        conn.cursor().execute("UPDATE users SET wallet = wallet + ?, cat_last_claim = ? WHERE user_id = ?", (produced, now, user_id))
+        cursor = conn.cursor()
+        cursor.execute("UPDATE users SET wallet = wallet + ?, cat_last_claim = ? WHERE user_id = ?", (produced, now, user_id))
         conn.commit()
         conn.close()
-        await query.message.reply_text(f"✅ مبلغ {produced:,} میوپوینت تولید شده دریافت شد.")
 
-    # --- ۳. عملیات ماهی ---
+        await query.message.reply_text(f"✅ مبلغ **{produced:,}** میوپوینت با موفقیت به کیف پول اضافه شد.", parse_mode="Markdown")
+
+    # --------------------------------------------------
+    # ۳. مدیریت ماهی‌گیری و یخچال
+    # --------------------------------------------------
     elif data.startswith("fish_sell_"):
         emoji = data.split("_")[2]
-        info = FISH_DATA.get(emoji, {"price": 200})
+        info = FISH_DATA.get(emoji, {"price": 150})
         conn = sqlite3.connect("meow_point.db")
-        conn.cursor().execute("UPDATE users SET wallet = wallet + ? WHERE user_id = ?", (info['price'], user_id))
+        cursor = conn.cursor()
+        cursor.execute("UPDATE users SET wallet = wallet + ? WHERE user_id = ?", (info['price'], user_id))
         conn.commit()
         conn.close()
-        await query.edit_message_text(f"💰 ماهی {emoji} به مبلغ **{info['price']:,}** میوپوینت فروخته شد.")
+        await query.edit_message_text(f"💰 ماهی {emoji} با موفقیت به قیمت **{info['price']:,}** میوپوینت فروخته شد.", parse_mode="Markdown")
 
     elif data.startswith("fish_feed_"):
         emoji = data.split("_")[2]
-        info = FISH_DATA.get(emoji, {"food": 15})
+        info = FISH_DATA.get(emoji, {"food": 10})
         conn = sqlite3.connect("meow_point.db")
-        conn.cursor().execute("UPDATE users SET cat_food = MIN(100, cat_food + ?) WHERE user_id = ?", (info['food'], user_id))
+        cursor = conn.cursor()
+        cursor.execute("UPDATE users SET cat_food = MIN(100, cat_food + ?) WHERE user_id = ?", (info['food'], user_id))
         conn.commit()
         conn.close()
-        await query.edit_message_text(f"🍖 ماهی {emoji} به پیشی داده شد! (+{info['food']}% غذا)")
+        await query.edit_message_text(f"🍖 ماهی {emoji} به پیشی داده شد! (+{info['food']}% میزان سیر بودن)", parse_mode="Markdown")
 
     elif data.startswith("fish_keep_"):
         emoji = data.split("_")[2]
@@ -955,51 +826,112 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cursor.execute("INSERT INTO fridge (user_id, fish_type, count) VALUES (?, ?, 1)", (user_id, emoji))
         conn.commit()
         conn.close()
-        await query.edit_message_text(f"❄️ ماهی {emoji} در یخچال ذخیره شد.")
+        await query.edit_message_text(f"❄️ ماهی {emoji} با موفقیت در یخچال ذخیره گردید.", parse_mode="Markdown")
 
-    # --- ۴. کارخانه ---
+    # --------------------------------------------------
+    # ۴. مدیریت کامل کارخانه
+    # --------------------------------------------------
+    elif data.startswith("factory_start_"):
+        product_id = data.split("_")[2]
+        product = PRODUCTS.get(product_id)
+        if not product:
+            await query.message.reply_text("❌ محصول انتخاب شده معتبر نیست.")
+            return
+
+        user = get_user(user_id)
+        if user[1] < product['cost']:
+            await query.message.reply_text(f"❌ موجودی کافی نیست! هزینه شروع تولید: {product['cost']:,} میو")
+            return
+
+        conn = sqlite3.connect("meow_point.db")
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE users SET wallet = wallet - ?, producing_item = ?, produce_amount = 1, produce_start_time = ?, produce_cost = ? WHERE user_id = ?",
+            (product['cost'], product['name'], time.time(), product['cost'], user_id)
+        )
+        conn.commit()
+        conn.close()
+
+        await query.edit_message_text(
+            f"🏭 **خط تولید {product['name']} فعال شد!**\n"
+            f"⏱️ زمان ساخت: {product['time']} ثانیه\n"
+            f"💵 هزینه تولید: {product['cost']:,} میو",
+            parse_mode="Markdown"
+        )
+
+    elif data == "factory_sell":
+        user = get_user(user_id)
+        producing_item = user[11]
+        produce_amount = user[12]
+        produce_start_time = user[13]
+
+        if not producing_item:
+            await query.edit_message_text("❌ هیچ محصول آماده‌ای برای فروش وجود ندارد.")
+            return
+
+        item_info = next((v for k, v in PRODUCTS.items() if v['name'] == producing_item), None)
+        base_sell = item_info['base_sell'] if item_info else 1000
+        dynamic_price = calculate_dynamic_sell_price(base_sell)
+        total_price = dynamic_price * produce_amount
+
+        conn = sqlite3.connect("meow_point.db")
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE users SET wallet = wallet + ?, producing_item = NULL, produce_amount = 0, produce_start_time = 0, produce_cost = 0 WHERE user_id = ?",
+            (total_price, user_id)
+        )
+        conn.commit()
+        conn.close()
+
+        await query.edit_message_text(
+            f"💰 **محصولات کارخانه به فروش رسیدند!**\n\n"
+            f"📦 محصول: {producing_item}\n"
+            f"📈 قیمت هر واحد بازار: {dynamic_price:,} میو\n"
+            f"💵 مجموع دریافتی: **{total_price:,}** میوپوینت",
+            parse_mode="Markdown"
+        )
+
     elif data == "factory_cancel":
         user = get_user(user_id)
-        refund = user[17]
+        refund = user[14]
+
         conn = sqlite3.connect("meow_point.db")
-        conn.cursor().execute(
+        cursor = conn.cursor()
+        cursor.execute(
             "UPDATE users SET wallet = wallet + ?, producing_item = NULL, produce_amount = 0, produce_start_time = 0, produce_cost = 0 WHERE user_id = ?",
             (refund, user_id)
         )
         conn.commit()
         conn.close()
-        await query.edit_message_text(f"🛑 تولید لغو شد و اصل مبلغ **{int(refund):,}** میوپوینت بازگردانده شد.")
 
-    elif data == "factory_sell":
-        user = get_user(user_id)
-        item_info = next((v for k, v in PRODUCTS.items() if v['name'] == user[13]), None)
-        price_per_item = calculate_dynamic_sell_price(item_info['base_sell']) if item_info else 10
-        total = price_per_item * user[14]
+        await query.edit_message_text(f"🛑 خط تولید لول گردید و مبلغ اصل سرمایه ({int(refund):,} میو) به کیف پول شما بازگشت.")
 
-        conn = sqlite3.connect("meow_point.db")
-        conn.cursor().execute(
-            "UPDATE users SET wallet = wallet + ?, factory_level = factory_level + 1, producing_item = NULL, produce_amount = 0, produce_start_time = 0 WHERE user_id = ?",
-            (total, user_id)
-        )
-        conn.commit()
-        conn.close()
-        await query.edit_message_text(f"🎉 محصولات به مبلغ **{total:,}** میوپوینت فروخته شدند!\n⭐️ سطح کارخانه ۱ لول افزایش یافت.")
-
-    # --- ۵. حالت‌ها و مبالغ کازینو ---
-    elif data.startswith("casino_select_"):
-        game_type = data.split("_")[2]
+    # --------------------------------------------------
+    # ۵. مدیریت کازینو و انتخاب بازی‌ها
+    # --------------------------------------------------
+    elif data == "casino_select_slot":
         buttons = [
-            [
-                InlineKeyboardButton("👤 ۱ نفره", callback_data=f"casino_mode_{game_type}_1"),
-                InlineKeyboardButton("👥 ۲ نفره", callback_data=f"casino_mode_{game_type}_2"),
-                InlineKeyboardButton("👨‍👩‍👦 ۳ نفره", callback_data=f"casino_mode_{game_type}_3")
-            ]
+            [InlineKeyboardButton("👤 ۱ نفره (تک بازی)", callback_data="casino_mode_slot_1")],
+            [InlineKeyboardButton("👥 ۲ نفره", callback_data="casino_mode_slot_2")],
+            [InlineKeyboardButton("👨‍👩‍👦 ۳ نفره", callback_data="casino_mode_slot_3")]
         ]
-        await query.edit_message_text(f"🎮 حالت بازی **{game_type.upper()}** را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
+        await query.edit_message_text("🎰 **بازی اسلات:** تعداد بازیکنان را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
+
+    elif data == "casino_select_dice":
+        await casino_dice_options(query)
+
+    elif data == "casino_select_bowling":
+        buttons = [
+            [InlineKeyboardButton("👤 ۱ نفره (تک بازی)", callback_data="casino_mode_bowling_1")],
+            [InlineKeyboardButton("👥 ۲ نفره", callback_data="casino_mode_bowling_2")],
+            [InlineKeyboardButton("👨‍👩‍👦 ۳ نفره", callback_data="casino_mode_bowling_3")]
+        ]
+        await query.edit_message_text("🎳 **بازی بولینگ:** تعداد بازیکنان را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
 
     elif data.startswith("casino_mode_"):
         parts = data.split("_")
-        game_type, players = parts[2], parts[3]
+        game_type = parts[2]
+        players = int(parts[3])
 
         buttons = [
             [
@@ -1008,33 +940,27 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ],
             [
                 InlineKeyboardButton("💰 ۱۰,۰۰۰", callback_data=f"casino_start_{game_type}_{players}_10000"),
-                InlineKeyboardButton("💰 ۵۰,۰۰۰", callback_data=f"casino_start_{game_type}_{players}_50000")
-            ],
-            [
                 InlineKeyboardButton("✏️ مبلغ دلخواه", callback_data=f"casino_custom_{game_type}_{players}")
             ]
         ]
-        await query.edit_message_text(f"💵 **مبلغ ورودی برای بازی {game_type.upper()} را انتخاب کنید:**", reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
-
-    elif data.startswith("casino_custom_"):
-        parts = data.split("_")
-        context.user_data['casino_custom'] = {
-            'game_type': parts[2],
-            'players': int(parts[3])
-        }
-        await context.bot.send_message(
-            chat_id=query.message.chat_id,
-            text="✍️ **لطفاً مبلغ شرط‌بندی دلخواه خود را ارسال کنید:**\n\n(مثال: `25k` یا `15000` | برای انصراف کلمه «انصراف» را بفرستید)",
-            parse_mode="Markdown"
-        )
+        await query.edit_message_text(f"🎮 **بازی {game_type.upper()} ({players} نفره):**\nمبلغ ورودی را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
 
     elif data.startswith("casino_start_"):
         parts = data.split("_")
-        game_type, players_count, bet_amount = parts[2], int(parts[3]), int(parts[4])
+        if len(parts) >= 6 and parts[2] == "dice" and parts[3] == "evenodd":
+            game_type = "dice"
+            players = 1
+            bet_amount = float(parts[4])
+            pred = parts[5]
+        else:
+            game_type = parts[2]
+            players = int(parts[3])
+            bet_amount = float(parts[4])
+            pred = None
 
         user = get_user(user_id)
-        if user[2] < bet_amount:
-            await query.answer(f"❌ موجودی کافی نیست! ورودی: {bet_amount:,} میو", show_alert=True)
+        if user[1] < bet_amount:
+            await query.message.reply_text(f"❌ موجودی کیف پول کافی نیست! موجودی: {int(user[1]):,} میو")
             return
 
         conn = sqlite3.connect("meow_point.db")
@@ -1042,58 +968,54 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.commit()
         conn.close()
 
-        game_emoji = {"slot": "🎰", "dice": "🎲", "bowling": "🎳"}.get(game_type, "🎲")
-
-        if players_count == 1:
-            await query.edit_message_text(f"🎮 **بازی {game_type.upper()} تک‌نفره با شرط {bet_amount:,} میو شروع شد...**", parse_mode="Markdown")
-            msg = await context.bot.send_dice(chat_id=query.message.chat_id, emoji=game_emoji)
+        if pred in ["even", "odd"]:
+            await query.edit_message_text(f"🎲 **پرتاب تاس برای پیش‌بینی «{'زوج' if pred == 'even' else 'فرد'}» با شرط {int(bet_amount):,}...**", parse_mode="Markdown")
+            msg = await context.bot.send_dice(chat_id=query.message.chat_id, emoji="🎲")
             val = msg.dice.value
-
             await asyncio.sleep(2.5)
 
-            is_win = False
-            win_amount = 0
+            is_even = (val % 2 == 0)
+            win = (pred == "even" and is_even) or (pred == "odd" and not is_even)
 
-            if game_type == "slot":
-                if val == 64:
-                    is_win = True
-                    win_amount = bet_amount * 5
-                elif val in [1, 22, 43, 16, 32, 48]:
-                    is_win = True
-                    win_amount = bet_amount * 2
+            if win:
+                win_amt = bet_amount * 2
+                conn = sqlite3.connect("meow_point.db")
+                conn.cursor().execute("UPDATE users SET wallet = wallet + ? WHERE user_id = ?", (win_amt, user_id))
+                conn.commit()
+                conn.close()
+                await context.bot.send_message(chat_id=query.message.chat_id, text=f"🎉 **تاس عدد {val} آمد!** شما برنده **{int(win_amt):,}** میوپوینت شدید!", parse_mode="Markdown")
             else:
-                if val >= 4:
-                    is_win = True
-                    win_amount = bet_amount * 2
+                await context.bot.send_message(chat_id=query.message.chat_id, text=f"❌ **تاس عدد {val} آمد!** پیش‌بینی شما اشتباه بود.", parse_mode="Markdown")
+            return
+
+        game_emoji = {"slot": "🎰", "dice": "🎲", "bowling": "🎳"}.get(game_type, "🎲")
+        if players == 1:
+            await query.edit_message_text(f"🎮 **شروع بازی تک‌نفره با شرط {int(bet_amount):,} میو...**", parse_mode="Markdown")
+            msg = await context.bot.send_dice(chat_id=query.message.chat_id, emoji=game_emoji)
+            val = msg.dice.value
+            await asyncio.sleep(2.5)
+
+            is_win = (val == 64 if game_type == "slot" else val >= 4)
+            win_amt = bet_amount * 2
 
             if is_win:
                 conn = sqlite3.connect("meow_point.db")
-                conn.cursor().execute("UPDATE users SET wallet = wallet + ? WHERE user_id = ?", (win_amount, user_id))
+                conn.cursor().execute("UPDATE users SET wallet = wallet + ? WHERE user_id = ?", (win_amt, user_id))
                 conn.commit()
                 conn.close()
-                await context.bot.send_message(chat_id=query.message.chat_id, text=f"🎉 **تبریک!** شما برنده **{win_amount:,}** میوپوینت شدید!", parse_mode="Markdown")
+                await context.bot.send_message(chat_id=query.message.chat_id, text=f"🎉 **برنده شدید!** مبلغ **{int(win_amt):,}** میوپوینت به کیف پول اضافه شد.", parse_mode="Markdown")
             else:
-                await context.bot.send_message(chat_id=query.message.chat_id, text=f"❌ متأسفانه این بار برنده نشدید و **{bet_amount:,}** میوپوینت از دست رفت.", parse_mode="Markdown")
-
+                await context.bot.send_message(chat_id=query.message.chat_id, text=f"❌ متأسفانه برنده نشدید. عدد شانس: {val}")
         else:
             lobby_id = f"{user_id}_{int(time.time())}"
             CASINO_LOBBIES[lobby_id] = {
-                "type": game_type,
-                "max_players": players_count,
-                "bet": bet_amount,
-                "players": [user_id],
-                "names": [query.from_user.first_name],
-                "pot": bet_amount
+                "type": game_type, "max_players": players, "bet": bet_amount,
+                "players": [user_id], "names": [query.from_user.first_name], "pot": bet_amount
             }
-
             buttons = [[InlineKeyboardButton("➕ ورود به بازی", callback_data=f"casino_join_{lobby_id}")]]
             await query.edit_message_text(
-                f"🎮 **لابی {game_type.upper()} ({players_count} نفره) ساخته شد!**\n"
-                f"💰 **مبلغ ورودی:** {bet_amount:,} میوپوینت\n\n"
-                f"👤 **بازیکن ۱:** {query.from_user.first_name}\n"
-                f"⏳ منتظر ورود سایر بازیکنان...",
-                reply_markup=InlineKeyboardMarkup(buttons),
-                parse_mode="Markdown"
+                f"🎮 **لابی {players} نفره ساخته شد!**\n💰 ورودی: {int(bet_amount):,} میو\n👥 اعضا (1/{players}): {query.from_user.first_name}",
+                reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown"
             )
 
     elif data.startswith("casino_join_"):
@@ -1101,16 +1023,16 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lobby = CASINO_LOBBIES.get(lobby_id)
 
         if not lobby:
-            await query.edit_message_text("❌ این لابی منقضی یا بسته شده است.")
+            await query.message.reply_text("❌ این لابی منقضی یا بسته شده است.")
             return
 
         if user_id in lobby["players"]:
-            await query.answer("⚠️ شما قبلاً وارد این لابی شده‌اید!", show_alert=True)
+            await query.message.reply_text("⚠️ شما قبلاً وارد این لابی شده‌اید!")
             return
 
         user = get_user(user_id)
-        if user[2] < lobby["bet"]:
-            await query.answer(f"❌ موجودی کافی نیست! ورودی: {lobby['bet']:,} میو", show_alert=True)
+        if user[1] < lobby["bet"]:
+            await query.message.reply_text(f"❌ موجودی کافی نیست! ورودی: {int(lobby['bet']):,} میو")
             return
 
         conn = sqlite3.connect("meow_point.db")
@@ -1122,71 +1044,270 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lobby["names"].append(query.from_user.first_name)
         lobby["pot"] += lobby["bet"]
 
-        if len(lobby["players"]) == lobby["max_players"]:
-            players_str = "\n".join([f"👤 {name}" for name in lobby["names"]])
-            await query.edit_message_text(f"🚀 **لابی تکمیل شد!**\n💰 **مجموع جایزه:** {lobby['pot']:,} میو\n\n{players_str}\n\n🎲 در حال پرتاب...")
-            
+        if len(lobby["players"]) < lobby["max_players"]:
+            buttons = [[InlineKeyboardButton("➕ ورود به بازی", callback_data=f"casino_join_{lobby_id}")]]
+            names_str = " | ".join(lobby["names"])
+            await query.edit_message_text(
+                f"🎮 **لابی {lobby['max_players']} نفره {lobby['type'].upper()}**\n"
+                f"💰 ورودی: {int(lobby['bet']):,} میو\n"
+                f"👥 اعضا ({len(lobby['players'])}/{lobby['max_players']}): {names_str}",
+                reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown"
+            )
+        else:
+            await query.edit_message_text("🎲 **تمام بازیکنان تکمیـل شدند! شروع رقابت...**")
             game_emoji = {"slot": "🎰", "dice": "🎲", "bowling": "🎳"}.get(lobby["type"], "🎲")
-            await context.bot.send_dice(chat_id=query.message.chat_id, emoji=game_emoji)
-            await asyncio.sleep(2.5)
 
-            winner_idx = random.randint(0, len(lobby["players"]) - 1)
-            winner_id = lobby["players"][winner_idx]
-            winner_name = lobby["names"][winner_idx]
+            scores = []
+            for uid, name in zip(lobby["players"], lobby["names"]):
+                msg = await context.bot.send_dice(chat_id=query.message.chat_id, emoji=game_emoji)
+                scores.append((uid, name, msg.dice.value))
+                await asyncio.sleep(2)
+
+            scores.sort(key=lambda x: x[2], reverse=True)
+            winner = scores[0]
+            pot = lobby["pot"]
 
             conn = sqlite3.connect("meow_point.db")
-            conn.cursor().execute("UPDATE users SET wallet = wallet + ? WHERE user_id = ?", (lobby["pot"], winner_id))
+            conn.cursor().execute("UPDATE users SET wallet = wallet + ? WHERE user_id = ?", (pot, winner[0]))
             conn.commit()
             conn.close()
 
-            await context.bot.send_message(
-                chat_id=query.message.chat_id,
-                text=f"🎉 **تبریک به {winner_name}!**\nشما برنده تمام کل جایزه به مبلغ **{lobby['pot']:,}** میوپوینت شدید! 🏆",
-                parse_mode="Markdown"
-            )
-            del CASINO_LOBBIES[lobby_id]
+            res_text = f"🏆 **برنده بازی: {winner[1]}** با امتیاز {winner[2]}!\n💰 کل جایزه: **{int(pot):,}** میوپوینت\n\n📊 **جدول امتیازات:**\n"
+            for rank, s in enumerate(scores, 1):
+                res_text += f"{rank}. {s[1]}: {s[2]}\n"
+
+            await context.bot.send_message(chat_id=query.message.chat_id, text=res_text, parse_mode="Markdown")
+            CASINO_LOBBIES.pop(lobby_id, None)
+
+    elif data.startswith("casino_custom_"):
+        parts = data.split("_")
+        if len(parts) >= 5 and parts[2] == "dice" and parts[3] == "evenodd":
+            context.user_data['casino_custom'] = {'game_type': 'dice', 'players': 1, 'prediction': parts[4]}
         else:
-            players_str = "\n".join([f"👤 {name}" for name in lobby["names"]])
-            buttons = [[InlineKeyboardButton("➕ ورود به بازی", callback_data=f"casino_join_{lobby_id}")]]
-            await query.edit_message_text(
-                f"🎮 **لابی بازی {lobby['type'].upper()} ({lobby['max_players']} نفره)**\n"
-                f"💰 **ورودی:** {lobby['bet']:,} میو\n\n"
-                f"{players_str}\n\n"
-                f"⏳ منتظر نفرات بعدی...",
-                reply_markup=InlineKeyboardMarkup(buttons),
-                parse_mode="Markdown"
-            )
+            context.user_data['casino_custom'] = {'game_type': parts[2], 'players': int(parts[3])}
+
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text="✍️ **لطفاً مبلغ شرط‌بندی دلخواه خود را بفرستید:**\n(مثال: `50k` یا `1.5m` - جهت انصراف کلمه «انصراف» را ارسال کنید)",
+            parse_mode="Markdown"
+                                )
+    # ==================================================
+# 🟢 بخش ۶-ب: سیستم کامل مدیریت ادمین و اجرای نهایی (main)
+# ==================================================
+
+async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    text_parts = update.message.text.split(maxsplit=1)
+    cmd = text_parts[0]
+
+    if cmd == "/admin":
+        await update.message.reply_text(
+            f"👑 **پنل مدیریت ارشد ربات میوپوینت** (شناسه: `{ADMIN_ID}`)\n\n"
+            "▫️ `/give_points [user_id] [مبلغ]` - اهدای میوپوینت به کیف پول\n"
+            "▫️ `/take_points [user_id] [مبلغ]` - کسر میوپوینت از کیف پول\n"
+            "▫️ `/add_cat [user_id] [تعداد]` - افزایش سطح گربه کاربر\n"
+            "▫️ `/set_cat [user_id] [سطح]` - تنظیم دقیق لول گربه کاربر\n"
+            "▫️ `/max_cat [user_id]` - فول ارتقای گربه به لول ۱۰۰\n"
+            "▫️ `/reset_user [user_id]` - ریست کامل داده‌های یک کاربر\n"
+            "▫️ `/stats` - مشاهده آمار کامل ربات و دیتابیس\n"
+            "▫️ `/bc [متن]` - ارسال همگانی پیام به تمامی کاربران",
+            parse_mode="Markdown"
+        )
+
+    elif cmd == "/stats":
+        conn = sqlite3.connect("meow_point.db")
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*), SUM(wallet), SUM(bank), SUM(meow_count) FROM users")
+        row = cursor.fetchone()
+        conn.close()
+
+        total_users = row[0] or 0
+        total_wallet = int(row[1] or 0)
+        total_bank = int(row[2] or 0)
+        total_meows = row[3] or 0
+
+        await update.message.reply_text(
+            f"📊 **آمار دیتابیس ربات میوپوینت:**\n\n"
+            f"👥 **تعداد کل کاربران:** {total_users:,} نفر\n"
+            f"💵 **مجموع موجودی کیف پول‌ها:** {total_wallet:,} میو\n"
+            f"🏦 **مجموع موجودی بانک‌ها:** {total_bank:,} میو\n"
+            f"🐾 **تعداد کل میو/مع‌های ثبت‌شده:** {total_meows:,} بار",
+            parse_mode="Markdown"
+        )
+
+    elif cmd == "/give_points":
+        args = update.message.text.split()
+        if len(args) >= 3:
+            try:
+                target_id = int(args[1])
+                amt = parse_amount(args[2])
+                conn = sqlite3.connect("meow_point.db")
+                cursor = conn.cursor()
+                cursor.execute("UPDATE users SET wallet = wallet + ? WHERE user_id = ?", (amt, target_id))
+                conn.commit()
+                conn.close()
+                await update.message.reply_text(f"✅ مبلغ **{int(amt):,}** میوپوینت به کاربر `{target_id}` اعطا شد.", parse_mode="Markdown")
+                await send_pv_notify(context, target_id, f"🎁 **هدیه مدیریت!** مبلغ **{int(amt):,}** میوپوینت به کیف پول شما اضافه شد.")
+            except Exception as e:
+                await update.message.reply_text(f"❌ خطا در اجرا: {e}")
+
+    elif cmd == "/take_points":
+        args = update.message.text.split()
+        if len(args) >= 3:
+            try:
+                target_id = int(args[1])
+                amt = parse_amount(args[2])
+                conn = sqlite3.connect("meow_point.db")
+                cursor = conn.cursor()
+                cursor.execute("UPDATE users SET wallet = MAX(0, wallet - ?) WHERE user_id = ?", (amt, target_id))
+                conn.commit()
+                conn.close()
+                await update.message.reply_text(f"✅ مبلغ **{int(amt):,}** میوپوینت از کاربر `{target_id}` کسر گردید.", parse_mode="Markdown")
+            except Exception as e:
+                await update.message.reply_text(f"❌ خطا در اجرا: {e}")
+
+    elif cmd == "/add_cat":
+        args = update.message.text.split()
+        if len(args) >= 3:
+            try:
+                target_id = int(args[1])
+                levels = int(args[2])
+                conn = sqlite3.connect("meow_point.db")
+                cursor = conn.cursor()
+                cursor.execute("UPDATE users SET cat_level = cat_level + ? WHERE user_id = ?", (levels, target_id))
+                conn.commit()
+                conn.close()
+                await update.message.reply_text(f"✅ تعداد **{levels}** سطح به گربه کاربر `{target_id}` اضافه شد.", parse_mode="Markdown")
+            except Exception as e:
+                await update.message.reply_text(f"❌ خطا: {e}")
+
+    elif cmd == "/set_cat":
+        args = update.message.text.split()
+        if len(args) >= 3:
+            try:
+                target_id = int(args[1])
+                level = int(args[2])
+                conn = sqlite3.connect("meow_point.db")
+                cursor = conn.cursor()
+                cursor.execute("UPDATE users SET cat_level = ? WHERE user_id = ?", (level, target_id))
+                conn.commit()
+                conn.close()
+                await update.message.reply_text(f"✅ سطح گربه کاربر `{target_id}` روی **{level}** تنظیم شد.", parse_mode="Markdown")
+            except Exception as e:
+                await update.message.reply_text(f"❌ خطا: {e}")
+
+    elif cmd == "/max_cat":
+        args = update.message.text.split()
+        if len(args) >= 2:
+            try:
+                target_id = int(args[1])
+                conn = sqlite3.connect("meow_point.db")
+                cursor = conn.cursor()
+                cursor.execute("UPDATE users SET cat_level = 100 WHERE user_id = ?", (target_id,))
+                conn.commit()
+                conn.close()
+                await update.message.reply_text(f"🚀 گربه کاربر `{target_id}` به حداکثر سطح (لول ۱۰۰) ارتقا یافت!", parse_mode="Markdown")
+            except Exception as e:
+                await update.message.reply_text(f"❌ خطا: {e}")
+
+    elif cmd == "/reset_user":
+        args = update.message.text.split()
+        if len(args) >= 2:
+            try:
+                target_id = int(args[1])
+                conn = sqlite3.connect("meow_point.db")
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM users WHERE user_id = ?", (target_id,))
+                cursor.execute("DELETE FROM fridge WHERE user_id = ?", (target_id,))
+                conn.commit()
+                conn.close()
+                await update.message.reply_text(f"🗑️ تمام داده‌ها و حساب کاربر `{target_id}` پاکسازی شد.", parse_mode="Markdown")
+            except Exception as e:
+                await update.message.reply_text(f"❌ خطا: {e}")
+
+    elif cmd == "/bc":
+        if len(text_parts) < 2:
+            await update.message.reply_text("⚠️ لطفا متن پیام همگانی را وارد کنید.\nمثال: `/bc سلام به همه`", parse_mode="Markdown")
+            return
+
+        bc_msg = text_parts[1]
+        conn = sqlite3.connect("meow_point.db")
+        cursor = conn.cursor()
+        cursor.execute("SELECT user_id FROM users")
+        all_users = cursor.fetchall()
+        conn.close()
+
+        sent_count = 0
+        fail_count = 0
+        await update.message.reply_text(f"⏳ شروع ارسال پیام به {len(all_users)} کاربر...")
+
+        for row in all_users:
+            try:
+                await context.bot.send_message(chat_id=row[0], text=f"📢 **اطلاعیه مدیریت:**\n\n{bc_msg}", parse_mode="Markdown")
+                sent_count += 1
+                await asyncio.sleep(0.04)
+            except Exception:
+                fail_count += 1
+
+        await update.message.reply_text(f"✅ ارسال همگانی پایان یافت.\nموفق: **{sent_count}** | ناموفق: **{fail_count}**", parse_mode="Markdown")
+
+async def help_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    help_text = (
+        "📖 **راهنمای جامع دستورات ربات میوپوینت:**\n\n"
+        "🐾 `میو` یا `مع` - دریافت میوپوینت رایگان (با تایمر ۳ دقيقه‌ای)\n"
+        "👤 `پروفایل` یا `میوهاش` - نمایش سطح، شماره حساب ۱۰ رقمی و موجودی\n"
+        "🐱 `پیشی` یا `گربه` - ورود به داشبورد اختصاصی گربه و جمع‌آوری سود\n"
+        "🏦 `بانک` - ورود به پنل بانک، واریز، برداشت و کارت به کارت\n"
+        "💸 `انتقال بانکی [شماره حساب] [مبلغ]` - کارت به کارت به شماره حساب ۱۰ رقمی\n"
+        "💸 `انتقال میویی [مبلغ]` - انتقال مستقیم روی پیام ریپلی‌شده\n"
+        "🎣 `ماهی` - صید ماهی (فروش، تغذیه یا انبار)\n"
+        "❄️ `یخچال` - مشاهده انبار ماهی‌ها\n"
+        "🏭 `کارخونه` - ساخت محصولات با ارزش نوسانی بازار\n"
+        "🎰 `کازینو` - بازی‌های اسلات، تاس (با شرط زوج/فرد) و بولینگ\n"
+        "ℹ️ `دستورات ربات` یا `/start` - مشاهده این راهنما"
+    )
+    await update.message.reply_text(help_text, parse_mode="Markdown")
 
 # ==================================================
-# 🚀 ۶. اجرای اصلی ربات (Main Function)
+# 🚀 نقطه ورود اصلی و تنظیمات اجرایی برنامه (main)
 # ==================================================
 def main():
+    # ساخت اپلیکیشن با توکن
     app = Application.builder().token(TOKEN).build()
 
-    # هاندر ورودی‌های متنی اختصاصی (تغییر نام گربه و مبلغ کازینو) - اولویت بالا (-1)
+    # اولویت بالاتر برای پردازش ورودی‌های متنی غیردستوری (تغییر نام گربه / مبالغ شرط‌بندی)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, custom_text_inputs_handler), group=-1)
 
-    # هاندرهای دستورات متنی فارسی
+    # هندلرهای دستورات متنی فارسی
     app.add_handler(MessageHandler(filters.Regex(r"^(میو|مع)$"), meow_handler))
     app.add_handler(MessageHandler(filters.Regex(r"^(پروفایل|میوهاش)$"), profile_handler))
     app.add_handler(MessageHandler(filters.Regex(r"^(پیشی|گربه)$"), cat_dashboard))
     app.add_handler(MessageHandler(filters.Regex(r"^بانک$"), bank_handler))
+    app.add_handler(MessageHandler(filters.Regex(r"^واریز"), bank_deposit_handler))
+    app.add_handler(MessageHandler(filters.Regex(r"^برداشت"), bank_withdraw_handler))
+    app.add_handler(MessageHandler(filters.Regex(r"^انتقال بانکی"), bank_transfer_handler))
     app.add_handler(MessageHandler(filters.Regex(r"^ماهی$"), fish_handler))
     app.add_handler(MessageHandler(filters.Regex(r"^یخچال$"), fridge_handler))
     app.add_handler(MessageHandler(filters.Regex(r"^کارخونه$"), factory_handler))
     app.add_handler(MessageHandler(filters.Regex(r"^کازینو$"), casino_handler))
     app.add_handler(MessageHandler(filters.Regex(r"^انتقال میویی"), direct_transfer_handler))
-    app.add_handler(MessageHandler(filters.Regex(r"^دستورات ربات$"), help_command_handler))
+    app.add_handler(MessageHandler(filters.Regex(r"^(دستورات ربات|راهنما)$"), help_command_handler))
+    app.add_handler(CommandHandler(["start", "help"], help_command_handler))
 
-    # دستورات ادمین
-    app.add_handler(CommandHandler(["admin", "give_points", "add_cat", "set_cat", "max_cat", "stats", "bc"], admin_handler))
+    # هندلرهای دستورات ادمین
+    app.add_handler(CommandHandler(
+        ["admin", "give_points", "take_points", "add_cat", "set_cat", "max_cat", "reset_user", "stats", "bc"],
+        admin_handler
+    ))
 
-    # دکمه‌های شیشه‌ای
+    # هندلر جامع تمام دکمه‌های شیشه‌ای
     app.add_handler(CallbackQueryHandler(callback_router))
 
-    print("🟢 Meow Point Bot Online & Ready!")
+    print(f"🟢 ربات میوپوینت با موفقیت روشن شد! (آیدی ادمین: {ADMIN_ID})")
     app.run_polling()
 
 if __name__ == "__main__":
     main()
-    
+        
