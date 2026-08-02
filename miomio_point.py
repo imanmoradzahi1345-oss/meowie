@@ -146,7 +146,7 @@ async def send_pv_notify(context: ContextTypes.DEFAULT_TYPE, user_id: int, messa
 def calculate_dynamic_sell_price(base_price: float) -> int:
     multiplier = random.uniform(0.85, 1.45)
     return int(base_price * multiplier)
-# ==================================================
+    # ==================================================
 # 🟢 بخش ۲-الف: دستور میو/مع و پروفایل
 # ==================================================
 
@@ -550,7 +550,7 @@ async def factory_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             buttons.append([InlineKeyboardButton(f"📦 {v['name']} (هزینه: {v['cost']:,} میو)", callback_data=f"factory_start_{k}")])
 
         await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
-    # ==================================================
+        # ==================================================
 # 🟢 بخش ۵-الف: ساختار کازینو و انتخاب پیش‌بینی
 # ==================================================
 
@@ -694,9 +694,9 @@ async def custom_text_inputs_handler(update: Update, context: ContextTypes.DEFAU
             await update.message.reply_text(
                 f"🎮 **لابی {players_count} نفره ساخته شد!**\n💰 ورودی: {int(bet_amount):,} میو\n⏳ منتظر اعضا...",
                 reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown"
-                )
+            )
             # ==================================================
-# 🟢 بخش ۶-الف: هندلر دریافت تاس و پردازش کالبک‌ها
+# 🟢 بخش ۶-الف: هندلرهای تاس، اسم گربه و کالبک‌ها
 # ==================================================
 
 async def handle_user_dice_throw(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -741,7 +741,7 @@ async def handle_user_dice_throw(update: Update, context: ContextTypes.DEFAULT_T
         else:
             result_text = f"❌ **تاس عدد {val} آمد!** پیش‌بینی شما ({pred}) اشتباه بود."
 
-    # ۲. پردازش دقیق بازی اسلات (۱ تا ۶۴)
+    # ۲. پردازش بازی اسلات (کدهای ۱ تا ۶۴)
     elif game_type == "slot":
         r1 = (val - 1) % 4 + 1
         r2 = ((val - 1) // 4) % 4 + 1
@@ -783,6 +783,21 @@ async def handle_user_dice_throw(update: Update, context: ContextTypes.DEFAULT_T
 
     await update.message.reply_text(result_text, parse_mode="Markdown")
     context.user_data.pop('pending_casino_game', None)
+
+
+# 🐾 هندلر هوشمند تشخیص اسم گربه و باز کردن داشبورد
+async def cat_trigger_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.text:
+        return
+    
+    text = update.message.text.strip()
+    user_id = update.effective_user.id
+    user = get_user(user_id)
+    cat_name = user[3] if len(user) > 3 and user[3] else None
+
+    # بررسی کلمات کلیدی یا اسم اختصاصی گربه
+    if text in ["پیشی", "گربه"] or (cat_name and text.lower() == cat_name.lower()):
+        await cat_dashboard(update, context)
 
 
 async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1011,7 +1026,6 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text(f"❌ موجودی کافی نیست! موجودی شما: {int(user[1]):,} میو")
             return
 
-        # اگر بازی تاس است و هنوز حدس انتخاب نشده (مرحله ۳)
         if game_type == "dice" and len(parts) == 5:
             buttons = [
                 [
@@ -1032,7 +1046,6 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("🎲 **مرحله ۳: پیش‌بینی خود از نتیجه تاس را انتخاب کنید:**", reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
             return
 
-        # کسر ورودی و آماده‌سازی بازی
         conn = sqlite3.connect("meow_point.db")
         conn.cursor().execute("UPDATE users SET wallet = wallet - ? WHERE user_id = ?", (bet_amount, user_id))
         conn.commit()
@@ -1056,34 +1069,36 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text="✍️ **لطفاً مبلغ شرط‌بندی دلخواه را بفرستید:**\n(مثال: `50k` یا `1.5m`)",
             parse_mode="Markdown"
     )
-            # ==================================================
-# 🟢 بخش ۶-ب: مدیریت کامل ادمین، راهنما و راه اندازی main
+                # ==================================================
+# 🟢 بخش ۶-ب: دستورات ادمین، راهنما و راه اندازی main
 # ==================================================
 
 async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
 
-    text_parts = update.message.text.split(maxsplit=1)
-    cmd = text_parts[0]
+    text = update.message.text.strip()
+    text_parts = text.split(maxsplit=1)
+    # جدا کردن نام دستور بدون یوزرنیم ربات
+    cmd = text_parts[0].split('@')[0].lower()
 
     if cmd == "/admin":
         await update.message.reply_text(
             f"👑 **پنل مدیریت ارشد ربات میوپوینت**\n\n"
-            "💰 **مالی:**\n"
+            "💰 **مدیریت مالی:**\n"
             "▫️ `/give_points [user_id] [مبلغ]` - اهدای میوپوینت\n"
             "▫️ `/take_points [user_id] [مبلغ]` - کسر میوپوینت\n\n"
-            "🐱 **گربه:**\n"
+            "🐱 **مدیریت لول گربه:**\n"
             "▫️ `/add_cat [user_id] [تعداد]` - افزایش سطح گربه\n"
-            "▫️ `/set_cat [user_id] [سطح]` - تنظیم سطح گربه\n"
-            "▫️ `/max_cat [user_id]` - فول ارتقای گربه (سطح ۱۰۰)\n\n"
-            "⭐ **سطح عمومی کاربر (میو/مع):**\n"
-            "▫️ `/add_user_level [user_id] [تعداد]` - افزایش لول عمومی\n"
-            "▫️ `/set_user_level [user_id] [سطح]` - تنظیم لول عمومی\n"
-            "▫️ `/max_user_level [user_id]` - فول ارتقای لول عمومی (سطح ۱۰۰)\n\n"
+            "▫️ `/set_cat [user_id] [سطح]` - تنظیم مستقیم سطح گربه\n"
+            "▫️ `/max_cat [user_id]` - ارتقای گربه به سطح ۱۰۰\n\n"
+            "⭐ **مدیریت لول عمومی کاربر (میو/مع):**\n"
+            "▫️ `/add_user_level [user_id] [تعداد]` - افزایش لول عمومی کاربر\n"
+            "▫️ `/set_user_level [user_id] [سطح]` - تنظیم مستقیم لول عمومی\n"
+            "▫️ `/max_user_level [user_id]` - ارتقای لول عمومی به ۱۰۰\n\n"
             "⚙️ **عمومی:**\n"
             "▫️ `/reset_user [user_id]` - پاکسازی کامل داده‌های کاربر\n"
-            "▫️ `/stats` - مشاهده آمار کامل ربات\n"
+            "▫️ `/stats` - آمار کامل ربات\n"
             "▫️ `/bc [متن]` - ارسال پیام همگانی",
             parse_mode="Markdown"
         )
@@ -1105,7 +1120,7 @@ async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif cmd == "/give_points":
-        args = update.message.text.split()
+        args = text.split()
         if len(args) >= 3:
             try:
                 target_id = int(args[1])
@@ -1120,7 +1135,7 @@ async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(f"❌ خطا: {e}")
 
     elif cmd == "/take_points":
-        args = update.message.text.split()
+        args = text.split()
         if len(args) >= 3:
             try:
                 target_id = int(args[1])
@@ -1135,7 +1150,7 @@ async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # --- مدیریت سطح گربه ---
     elif cmd == "/add_cat":
-        args = update.message.text.split()
+        args = text.split()
         if len(args) >= 3:
             try:
                 target_id, levels = int(args[1]), int(args[2])
@@ -1148,7 +1163,7 @@ async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(f"❌ خطا: {e}")
 
     elif cmd == "/set_cat":
-        args = update.message.text.split()
+        args = text.split()
         if len(args) >= 3:
             try:
                 target_id, level = int(args[1]), int(args[2])
@@ -1161,7 +1176,7 @@ async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(f"❌ خطا: {e}")
 
     elif cmd == "/max_cat":
-        args = update.message.text.split()
+        args = text.split()
         if len(args) >= 2:
             try:
                 target_id = int(args[1])
@@ -1173,9 +1188,9 @@ async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 await update.message.reply_text(f"❌ خطا: {e}")
 
-    # --- مدیریت سطح عمومی کاربر (میو/مع) ---
+    # --- مدیریت سطح عمومی کاربر (که با میو/مع بالا می‌رود) ---
     elif cmd == "/add_user_level":
-        args = update.message.text.split()
+        args = text.split()
         if len(args) >= 3:
             try:
                 target_id, levels = int(args[1]), int(args[2])
@@ -1188,7 +1203,7 @@ async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(f"❌ خطا: {e}")
 
     elif cmd == "/set_user_level":
-        args = update.message.text.split()
+        args = text.split()
         if len(args) >= 3:
             try:
                 target_id, level = int(args[1]), int(args[2])
@@ -1201,7 +1216,7 @@ async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(f"❌ خطا: {e}")
 
     elif cmd == "/max_user_level":
-        args = update.message.text.split()
+        args = text.split()
         if len(args) >= 2:
             try:
                 target_id = int(args[1])
@@ -1214,7 +1229,7 @@ async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(f"❌ خطا: {e}")
 
     elif cmd == "/reset_user":
-        args = update.message.text.split()
+        args = text.split()
         if len(args) >= 2:
             try:
                 target_id = int(args[1])
@@ -1255,9 +1270,9 @@ async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
         "📖 **راهنمای جامع ربات میوپوینت:**\n\n"
-        "🐾 `میو` یا `مع` - دریافت میوپوینت رایگان\n"
+        "🐾 `میو` یا `مع` - دریافت میوپوینت رایگان و افزایش لول کاربر\n"
         "👤 `پروفایل` یا `میوهاش` - نمایش اطلاعات و لول کاربر\n"
-        "🐱 `پیشی` یا `گربه` - مدیریت داشبورد گربه\n"
+        "🐱 `پیشی` یا `گربه` (یا صدا زدن با اسم گربه) - مدیریت داشبورد گربه\n"
         "🏦 `بانک` - ورود به پنل بانک، واریز، برداشت و کارت به کارت\n"
         "💸 `انتقال بانکی [شماره حساب] [مبلغ]` - انتقال بانکی\n"
         "💸 `انتقال میویی [مبلغ]` - انتقال روی پیام ریپلی‌شده\n"
@@ -1276,14 +1291,17 @@ async def help_command_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 def main():
     app = Application.builder().token(TOKEN).build()
 
-    # اولویت بالا برای ورودی‌های متنی و ایموجی‌های تاس کاربر
+    # اولویت بالا برای ورودی‌های متنی، اسم گربه و تاس کاربر
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, custom_text_inputs_handler), group=-1)
     app.add_handler(MessageHandler(filters.DICE, handle_user_dice_throw))
 
     # هندلرهای دستورات متنی فارسی
     app.add_handler(MessageHandler(filters.Regex(r"^(میو|مع)$"), meow_handler))
     app.add_handler(MessageHandler(filters.Regex(r"^(پروفایل|میوهاش)$"), profile_handler))
-    app.add_handler(MessageHandler(filters.Regex(r"^(پیشی|گربه)$"), cat_dashboard))
+    
+    # هندلر هوشمند برای صدا زدن گربه (چه با کلمات عمومی چه با اسم اختصاصی)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, cat_trigger_handler), group=1)
+
     app.add_handler(MessageHandler(filters.Regex(r"^بانک$"), bank_handler))
     app.add_handler(MessageHandler(filters.Regex(r"^واریز"), bank_deposit_handler))
     app.add_handler(MessageHandler(filters.Regex(r"^برداشت"), bank_withdraw_handler))
@@ -1296,7 +1314,7 @@ def main():
     app.add_handler(MessageHandler(filters.Regex(r"^(دستورات ربات|راهنما)$"), help_command_handler))
     app.add_handler(CommandHandler(["start", "help"], help_command_handler))
 
-    # هندلر دستورات ادمین
+    # هندلر تمام دستورات ادمین
     app.add_handler(CommandHandler(
         ["admin", "give_points", "take_points", "add_cat", "set_cat", "max_cat",
          "add_user_level", "set_user_level", "max_user_level", "reset_user", "stats", "bc"],
