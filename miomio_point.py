@@ -122,7 +122,7 @@ def register_meow(user_id):
     conn.close()
     
     return new_meow_count, new_level, earned_points
-# ==========================================
+    # ==========================================
 # تنظیمات محصولات کارخانه (۱۰ محصول متناسب با لول)
 # ==========================================
 FACTORY_PRODUCTS = {
@@ -417,7 +417,7 @@ def handle_state_inputs(message):
         
         del user_states[user_id]
         bot.reply_to(message, f"✅ **خط تولید فعال شد!**\n\n📦 محصول: {product['name']}\n🔢 تعداد: {amount:,}\n💰 کل مبلغ پرداختی: {total_cost:,} میوپوینت\n\nجهت مشاهده یا لغو، کلمه `کارخونه` را ارسال کنید.", parse_mode="Markdown")
-# ==========================================
+                            # ==========================================
 # توابع کمکی تبدیل اعداد و مبالغ (K / کا / میلیون)
 # ==========================================
 def parse_fa_num(text):
@@ -696,7 +696,7 @@ def handle_bank_inputs(message):
         bot.reply_to(message, f"✅ **انتقال بین بانکی انجام شد!**\n💳 مبلغ **{amt:,}** میوپوینت به حساب **{dest_user['first_name']}** واریز گردید.", parse_mode="Markdown")
 
     conn.close()
-# ==========================================
+    # ==========================================
 # سیستم جامع کازینو (Casino Core System)
 # ==========================================
 
@@ -1150,7 +1150,7 @@ def handle_dice_rolls(message):
 
     summary += f"\n🏆 **برنده نهایی:** {winner_name}\n💰 **کل جایزه:** {total_pot:,} میوپوینت"
     bot.send_message(message.chat.id, summary, parse_mode="Markdown")
-# ==========================================
+    # ==========================================
 # ۱. جدول نژادهای گربه و تولید خودکار میوپوینت
 # ==========================================
 CAT_TYPES = {
@@ -1461,14 +1461,251 @@ def handle_admin_commands(message):
             bot.reply_to(message, f"⚡ لول میو/مع کاربر `{target_id}` به **{lvl}** ارتقا یافت.", parse_mode="Markdown")
         except Exception as e:
             bot.reply_to(message, f"❌ خطا: {e}")
+    # ==========================================
+# بخش ۶.۱: راه‌اندازی دیتابیس، پنل شیشه‌ای ادمین و پنل پیشی
+# ==========================================
 import time
 import random
 import threading
 from telebot import types
 
+# ۱. آماده‌سازی کامل دیتابیس
+def init_all_tables():
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    # جدول کاربران و ستون‌های تکمیلی
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            name TEXT,
+            cat_name TEXT DEFAULT 'برفک',
+            pocket_points INTEGER DEFAULT 0,
+            meow_count INTEGER DEFAULT 0,
+            cat_level INTEGER DEFAULT 1,
+            meow_level INTEGER DEFAULT 1,
+            last_meow_time REAL DEFAULT 0,
+            last_claim_time REAL DEFAULT 0
+        )
+    ''')
+    
+    # جدول یخچال و ماهی‌ها
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS user_fridge (
+            user_id INTEGER PRIMARY KEY,
+            capacity INTEGER DEFAULT 5,
+            last_fish_time REAL DEFAULT 0
+        )
+    ''')
+    
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS fridge_fishes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            fish_type_id INTEGER,
+            catch_time REAL
+        )
+    ''')
+    
+    conn.commit()
+    conn.close()
+
+init_all_tables()
+
+
 # ==========================================
-# ۱. جدول ۱۰ نوع ماهی بر اساس کمیابی و ارزش
+# ۲. پنل شیشه‌ای مدیریت ادمین (Admin Panel)
 # ==========================================
+@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and m.text and m.text.strip().lower() in ['ادمین', '/admin'])
+def handle_admin_panel(message):
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    btn_add_pts = types.InlineKeyboardButton("➕ اعطای میوپوینت", callback_data="admin_add_pts")
+    btn_cat_lvl = types.InlineKeyboardButton("⬆️ تغییر سطح گربه", callback_data="admin_cat_lvl")
+    btn_max_cat = types.InlineKeyboardButton("👑 مکس کردن گربه", callback_data="admin_max_cat")
+    btn_meow_lvl = types.InlineKeyboardButton("⚡ تغییر لول میو/مع", callback_data="admin_meow_lvl")
+    markup.add(btn_add_pts, btn_cat_lvl)
+    markup.add(btn_max_cat, btn_meow_lvl)
+
+    text = "🛠 **پنل مدیریت ادمین**\n\nلطفاً یکی از عملیات‌های زیر را انتخاب کنید:"
+    bot.send_message(message.chat.id, text, reply_markup=markup, parse_mode="Markdown")
+
+@bot.callback_query_handler(func=lambda call: call.from_user.id == ADMIN_ID and call.data.startswith('admin_'))
+def handle_admin_callbacks(call):
+    action = call.data
+    
+    if action == "admin_add_pts":
+        msg = bot.send_message(call.message.chat.id, "👤 **آیدی عددی کاربر و مقدار سکه را وارد کنید:**\n(فرمت: `آیدی مقدار` - مثال: `12345678 50k`)", parse_mode="Markdown")
+        bot.register_next_step_handler(msg, process_admin_add_points)
+
+    elif action == "admin_cat_lvl":
+        msg = bot.send_message(call.message.chat.id, "👤 **آیدی عددی کاربر و سطح جدید گربه (1 تا 10) را وارد کنید:**\n(فرمت: `آیدی سطح` - مثال: `12345678 5`)", parse_mode="Markdown")
+        bot.register_next_step_handler(msg, process_admin_set_cat_level)
+
+    elif action == "admin_max_cat":
+        msg = bot.send_message(call.message.chat.id, "👑 **آیدی عددی کاربر را برای مکس کردن سطح گربه (سطح 10) وارد کنید:**", parse_mode="Markdown")
+        bot.register_next_step_handler(msg, process_admin_max_cat)
+
+    elif action == "admin_meow_lvl":
+        msg = bot.send_message(call.message.chat.id, "⚡ **آیدی عددی کاربر و لول جدید مع/میو را وارد کنید:**\n(فرمت: `آیدی لول` - مثال: `12345678 3`)", parse_mode="Markdown")
+        bot.register_next_step_handler(msg, process_admin_set_meow_level)
+
+# توابع پردازش مراحل ادمین
+def process_admin_add_points(message):
+    try:
+        parts = message.text.strip().split()
+        target_id = int(parse_fa_num(parts[0]))
+        amount = parse_amount(parts[1])
+        if amount:
+            conn = get_db()
+            cursor = conn.cursor()
+            cursor.execute("UPDATE users SET pocket_points = pocket_points + ? WHERE user_id = ?", (amount, target_id))
+            conn.commit()
+            conn.close()
+            bot.reply_to(message, f"✅ مقدار **{amount:,} میوپوینت** به کاربر `{target_id}` اعطا شد.", parse_mode="Markdown")
+    except Exception as e:
+        bot.reply_to(message, f"❌ خطا در اجرا: {e}")
+
+def process_admin_set_cat_level(message):
+    try:
+        parts = message.text.strip().split()
+        target_id = int(parse_fa_num(parts[0]))
+        lvl = int(parse_fa_num(parts[1]))
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE users SET cat_level = ? WHERE user_id = ?", (lvl, target_id))
+        conn.commit()
+        conn.close()
+        bot.reply_to(message, f"✅ سطح گربه کاربر `{target_id}` به **{lvl}** تغییر یافت.", parse_mode="Markdown")
+    except Exception as e:
+        bot.reply_to(message, f"❌ خطا در اجرا: {e}")
+
+def process_admin_max_cat(message):
+    try:
+        target_id = int(parse_fa_num(message.text.strip()))
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE users SET cat_level = 10 WHERE user_id = ?", (target_id,))
+        conn.commit()
+        conn.close()
+        bot.reply_to(message, f"👑 سطح گربه کاربر `{target_id}` با موفقیت مکس شد (سطح ۱۰).", parse_mode="Markdown")
+    except Exception as e:
+        bot.reply_to(message, f"❌ خطا در اجرا: {e}")
+
+def process_admin_set_meow_level(message):
+    try:
+        parts = message.text.strip().split()
+        target_id = int(parse_fa_num(parts[0]))
+        lvl = int(parse_fa_num(parts[1]))
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE users SET meow_level = ? WHERE user_id = ?", (lvl, target_id))
+        conn.commit()
+        conn.close()
+        bot.reply_to(message, f"⚡ لول مع/میو کاربر `{target_id}` به **{lvl}** ارتقا یافت.", parse_mode="Markdown")
+    except Exception as e:
+        bot.reply_to(message, f"❌ خطا در اجرا: {e}")
+
+
+# ==========================================
+# ۳. پنل هوشمند و کامل پیشی (با ۳ دکمه فعال)
+# ==========================================
+@bot.message_handler(func=lambda m: m.text and any(k in m.text.strip().lower() for k in ['پیشی', 'گربه']))
+def handle_cat_smart_panel(message):
+    user_id = message.from_user.id
+    user = get_user(user_id, message.from_user.first_name)
+    
+    produced, cat_lvl, _ = calculate_passive_meows(user_id)
+    cat_info = get_cat_type(cat_lvl)
+
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    btn_upgrade = types.InlineKeyboardButton(f"⬆️ ارتقا سطح گربه (سطح فعلی: {cat_lvl})", callback_data="cat_upgrade_level")
+    btn_claim = types.InlineKeyboardButton(f"🎁 برداشت میوپوینت ({produced:,})", callback_data="cat_claim_points")
+    btn_rename = types.InlineKeyboardButton("✏️ تغییر اسم گربه", callback_data="cat_rename")
+    markup.add(btn_upgrade, btn_claim, btn_rename)
+
+    text = (
+        f"😺 **پنل اختصاصی پیشی**\n\n"
+        f"📛 **اسم پیشی:** {user['cat_name']}\n"
+        f"⭐ **سطح پیشی:** {cat_lvl}\n"
+        f"🐱 **نژاد:** {cat_info['name']}\n"
+        f"⚡ **نرخ تولید:** {cat_info['rate_per_hour']:,} میوپوینت / ساعت\n"
+        f"💎 **میوپوینت آماده برداشت:** {produced:,} میوپوینت\n\n"
+        f"چه کاری می‌خوای برات انجام بدم؟"
+    )
+    bot.send_message(message.chat.id, text, reply_markup=markup, parse_mode="Markdown")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('cat_'))
+def handle_cat_panel_callbacks(call):
+    user_id = call.from_user.id
+    
+    if call.data == "cat_upgrade_level":
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("SELECT cat_level, pocket_points FROM users WHERE user_id = ?", (user_id,))
+        row = cursor.fetchone()
+        
+        cat_lvl = row['cat_level'] if row and row['cat_level'] else 1
+        pocket = row['pocket_points'] if row else 0
+
+        if cat_lvl >= 10:
+            bot.answer_callback_query(call.id, "👑 سطح گربه شما در حداکثر میزان ممکن (۱۰) قرار دارد!", show_alert=True)
+            conn.close()
+            return
+
+        upgrade_cost = cat_lvl * 15000
+        if pocket < upgrade_cost:
+            bot.answer_callback_query(call.id, f"❌ میوپوینت کافی در جیب ندارید! هزینه ارتقا: {upgrade_cost:,}", show_alert=True)
+            conn.close()
+            return
+
+        new_lvl = cat_lvl + 1
+        new_pocket = pocket - upgrade_cost
+        cursor.execute("UPDATE users SET cat_level = ?, pocket_points = ? WHERE user_id = ?", (new_lvl, new_pocket, user_id))
+        conn.commit()
+        conn.close()
+
+        bot.answer_callback_query(call.id, f"🎉 سطح گربه شما به {new_lvl} ارتقا یافت!", show_alert=True)
+        bot.edit_message_text(f"✅ **سطح گربه شما با موفقیت به {new_lvl} ارتقا یافت!**", call.message.chat.id, call.message.message_id)
+
+    elif call.data == "cat_claim_points":
+        produced, cat_lvl, _ = calculate_passive_meows(user_id)
+        
+        if produced <= 0:
+            bot.answer_callback_query(call.id, "❌ هنوز میوپوینتی برای برداشت تولید نشده است!", show_alert=True)
+            return
+
+        user = get_user(user_id)
+        new_pocket = user['pocket_points'] + produced
+        now = time.time()
+
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE users SET pocket_points = ?, last_claim_time = ? WHERE user_id = ?", (new_pocket, now, user_id))
+        conn.commit()
+        conn.close()
+
+        bot.answer_callback_query(call.id, f"✅ مقدار {produced:,} میوپوینت به جیب شما اضافه شد!", show_alert=True)
+        bot.edit_message_text(f"💰 **مقدار {produced:,} میوپوینت تولید شده توسط گربه با موفقیت برداشت شد!**", call.message.chat.id, call.message.message_id)
+
+    elif call.data == "cat_rename":
+        msg = bot.send_message(call.message.chat.id, "✏️ **لطفاً اسم جدید پیشی خود را ارسال کنید:**", parse_mode="Markdown")
+        bot.register_next_step_handler(msg, process_rename_cat)
+
+def process_rename_cat(message):
+    new_name = message.text.strip()
+    user_id = message.from_user.id
+    if new_name:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE users SET cat_name = ? WHERE user_id = ?", (new_name, user_id))
+        conn.commit()
+        conn.close()
+        bot.reply_to(message, f"✅ اسم پیشی شما با موفقیت به **{new_name}** تغییر کرد!", parse_mode="Markdown")
+    # ==========================================
+# بخش ۶.۲: سیستم ماهی‌گیری، یخچال و polling نهایی
+# ==========================================
+
+# ۱۰ نوع ماهی با خصوصیات مختلف
 FISH_TYPES = {
     1: {"name": "🐟 ماهی کیلکا (ساده)", "rarity": "عادی", "price": 500, "nutritional_val": 100},
     2: {"name": "🐠 ماهی قزل‌آلا", "rarity": "عادی", "price": 1200, "nutritional_val": 250},
@@ -1482,56 +1719,25 @@ FISH_TYPES = {
     10: {"name": "👑 ماهی سلطنتی خاویار", "rarity": "اسطوره‌ای", "price": 1500000, "nutritional_val": 200000}
 }
 
-# حافظه موقت برای مدیریت ماهی‌های صید شده
-active_fishes = {}  # {user_id: {"fish_id": int, "msg_id": int, "claimed": bool}}
+active_fishes = {}  # حافظه موقت برای مدیریت ماهی‌گیری
 
 def get_random_fish():
-    """انتخاب ماهی بر اساس شانس و کمیابی"""
     rand = random.random()
-    if rand < 0.35:      # ۳۵٪ شانسی
+    if rand < 0.35:
         fish_id = random.choice([1, 2])
-    elif rand < 0.65:    # ۳۰٪ شانسی
+    elif rand < 0.65:
         fish_id = random.choice([3, 4])
-    elif rand < 0.85:    # ۲۰٪ شانسی
+    elif rand < 0.85:
         fish_id = random.choice([5, 6])
-    elif rand < 0.96:    # ۱۱٪ شانسی
+    elif rand < 0.96:
         fish_id = random.choice([7, 8])
-    else:               # ۴٪ شانسی
+    else:
         fish_id = random.choice([9, 10])
     return fish_id, FISH_TYPES[fish_id]
 
-# ==========================================
-# ۲. ساخت و آماده‌سازی جدول‌های یخچال و ماهی‌گیری
-# ==========================================
-def init_fishing_db():
-    conn = get_db()
-    cursor = conn.cursor()
-    
-    # جدول یخچال کاربران
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS user_fridge (
-            user_id INTEGER PRIMARY KEY,
-            capacity INTEGER DEFAULT 5,
-            last_fish_time REAL DEFAULT 0
-        )
-    ''')
-    
-    # جدول ماهی‌های موجود در یخچال
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS fridge_fishes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            fish_type_id INTEGER,
-            catch_time REAL
-        )
-    ''')
-    conn.commit()
-    conn.close()
-
-init_fishing_db()
 
 # ==========================================
-# ۳. سیستم ماهی‌گیری (با تایمر ۱۳ ثانیه‌ای و ۶۰ ثانیه‌ای)
+# ۱. سیستم ماهی‌گیری (با تایمرهای ۱۳ثانیه صید و ۶۰ثانیه فرار)
 # ==========================================
 @bot.message_handler(func=lambda m: m.text and m.text.strip().lower() == 'ماهی')
 def handle_fishing_start(message):
@@ -1554,14 +1760,12 @@ def handle_fishing_start(message):
         conn.close()
         return
 
-    # به‌روزرسانی زمان آخرین ماهی‌گیری
     cursor.execute("INSERT OR REPLACE INTO user_fridge (user_id, capacity, last_fish_time) VALUES (?, COALESCE((SELECT capacity FROM user_fridge WHERE user_id = ?), 5), ?)", (user_id, user_id, now))
     conn.commit()
     conn.close()
 
     sent_msg = bot.reply_to(message, "🎣 قلاب ماهی‌گیری به آب انداخته شد...\nلطفاً **۱۳ ثانیه** صبر کنید تا ماهی به قلاب بیفته!")
 
-    # اجرای نخ جانبی برای انتظار ۱۳ ثانیه‌ای صید
     def catch_task():
         time.sleep(13)
         fish_id, fish_info = get_random_fish()
@@ -1585,7 +1789,6 @@ def handle_fishing_start(message):
             bot.edit_message_text(text, sent_msg.chat.id, sent_msg.message_id, reply_markup=markup, parse_mode="Markdown")
             active_fishes[user_id] = {"fish_id": fish_id, "msg_id": sent_msg.message_id, "claimed": False}
             
-            # تایمر ۶۰ ثانیه‌ای برای فرار ماهی
             def escape_task():
                 time.sleep(60)
                 if user_id in active_fishes and not active_fishes[user_id]["claimed"]:
@@ -1606,7 +1809,6 @@ def handle_fishing_start(message):
 
     threading.Thread(target=catch_task, daemon=True).start()
 
-# پردازش دکمه‌های ماهی صیدشده
 @bot.callback_query_handler(func=lambda call: call.data.startswith('fish_'))
 def handle_caught_fish_actions(call):
     user_id = call.from_user.id
@@ -1635,7 +1837,7 @@ def handle_caught_fish_actions(call):
             bot.answer_callback_query(call.id, f"💰 ماهی با موفقیت به قیمت {fish_info['price']:,} فروخته شد!", show_alert=True)
             bot.edit_message_text(f"💵 **ماهی {fish_info['name']} فروخته شد!**\nمبلغ {fish_info['price']:,} میوپوینت به جیب شما اضافه گردید.", call.message.chat.id, call.message.message_id)
 
-        elif action == "to": # انتقال به یخچال
+        elif action == "to":
             conn = get_db()
             cursor = conn.cursor()
             cursor.execute("SELECT capacity FROM user_fridge WHERE user_id = ?", (user_id,))
@@ -1647,7 +1849,7 @@ def handle_caught_fish_actions(call):
 
             if current_count >= cap:
                 bot.answer_callback_query(call.id, f"🧊 یخچال شما پر است! (ظرفیت فعلی: {cap})", show_alert=True)
-                active_fishes[user_id]["claimed"] = False  # اجازه انتخاب گزینه‌های دیگر
+                active_fishes[user_id]["claimed"] = False
                 conn.close()
                 return
 
@@ -1658,7 +1860,7 @@ def handle_caught_fish_actions(call):
             bot.answer_callback_query(call.id, "🧊 ماهی با موفقیت در یخچال ذخیره شد!", show_alert=True)
             bot.edit_message_text(f"✅ **ماهی {fish_info['name']} به یخچال منتقل شد.**", call.message.chat.id, call.message.message_id)
 
-        elif action == "feed": # دادن به پیشی
+        elif action == "feed":
             user = get_user(user_id)
             gained_points = fish_info['nutritional_val']
             new_pocket = user['pocket_points'] + gained_points
@@ -1672,8 +1874,9 @@ def handle_caught_fish_actions(call):
             bot.answer_callback_query(call.id, f"😋 پیشی ماهی رو خورد و انرژی گرفت! (+{gained_points:,} میوپوینت)", show_alert=True)
             bot.edit_message_text(f"😸 **پیشی با لذت {fish_info['name']} رو خورد!**\nارزش غذایی: +{gained_points:,} میوپوینت به جیب اضافه شد.", call.message.chat.id, call.message.message_id)
 
+
 # ==========================================
-# ۴. پنل یخچال و مدیریت ماهی‌های داخل آن
+# ۲. پنل کامل یخچال
 # ==========================================
 @bot.message_handler(func=lambda m: m.text and m.text.strip().lower() == 'یخچال')
 def handle_fridge_panel(message):
@@ -1780,7 +1983,6 @@ def handle_fridge_callbacks(call):
     elif call.data == "fridge_exit":
         bot.edit_message_text("🚪 **از یخچال خارج شدید.**", call.message.chat.id, call.message.message_id)
 
-# مدیریت دکمه‌های تکی ماهی‌های درون یخچال
 @bot.callback_query_handler(func=lambda call: call.data.startswith('fitem_'))
 def handle_fridge_item_action(call):
     user_id = call.from_user.id
@@ -1855,9 +2057,11 @@ def handle_fridge_item_action(call):
             bot.edit_message_text(f"😸 **پیشی ماهی {f_info['name']} را نوش جان کرد!** (+{f_info['nutritional_val']:,} میوپوینت)", call.message.chat.id, call.message.message_id)
         conn.close()
 
+
 # ==========================================
-# ۵. راه اندازی پایانی ربات (Infinity Polling)
+# ۳. اجرای نهایی ربات
 # ==========================================
 if __name__ == "__main__":
-    print("🤖 ربات پیشی شاپ با موفقیت روشن شد و در حال پاسخگویی است...")
+    print("🤖 ربات پیشی شاپ با موفقیت روشن شد...")
     bot.infinity_polling(skip_pending=True)
+            
