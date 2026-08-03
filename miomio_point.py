@@ -122,7 +122,7 @@ def register_meow(user_id):
     conn.close()
     
     return new_meow_count, new_level, earned_points
-    # ==========================================
+# ==========================================
 # تنظیمات محصولات کارخانه (۱۰ محصول متناسب با لول)
 # ==========================================
 FACTORY_PRODUCTS = {
@@ -417,7 +417,7 @@ def handle_state_inputs(message):
         
         del user_states[user_id]
         bot.reply_to(message, f"✅ **خط تولید فعال شد!**\n\n📦 محصول: {product['name']}\n🔢 تعداد: {amount:,}\n💰 کل مبلغ پرداختی: {total_cost:,} میوپوینت\n\nجهت مشاهده یا لغو، کلمه `کارخونه` را ارسال کنید.", parse_mode="Markdown")
-    # ==========================================
+# ==========================================
 # توابع کمکی تبدیل اعداد و مبالغ (K / کا / میلیون)
 # ==========================================
 def parse_fa_num(text):
@@ -696,7 +696,7 @@ def handle_bank_inputs(message):
         bot.reply_to(message, f"✅ **انتقال بین بانکی انجام شد!**\n💳 مبلغ **{amt:,}** میوپوینت به حساب **{dest_user['first_name']}** واریز گردید.", parse_mode="Markdown")
 
     conn.close()
-        # ==========================================
+# ==========================================
 # سیستم جامع کازینو (Casino Core System)
 # ==========================================
 
@@ -1861,4 +1861,3 @@ def handle_fridge_item_action(call):
 if __name__ == "__main__":
     print("🤖 ربات پیشی شاپ با موفقیت روشن شد و در حال پاسخگویی است...")
     bot.infinity_polling(skip_pending=True)
-        
