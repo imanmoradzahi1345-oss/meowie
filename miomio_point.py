@@ -1281,7 +1281,7 @@ def main():
 
     # ۲. ساخت متغیر برنامه با توکن ربات
     BOT_TOKEN = "8971798729:AAGY8Hw8osbpHdglddpckGSnDUgIR8bywfw"  # 👈 توکن ربات تلگرام خود را اینجا قرار دهید
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
+    application = ApplicationBuilder().token(8971798729:"AAGY8Hw8osbpHdglddpckGSnDUgIR8bywfw" .build()
 
     # ۳. ثبت هندلرهای دستورات اصلی و سیستم گربه
     application.add_handler(CommandHandler("start", start_handler))
@@ -1327,7 +1327,7 @@ def main():
 
 if __name__ == "__main__":
     main()
-    # آیدی عددی خود را اینجا وارد کنید
+   8918154552 # آیدی عددی خود را اینجا وارد کنید
 
 
 def is_admin(user_id: int) -> bool:
