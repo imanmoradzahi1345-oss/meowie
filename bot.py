@@ -1,4 +1,3 @@
-# ==================== بخش ۱ از ۶ ====================
 import asyncio
 import aiosqlite
 import random
@@ -179,9 +178,9 @@ def get_cat_type(level: int) -> str:
     return CAT_TYPES[min(level - 1, len(CAT_TYPES) - 1)]
 
 def cat_rate(level: int) -> int:
-    return 5 + level * 3# ==================== بخش ۲ از ۶ ====================
+    return 5 + level * 3
 
-# ---------- میو / مع (هر ۳ دقیقه یک‌بار) ----------
+# ==================== میو ====================
 @router.message(F.text.regexp(r"(?i)^(میو|مع)$"))
 async def meow_handler(message: Message):
     user = await get_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
@@ -214,7 +213,7 @@ async def meow_handler(message: Message):
         f"📊 لول میو: {new_level} | تعداد میو: {new_count}"
     )
 
-# ---------- پروفایل / میوهاش ----------
+# ==================== پروفایل ====================
 @router.message(F.text.regexp(r"(?i)^(پروفایل|میوهاش)$"))
 async def profile_handler(message: Message):
     target = message.reply_to_message.from_user if message.reply_to_message else message.from_user
@@ -250,7 +249,7 @@ async def profile_cb(callback: CallbackQuery):
     ]))
     await callback.answer()
 
-# ---------- پنل پیشی ----------
+# ==================== پیشی ====================
 @router.message(F.text.regexp(r"(?i)^(پیشی|گربه)$"))
 async def cat_panel_msg(message: Message):
     await show_cat_panel(message.from_user.id, message)
@@ -326,8 +325,9 @@ async def cat_rename_finish(message: Message, state: FSMContext):
     await update_user(message.from_user.id, cat_name=name)
     await state.clear()
     await message.reply(f"✅ اسم پیشی به «{name}» تغییر کرد!")
-    await show_cat_panel(message.from_user.id, message)# ==================== بخش ۳ از ۶ ====================
+    await show_cat_panel(message.from_user.id, message)
 
+# ==================== کازینو ====================
 @router.message(F.text.regexp(r"(?i)^کازینو$"))
 async def casino_msg(message: Message):
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -478,148 +478,20 @@ async def process_dice(message: Message, state: FSMContext):
     user_choice = data.get("even_odd")
     bet = data["bet"]
 
-    correct = (user_choice == "odd" and is_odd) or (user_choice == "even" and not# ==================== بخش ۴ از ۶ ====================
+    correct = (user_choice == "odd" and is_odd) or (user_choice == "even" and not is_odd)
+    multi = 1.5 if correct else 0.0
+    win = int(bet * multi)
 
-def get_sell_price(name: str) -> int:
-    hour = time.localtime().tm_hour
-    base = {
-        "پشمک": 8, "شکلات": 12, "آبنبات": 18, "کیک": 30, "بستنی": 45,
-        "پیتزا": 75, "همبرگر": 120, "هواپیمای اسباب‌بازی": 220,
-        "ماشین کنترلی": 380, "ربات میو": 750
-    }
-    price = base.get(name, 10)
-    if 14 <= hour < 18:
-        return int(price * 1.3)
-    if 22 <= hour or hour < 6:
-        return int(price * 0.8)
-    return price
+    if win > 0:
+        await add_pocket(message.from_user.id, win)
 
-# ---------- کارخانه ----------
-@router.message(F.text.regexp(r"(?i)^کارخانه$"))
-async def factory_msg(message: Message):
-    await show_factory(message.from_user.id, message)
-
-@router.callback_query(F.data == "factory")
-async def factory_cb(callback: CallbackQuery):
-    await show_factory(callback.from_user.id, callback.message, edit=True)
-    await callback.answer()
-
-async def show_factory(user_id: int, message: Message, edit: bool = False):
-    user = await get_user(user_id)
-    now = time.time()
-
-    if user["factory_producing"] and now >= user["factory_end_time"]:
-        prod = FACTORY_PRODUCTS.get(user["factory_product_id"])
-        if prod:
-            profit = user["factory_amount"] * get_sell_price(prod["name"])
-            await update_user(user_id,
-                              pocket=user["pocket"] + profit,
-                              factory_producing=0,
-                              factory_amount=0,
-                              factory_product_id=0)
-            await message.answer(f"✅ تولید تمام شد! {format_num(profit)} میوپوینت به جیب اضافه شد.")
-
-    status = "🟢 در حال تولید..." if user["factory_producing"] else "🔴 آماده تولید"
-    text = f"🏭 پنل کارخانه\n\nسطح کارخانه: {user['factory_level']}\nوضعیت: {status}"
-
-    buttons = [
-        [InlineKeyboardButton(text="⬆️ ارتقا کارخانه", callback_data="factory_upgrade")],
-        [InlineKeyboardButton(text="📦 شروع تولید", callback_data="factory_produce")],
-        [InlineKeyboardButton(text="📋 لیست محصولات", callback_data="factory_list")],
-    ]
-    if user["factory_producing"]:
-        buttons.append([InlineKeyboardButton(text="❌ لغو تولید", callback_data="factory_cancel")])
-    buttons.append([InlineKeyboardButton(text="🔙 بازگشت", callback_data="main_menu")])
-
-    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
-    if edit:
-        try:
-            await message.edit_text(text, reply_markup=kb)
-        except:
-            await message.answer(text, reply_markup=kb)
-    else:
-        await message.reply(text, reply_markup=kb)
-
-@router.callback_query(F.data == "factory_upgrade")
-async def factory_upgrade(callback: CallbackQuery):
-    user = await get_user(callback.from_user.id)
-    cost = user["factory_level"] * 2000
-    if user["pocket"] < cost:
-        await callback.answer(f"موجودی کافی نیست! نیاز: {format_num(cost)}", show_alert=True)
-        return
-    await update_user(callback.from_user.id,
-                      pocket=user["pocket"] - cost,
-                      factory_level=user["factory_level"] + 1)
-    await callback.answer("✅ کارخانه ارتقا یافت!")
-    await show_factory(callback.from_user.id, callback.message, edit=True)
-
-@router.callback_query(F.data == "factory_list")
-async def factory_list(callback: CallbackQuery):
-    user = await get_user(callback.from_user.id)
-    text = "📋 لیست محصولات کارخانه:\n\n"
-    buttons = []
-    for pid, prod in FACTORY_PRODUCTS.items():
-        if user["factory_level"] >= prod["unlock"]:
-            text += f"✅ {prod['name']} | هزینه: {prod['cost']} | زمان پایه: {prod['base_time']} ساعت\n"
-            buttons.append([InlineKeyboardButton(
-                text=f"تولید {prod['name']}",
-                callback_data=f"produce_{pid}"
-            )])
-        else:
-            text += f"🔒 {prod['name']} (نیاز به سطح {prod['unlock']})\n"
-    buttons.append([InlineKeyboardButton(text="🔙 بازگشت", callback_data="factory")])
-    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
-    await callback.answer()
-
-@router.callback_query(F.data.startswith("produce_"))
-async def factory_start_produce(callback: CallbackQuery, state: FSMContext):
-    pid = int(callback.data.split("_")[1])
-    await state.update_data(product_id=pid)
-    await state.set_state(FactoryStates.entering_amount)
-    await callback.message.edit_text("تعداد تولید را وارد کنید (مثال: 10 یا 100):")
-    await callback.answer()
-
-@router.message(FactoryStates.entering_amount)
-async def factory_amount(message: Message, state: FSMContext):
-    try:
-        amount = int(message.text.strip())
-        if amount <= 0:
-            raise ValueError
-    except:
-        await message.reply("❌ عدد معتبر وارد کنید.")
-        return
-
-    data = await state.get_data()
-    pid = data["product_id"]
-    prod = FACTORY_PRODUCTS[pid]
-    user = await get_user(message.from_user.id)
-
-    total_cost = amount * prod["cost"]
-    if user["pocket"] < total_cost:
-        await message.reply(f"❌ موجودی کافی نیست! نیاز: {format_num(total_cost)}")
-        await state.clear()
-        return
-
-    # زمان ساخت (سطح کارخانه سرعت را بیشتر می‌کند)
-    hours = max(1, prod["base_time"] - (user["factory_level"] // 3))
-    end_time = time.time() + (hours * 3600)
-
-    await update_user(message.from_user.id,
-                      pocket=user["pocket"] - total_cost,
-                      factory_producing=1,
-                      factory_end_time=end_time,
-                      factory_amount=amount,
-                      factory_product_id=pid)
-    await state.clear()
-    await message.reply(
-        f"✅ تولید شروع شد!\n"
-        f"محصول: {prod['name']}\n"
-        f"تعداد: {amount}\n"
-        f"زمان تقریبی: {hours} ساعت\n"
-        f"برای لغو از پنل کارخانه استفاده کنید."
+    result = (
+        f"🎲 عدد آمد: {value} ({'فرد' if is_odd else 'زوج'})\n"
+        f"{'✅ درست حدس زدی! ×۱.۵' if correct else '❌ اشتباه بود!'}\n"
+        f"{format_num(win)} میوپوینت"
     )
-
-@router.callback_query(F.data == "factory_cancel")
+    await message.reply(result)
+    await state.clear()@router.callback_query(F.data == "factory_cancel")
 async def factory_cancel(callback: CallbackQuery):
     user = await get_user(callback.from_user.id)
     if not user["factory_producing"]:
@@ -639,7 +511,6 @@ async def factory_cancel(callback: CallbackQuery):
 async def factory_produce_btn(callback: CallbackQuery):
     await factory_list(callback)
 
-# ---------- یخچال ----------
 @router.message(F.text.regexp(r"(?i)^یخچال$"))
 async def fridge_msg(message: Message):
     await show_fridge(message.from_user.id, message)
@@ -761,18 +632,14 @@ async def feed_fish(callback: CallbackQuery):
             return
         await db.execute("DELETE FROM fridge_fish WHERE id = ?", (fish_id,))
         await db.commit()
-    # ارزش غذایی به امتیاز گربه اضافه می‌شود
     user = await get_user(callback.from_user.id)
     await update_user(callback.from_user.id, cat_points=user["cat_points"] + fish["food"])
     await callback.answer(f"✅ پیشی خورد! +{fish['food']} امتیاز")
-    await show_fridge(callback.from_user.id, callback.message, edit=True)
-
-# ---------- ماهیگیری ----------
-@router.message(F.text.regexp(r"(?i)^ماهی$"))
+    await show_fridge(callback.from_user.id, callback.message, edit=True)@router.message(F.text.regexp(r"(?i)^ماهی$"))
 async def fish_catch(message: Message):
     user = await get_user(message.from_user.id)
     now = time.time()
-    if now - user["last_fish"] < 1200:  # ۲۰ دقیقه
+    if now - user["last_fish"] < 1200:
         remain = int(1200 - (now - user["last_fish"]))
         m, s = divmod(remain, 60)
         await message.reply(f"🎣 هنوز زود است!\nلطفاً {m} دقیقه و {s} ثانیه صبر کنید.")
@@ -781,7 +648,6 @@ async def fish_catch(message: Message):
     wait_msg = await message.reply("🎣 لطفاً ۱۳ ثانیه صبر کنید...")
     await asyncio.sleep(13)
 
-    # انتخاب ماهی بر اساس کمیابی
     weights = [10, 9, 8, 7, 6, 5, 4, 3, 2, 1]
     fish = random.choices(FISH_TYPES, weights=weights, k=1)[0]
 
@@ -799,7 +665,6 @@ async def fish_catch(message: Message):
     await wait_msg.edit_text(text, reply_markup=kb)
     await update_user(message.from_user.id, last_fish=now)
 
-    # اگر ۶۰ ثانیه کاری نکرد، فرار کند
     await asyncio.sleep(60)
     try:
         await wait_msg.edit_text("🐟 ماهی فرار کرد!\nتا ماهیگیری بعدی ۲۰ دقیقه صبر کنید.")
@@ -843,9 +708,8 @@ async def catch_feed(callback: CallbackQuery):
     user = await get_user(callback.from_user.id)
     await update_user(callback.from_user.id, cat_points=user["cat_points"] + food)
     await callback.message.edit_text(f"✅ پیشی ماهی را خورد! +{food} امتیاز")
-    await callback.answer()# ==================== بخش ۵ از ۶ ====================
+    await callback.answer()
 
-# ---------- بانک (سه دکمه شیشه‌ای) ----------
 @router.message(F.text.regexp(r"(?i)^بانک$"))
 async def bank_msg(message: Message):
     user = await get_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
@@ -879,9 +743,7 @@ async def bank_cb(callback: CallbackQuery):
         [InlineKeyboardButton(text="🔙 بازگشت", callback_data="main_menu")]
     ])
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
-    await callback.answer()
-
-@router.callback_query(F.data == "bank_deposit")
+    await callback.answer()@router.callback_query(F.data == "bank_deposit")
 async def bank_deposit_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(TransferStates.confirming)
     await state.update_data(action="deposit")
@@ -964,7 +826,6 @@ async def bank_actions(message: Message, state: FSMContext):
             await state.clear()
             return
 
-        # پیدا کردن صاحب حساب
         async with aiosqlite.connect(DB_PATH) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute("SELECT * FROM users WHERE bank_account = ?", (target_acc,)) as cur:
@@ -983,7 +844,6 @@ async def bank_actions(message: Message, state: FSMContext):
         await message.reply(f"✅ {format_num(amount)} به حساب {target_acc} منتقل شد.")
         await state.clear()
 
-# ---------- انتقال میویی (ریپلای) ----------
 @router.message(F.text.regexp(r"(?i)^انتقال میویی\s+(.+)$") & F.reply_to_message)
 async def transfer_meow(message: Message, state: FSMContext):
     amount_text = message.text.split(maxsplit=2)[-1]
@@ -1047,10 +907,7 @@ async def transfer_yes(callback: CallbackQuery, state: FSMContext):
 async def transfer_no(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.message.edit_text("❌ انتقال لغو شد.")
-    await callback.answer()# ==================== بخش ۶ از ۶ ====================
-
-# ---------- پنل ادمین ----------
-@router.message(F.text.regexp(r"(?i)^ادمین$") & F.from_user.id == ADMIN_ID)
+    await callback.answer()@router.message(F.text.regexp(r"(?i)^ادمین$") & F.from_user.id == ADMIN_ID)
 async def admin_panel(message: Message):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💰 دادن میوپوینت", callback_data="admin_give")],
@@ -1177,7 +1034,6 @@ async def admin_set_cat_level(message: Message, state: FSMContext):
     await message.reply(f"✅ سطح گربه کاربر {uid} به {level} تغییر کرد.")
     await state.clear()
 
-# ---------- منوی اصلی و بازگشت ----------
 @router.callback_query(F.data == "main_menu")
 async def main_menu(callback: CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -1218,7 +1074,6 @@ async def start_cmd(message: Message):
         reply_markup=kb
     )
 
-# ---------- اجرای ربات ----------
 async def main():
     await init_db()
     print("ربات میو شروع به کار کرد...")
