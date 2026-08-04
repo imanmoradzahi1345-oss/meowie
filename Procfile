@@ -1,1 +1,1 @@
-worker: python miomio_point.py
+worker: python bot.py
