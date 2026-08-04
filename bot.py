@@ -23,7 +23,7 @@ from telegram.ext import (
 )
 
 # تنظیمات اصلی ربات
-BOT_TOKEN = "8971798729:AAGY8Hw8osbpHdglddpckGSnDUgIR8bywfw"
+BOT_TOKEN = "8328122794:AAG67dIJIsz5tqgtVF0BHo80aZWIGtECc-A"
 ADMIN_ID = 8918154552
 DB_NAME = "pishi_bot.db"
 
