@@ -1,2 +1,1 @@
-aiogram
-aiosqlite
+python-telegram-bot==22.8
