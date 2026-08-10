@@ -7,7 +7,7 @@ import time
 from datetime import datetime, timedelta
 import json
 
-BOT_TOKEN = "8786315286:AAFtV2BlWQJHiKGXZ7D8ynTm2GwfD11d94U"
+BOT_TOKEN = "8328122794:AAG67dIJIsz5tqgtVF0BHo80aZWIGtECc-A"
 ADMIN_IDS = [7530457395]
 
 bot = telebot.TeleBot(BOT_TOKEN)
