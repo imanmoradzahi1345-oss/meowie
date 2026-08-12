@@ -253,7 +253,8 @@ def process_order_submission(message):
     )
     bot.send_message(ADMIN_ID, f"📦 **سفارش جدید استارز**\n\nکد: `{order_code}`\nکاربر: `{message.from_user.id}`\nلینک: {post_link}",
                      parse_mode="Markdown", reply_markup=admin_markup)
-    @bot.message_handler(func=lambda m: m.text == "🎁 قرعه‌کشی و ثبت کد")
+
+@bot.message_handler(func=lambda m: m.text == "🎁 قرعه‌کشی و ثبت کد")
 def gift_and_draw_handler(message):
     msg = bot.send_message(
         message.chat.id,
@@ -392,4 +393,4 @@ def finalize_reject(message, order_code, user_id):
 if __name__ == "__main__":
     print("Bot started successfully...")
     bot.infinity_polling(skip_pending=True)
-        
+    
