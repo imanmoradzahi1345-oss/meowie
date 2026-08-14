@@ -1,965 +1,1060 @@
-# ==========================================
-# بخش 1 از 8: تنظیمات اولیه و اتصال به دیتابیس
-# ==========================================
-import datetime
-import random
-import sqlite3
+# ==================== بخش ۱ از ۶ - Virtual Life ====================
 import telebot
-from telebot import types
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+import sqlite3
+import random
+import time
+from datetime import datetime, timedelta
 
-TOKEN = '8968618358:AAHReb2nlduQkclIJE1V-_FKh206VxmYmuc'
-ADMIN_ID = 7530457395
+BOT_TOKEN = "8378922493:AAGOzhaN3eUcE53Yz49bo5UMR1rrI-MiRlM"
+ADMIN_IDS = [7530457395]
 
-bot = telebot.TeleBot(TOKEN)
+bot = telebot.TeleBot(BOT_TOKEN)
+user_steps = {}
 
+def get_db():
+    return sqlite3.connect("virtual_life.db", check_same_thread=False)
 
 def init_db():
-  conn = sqlite3.connect('economy_game.db')
-  cursor = conn.cursor()
+    conn = get_db()
+    c = conn.cursor()
 
-  # جدول کاربران
-  cursor.execute('''
-    CREATE TABLE IF NOT EXISTS users (
+    c.execute('''CREATE TABLE IF NOT EXISTS users (
         user_id INTEGER PRIMARY KEY,
         username TEXT,
-        wallet INTEGER DEFAULT 1000,
+        full_name TEXT,
+        money INTEGER DEFAULT 5000,
         bank INTEGER DEFAULT 0,
         level INTEGER DEFAULT 1,
         xp INTEGER DEFAULT 0,
-        spouse_id INTEGER DEFAULT 0,
+        job TEXT DEFAULT NULL,
+        house TEXT DEFAULT 'اتاق کوچک',
+        car TEXT DEFAULT NULL,
+        energy INTEGER DEFAULT 100,
+        last_work REAL DEFAULT 0,
+        last_steal REAL DEFAULT 0,
+        partner_id INTEGER DEFAULT NULL,
+        missions_done INTEGER DEFAULT 0,
+        invited_by INTEGER DEFAULT NULL,
         is_banned INTEGER DEFAULT 0,
-        last_daily TEXT,
-        last_crime TEXT,
-        last_work TEXT,
-        referred_by INTEGER DEFAULT 0
-    )
-    ''')
+        joined_at TEXT,
+        last_active TEXT
+    )''')
 
-  # جدول فروشگاه (ماشین، خانه/ویلا، آیتم)
-  cursor.execute('''
-    CREATE TABLE IF NOT EXISTS shop_items (
+    c.execute('''CREATE TABLE IF NOT EXISTS jobs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT UNIQUE,
-        category TEXT,
-        price INTEGER
-    )
-    ''')
+        income INTEGER,
+        cooldown INTEGER,
+        min_level INTEGER,
+        emoji TEXT DEFAULT '💼'
+    )''')
 
-  # جدول دارایی کاربران
-  cursor.execute('''
-    CREATE TABLE IF NOT EXISTS user_inventory (
+    c.execute('''CREATE TABLE IF NOT EXISTS houses (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT UNIQUE,
+        price INTEGER,
+        bonus INTEGER DEFAULT 0,
+        emoji TEXT DEFAULT '🏠'
+    )''')
+
+    c.execute('''CREATE TABLE IF NOT EXISTS cars (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT UNIQUE,
+        price INTEGER,
+        bonus INTEGER DEFAULT 0,
+        emoji TEXT DEFAULT '🚗'
+    )''')
+
+    c.execute('''CREATE TABLE IF NOT EXISTS missions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER,
-        item_name TEXT,
-        category TEXT
-    )
-    ''')
+        title TEXT,
+        target INTEGER,
+        progress INTEGER DEFAULT 0,
+        reward_money INTEGER,
+        reward_xp INTEGER,
+        completed INTEGER DEFAULT 0
+    )''')
 
-  # جدول درخواست‌های ازدواج
-  cursor.execute('''
-    CREATE TABLE IF NOT EXISTS marriage_requests (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        from_id INTEGER,
-        to_id INTEGER
-    )
-    ''')
+    c.execute('''CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY,
+        value TEXT
+    )''')
 
-  conn.commit()
-  conn.close()
+    # شغل‌های پیش‌فرض
+    default_jobs = [
+        ("کارگر", 80, 60, 1, "👷"),
+        ("فست‌فود", 120, 70, 2, "🍔"),
+        ("راننده", 180, 80, 4, "🚕"),
+        ("برنامه‌نویس", 300, 90, 7, "💻"),
+        ("پزشک", 450, 100, 10, "👨‍⚕️"),
+        ("مدیر", 700, 120, 15, "👨‍💼"),
+    ]
+    for j in default_jobs:
+        c.execute("INSERT OR IGNORE INTO jobs (name, income, cooldown, min_level, emoji) VALUES (?,?,?,?,?)", j)
 
+    # خانه‌های پیش‌فرض
+    default_houses = [
+        ("اتاق کوچک", 0, 0, "🏚"),
+        ("خانه معمولی", 15000, 5, "🏠"),
+        ("ویلای لوکس", 50000, 15, "🏡"),
+        ("عمارت", 150000, 30, "🏰"),
+        ("پنت‌هاوس", 400000, 50, "🏙"),
+    ]
+    for h in default_houses:
+        c.execute("INSERT OR IGNORE INTO houses (name, price, bonus, emoji) VALUES (?,?,?,?)", h)
+
+    # ماشین‌های پیش‌فرض
+    default_cars = [
+        ("دوچرخه", 2000, 2, "🚲"),
+        ("موتور", 8000, 5, "🛵"),
+        ("ماشین معمولی", 25000, 10, "🚗"),
+        ("ماشین اسپرت", 80000, 20, "🏎"),
+        ("ماشین لوکس", 200000, 35, "🚘"),
+        ("ماشین افسانه‌ای", 500000, 60, "🏆"),
+    ]
+    for car in default_cars:
+        c.execute("INSERT OR IGNORE INTO cars (name, price, bonus, emoji) VALUES (?,?,?,?)", car)
+
+    c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('start_money', '5000')")
+    c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('work_cooldown', '60')")
+
+    conn.commit()
+    conn.close()
 
 init_db()
-# ==========================================
-# بخش 2 از 8: توابع کمکی دیتابیس
-# ==========================================
-def get_user(user_id, username="", ref_id=0):
-  conn = sqlite3.connect("economy_game.db")
-  cursor = conn.cursor()
-  cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
-  user = cursor.fetchone()
 
-  if not user:
-    cursor.execute(
-        "INSERT INTO users (user_id, username, wallet, bank, referred_by)"
-        " VALUES (?, ?, 1000, 0, ?)",
-        (user_id, str(username), ref_id),
-    )
-    conn.commit()
+def is_admin(uid):
+    return uid in ADMIN_IDS
 
-    # پاداش دعوت کننده
-    if ref_id > 0 and ref_id != user_id:
-      cursor.execute(
-          "UPDATE users SET wallet = wallet + 2000 WHERE user_id = ?",
-          (ref_id,),
-      )
-      conn.commit()
+def get_setting(key, default=""):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT value FROM settings WHERE key=?", (key,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else default
 
-    cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
-    user = cursor.fetchone()
+def ensure_user(user):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT user_id FROM users WHERE user_id=?", (user.id,))
+    if not c.fetchone():
+        c.execute('''INSERT INTO users 
+            (user_id, username, full_name, money, bank, level, xp, house, energy, joined_at, last_active)
+            VALUES (?, ?, ?, ?, 0, 1, 0, 'اتاق کوچک', 100, ?, ?)''',
+            (user.id, user.username or "", user.full_name or "",
+             int(get_setting("start_money", "5000")),
+             datetime.now().strftime("%Y-%m-%d %H:%M"),
+             datetime.now().strftime("%Y-%m-%d %H:%M")))
+        conn.commit()
+    else:
+        c.execute("UPDATE users SET username=?, full_name=?, last_active=? WHERE user_id=?",
+                  (user.username or "", user.full_name or "", datetime.now().strftime("%Y-%m-%d %H:%M"), user.id))
+        conn.commit()
+    conn.close()
 
-  conn.close()
-  return user
+def get_user(uid):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT * FROM users WHERE user_id=?", (uid,))
+    row = c.fetchone()
+    conn.close()
+    return row
 
-
-def is_banned(user_id):
-  user = get_user(user_id)
-  return user[7] == 1
-
-
-def update_wallet(user_id, amount):
-  conn = sqlite3.connect("economy_game.db")
-  cursor = conn.cursor()
-  cursor.execute(
-      "UPDATE users SET wallet = wallet + ? WHERE user_id = ?",
-      (amount, user_id),
-  )
-  conn.commit()
-  conn.close()
-
-
-def update_bank(user_id, amount):
-  conn = sqlite3.connect("economy_game.db")
-  cursor = conn.cursor()
-  cursor.execute(
-      "UPDATE users SET bank = bank + ? WHERE user_id = ?", (amount, user_id)
-  )
-  conn.commit()
-  conn.close()
-
-
-def add_xp(user_id, amount):
-  conn = sqlite3.connect("economy_game.db")
-  cursor = conn.cursor()
-  cursor.execute(
-      "UPDATE users SET xp = xp + ? WHERE user_id = ?", (amount, user_id)
-  )
-  conn.commit()
-
-  cursor.execute("SELECT level, xp FROM users WHERE user_id = ?", (user_id,))
-  lvl, xp = cursor.fetchone()
-
-  needed_xp = lvl * 100
-  if xp >= needed_xp:
-    cursor.execute(
-        "UPDATE users SET level = level + 1, xp = 0 WHERE user_id = ?",
-        (user_id,),
-    )
+def add_money(uid, amount):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("UPDATE users SET money = money + ? WHERE user_id=?", (amount, uid))
     conn.commit()
     conn.close()
-    return True
-  conn.close()
-  return False
 
-
-def get_shop_items(category=None):
-  conn = sqlite3.connect("economy_game.db")
-  cursor = conn.cursor()
-  if category:
-    cursor.execute(
-        "SELECT name, price FROM shop_items WHERE category = ?", (category,)
-    )
-  else:
-    cursor.execute("SELECT name, category, price FROM shop_items")
-  items = cursor.fetchall()
-  conn.close()
-  return items
-
-
-def add_shop_item(name, category, price):
-  conn = sqlite3.connect("economy_game.db")
-  cursor = conn.cursor()
-  try:
-    cursor.execute(
-        "INSERT OR REPLACE INTO shop_items (name, category, price) VALUES (?, "
-        "?, ?)",
-        (name, category, price),
-    )
+def add_xp(uid, amount):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT level, xp FROM users WHERE user_id=?", (uid,))
+    level, xp = c.fetchone()
+    xp += amount
+    needed = level * 100
+    leveled = False
+    while xp >= needed:
+        xp -= needed
+        level += 1
+        needed = level * 100
+        leveled = True
+        c.execute("UPDATE users SET money = money + ? WHERE user_id=?", (level * 500, uid))
+    c.execute("UPDATE users SET level=?, xp=? WHERE user_id=?", (level, xp, uid))
     conn.commit()
-    success = True
-  except Exception:
-    success = False
-  conn.close()
-  return success
+    conn.close()
+    return leveled, level
 
+print("✅ بخش ۱ آماده شد")
+# ==================== بخش ۲ از ۶ ====================
+# منوها + /start + راهنما + پروفایل + کار
 
-def update_item_price(name, new_price):
-  conn = sqlite3.connect("economy_game.db")
-  cursor = conn.cursor()
-  cursor.execute(
-      "UPDATE shop_items SET price = ? WHERE name = ?", (new_price, name)
-  )
-  affected = cursor.rowcount
-  conn.commit()
-  conn.close()
-  return affected > 0
-      # ==========================================
-# بخش 3 از 8: منوی اصلی و پروفایل کاربر
-# ==========================================
-def main_keyboard(user_id):
-  markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-  markup.add("👤 پروفایل من", "💼 کار کردن")
-  markup.add("🛒 فروشگاه و املاک", "🦹 دزدی و جرم")
-  markup.add("💍 ازدواج", "🎯 مأموریت‌ها")
-  markup.add("🏆 رتبه‌بندی", "💰 کیف پول و انتقال")
-  markup.add("🏦 بانک مرکزی", "🎁 دعوت دوستان")
-  markup.add("📖 راهنما و دستورات")
-
-  if user_id == ADMIN_ID:
-    markup.add("⚙️ پنل مدیریت")
-
-  return markup
-
-
-@bot.message_handler(commands=["start"])
-def send_welcome(message):
-  ref_id = 0
-  args = message.text.split()
-  if len(args) > 1 and args[1].isdigit():
-    ref_id = int(args[1])
-
-  user = get_user(
-      message.from_user.id, message.from_user.username or "", ref_id
-  )
-
-  if is_banned(message.from_user.id):
-    bot.send_message(
-        message.chat.id, "❌ حساب کاربری شما توسط مدیریت مسدود شده است."
+def main_menu(uid):
+    m = InlineKeyboardMarkup(row_width=2)
+    m.add(
+        InlineKeyboardButton("👤 پروفایل من", callback_data="profile"),
+        InlineKeyboardButton("💼 کار کردن", callback_data="work")
     )
-    return
-
-  text = f"سلام {message.from_user.first_name} عزیز! 👋\nبه بازی اقتصادی خوش آمدید."
-  bot.send_message(
-      message.chat.id, text, reply_markup=main_keyboard(message.from_user.id)
-  )
-
-
-@bot.message_handler(func=lambda m: m.text == "👤 پروفایل من")
-def show_profile(message):
-  if is_banned(message.from_user.id):
-    return
-  user = get_user(message.from_user.id)
-
-  conn = sqlite3.connect("economy_game.db")
-  cursor = conn.cursor()
-  cursor.execute(
-      "SELECT item_name, category FROM user_inventory WHERE user_id = ?",
-      (message.from_user.id,),
-  )
-  inventory = cursor.fetchall()
-
-  spouse_text = "مجرد"
-  if user[6] != 0:
-    cursor.execute(
-        "SELECT username, user_id FROM users WHERE user_id = ?", (user[6],)
+    m.add(
+        InlineKeyboardButton("🛒 فروشگاه و املاک", callback_data="shop"),
+        InlineKeyboardButton("🦹 دزدی و جرم", callback_data="crime")
     )
-    sp = cursor.fetchone()
-    spouse_text = (
-        f"@{sp[0]}" if sp and sp[0] else f"کاربر {user[6]}" if sp else "همسر"
+    m.add(
+        InlineKeyboardButton("🎯 مأموریت‌ها", callback_data="missions"),
+        InlineKeyboardButton("💍 ازدواج", callback_data="marriage")
     )
-
-  conn.close()
-
-  cars = [i[0] for i in inventory if i[1] == "car"]
-  houses = [i[0] for i in inventory if i[1] == "house"]
-  items = [i[0] for i in inventory if i[1] == "item"]
-
-  profile_text = (
-      f"👤 **پروفایل کاربری:**\n\n"
-      f"🆔 آیدی عددی: `{user[0]}`\n"
-      f"⭐ لول: {user[4]} (XP: {user[5]}/{user[4]*100})\n"
-      f"💍 همسر: {spouse_text}\n\n"
-      f"💵 موجودی کیف پول: {user[2]:,} سکه\n"
-      f"🏦 موجودی بانک: {user[3]:,} سکه\n\n"
-      f"🏎 ماشین‌ها: {', '.join(cars) if cars else 'ندارید'}\n"
-      f"🏰 املاک و خانه: {', '.join(houses) if houses else 'ندارید'}\n"
-      f"📦 آیتم‌ها: {', '.join(items) if items else 'ندارید'}"
-  )
-  bot.send_message(message.chat.id, profile_text, parse_mode="Markdown")
-
-
-@bot.message_handler(func=lambda m: m.text == "📖 راهنما و دستورات")
-def help_guide(message):
-  if is_banned(message.from_user.id):
-    return
-  text = (
-      "📖 **راهنمای بازی:**\n\n"
-      "1️⃣ با **💼 کار کردن** یا **🦹 دزدی** سکه و XP به دست آورید.\n"
-      "2️⃣ سکه‌های خود را در **🏦 بانک مرکزی** پس‌انداز کنید تا در دزدی"
-      " باخت ندهید.\n"
-      "3️⃣ از **🛒 فروشگاه** ماشین و خانه بخرید.\n"
-      "4️⃣ با استفاده از دستور زیر به دوستانتان پول انتقال دهید:\n"
-      "`انتقال آیدی_عددی مبلغ`\nمثال:\n`انتقال 123456789 5000`\n"
-      "5️⃣ با لینک دعوت خود در **🎁 دعوت دوستان** دیگران را دعوت کنید و 2,000"
-      " سکه پاداش بگیرید!"
-  )
-  bot.send_message(message.chat.id, text, parse_mode="Markdown")
-    # ==========================================
-# بخش 4 از 8: بانک، انتقال پول و زیرمجموعه
-# ==========================================
-@bot.message_handler(func=lambda m: m.text == "🏦 بانک مرکزی")
-def bank_menu(message):
-  if is_banned(message.from_user.id):
-    return
-  user = get_user(message.from_user.id)
-  markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-  markup.add("📥 واریز به بانک", "📤 برداشت از بانک")
-  markup.add("🔙 بازگشت به منوی اصلی")
-
-  text = (
-      f"🏦 **سیستم بانکی**\n\n"
-      f"💵 کیف پول: {user[2]:,} سکه\n"
-      f"🏛 حساب بانک: {user[3]:,} سکه\n\n"
-      f"عملیات مورد نظر را انتخاب کنید:"
-  )
-  bot.send_message(
-      message.chat.id, text, parse_mode="Markdown", reply_markup=markup
-  )
-
-
-@bot.message_handler(func=lambda m: m.text == "📥 واریز به بانک")
-def deposit_start(message):
-  if is_banned(message.from_user.id):
-    return
-  msg = bot.send_message(
-      message.chat.id, "مبلغ مورد نظر برای واریز به بانک را وارد کنید:"
-  )
-  bot.register_next_step_handler(msg, process_deposit)
-
-
-def process_deposit(message):
-  if message.text == "🔙 بازگشت به منوی اصلی":
-    send_welcome(message)
-    return
-  try:
-    amount = int(message.text)
-    user = get_user(message.from_user.id)
-    if amount <= 0 or user[2] < amount:
-      bot.send_message(message.chat.id, "❌ موجودی کیف پول کافی نیست!")
-      return
-    update_wallet(message.from_user.id, -amount)
-    update_bank(message.from_user.id, amount)
-    bot.send_message(
-        message.chat.id, f"✅ مبلغ {amount:,} سکه به بانک واریز شد."
+    m.add(
+        InlineKeyboardButton("💰 کیف پول و انتقال", callback_data="wallet"),
+        InlineKeyboardButton("🏦 بانک", callback_data="bank")
     )
-  except ValueError:
-    bot.send_message(message.chat.id, "❌ لطفاً فقط عدد وارد کنید.")
-
-
-@bot.message_handler(func=lambda m: m.text == "📤 برداشت از بانک")
-def withdraw_start(message):
-  if is_banned(message.from_user.id):
-    return
-  msg = bot.send_message(
-      message.chat.id, "مبلغ مورد نظر برای برداشت از بانک را وارد کنید:"
-  )
-  bot.register_next_step_handler(msg, process_withdraw)
-
-
-def process_withdraw(message):
-  if message.text == "🔙 بازگشت به منوی اصلی":
-    send_welcome(message)
-    return
-  try:
-    amount = int(message.text)
-    user = get_user(message.from_user.id)
-    if amount <= 0 or user[3] < amount:
-      bot.send_message(message.chat.id, "❌ موجودی بانک کافی نیست!")
-      return
-    update_bank(message.from_user.id, -amount)
-    update_wallet(message.from_user.id, amount)
-    bot.send_message(
-        message.chat.id, f"✅ مبلغ {amount:,} سکه از بانک برداشت شد."
+    m.add(
+        InlineKeyboardButton("🏆 رتبه‌بندی", callback_data="rank"),
+        InlineKeyboardButton("🎁 دعوت دوستان", callback_data="invite")
     )
-  except ValueError:
-    bot.send_message(message.chat.id, "❌ لطفاً فقط عدد وارد کنید.")
+    m.add(InlineKeyboardButton("📖 راهنما و دستورات", callback_data="help"))
+    if is_admin(uid):
+        m.add(InlineKeyboardButton("👑 پنل ادمین", callback_data="admin"))
+    return m
 
+def help_text():
+    return """
+📖 **راهنمای Virtual Life**
 
-@bot.message_handler(
-    func=lambda m: m.text == "💰 کیف پول و انتقال"
-    or m.text.startswith("انتقال")
-)
-def wallet_and_transfer(message):
-  if is_banned(message.from_user.id):
-    return
-  if message.text == "💰 کیف پول و انتقال":
-    user = get_user(message.from_user.id)
-    text = (
-        f"💰 **کیف پول:** {user[2]:,} سکه\n\n"
-        f"برای انتقال سکه به کاربر دیگر از دستور زیر استفاده کنید:\n"
-        f"`انتقال آیدی_عددی مبلغ`\n\nمثال:\n`انتقال 123456789 5000`"
-    )
-    bot.send_message(message.chat.id, text, parse_mode="Markdown")
-    return
+🎮 **دستورات:**
+/start - شروع و ساخت پروفایل
+/profile - پروفایل
+/work - کار کردن
+/help - راهنما
 
-  parts = message.text.split()
-  if len(parts) == 3 and parts[1].isdigit() and parts[2].isdigit():
-    target_id = int(parts[1])
-    amount = int(parts[2])
-    sender = get_user(message.from_user.id)
+📌 **بخش‌ها:**
+👤 پروفایل من
+💼 کار کردن (با کول‌داون و انرژی)
+🛒 فروشگاه و املاک (خانه + ماشین)
+🦹 دزدی و جرم
+🎯 مأموریت‌های روزانه
+💍 ازدواج
+💰 کیف پول و انتقال پول
+🏦 بانک (سپرده‌گذاری و سود)
+🏆 رتبه‌بندی
+🎁 دعوت دوستان
 
-    if amount <= 0 or sender[2] < amount:
-      bot.send_message(message.chat.id, "❌ موجودی کافی نیست!")
-      return
+⚠️ انرژی و کول‌داون داری. مراقب باش دزدیده نشی!
+"""
 
-    target = get_user(target_id)
-    if not target:
-      bot.send_message(message.chat.id, "❌ کاربر مقصد یافت نشد!")
-      return
+@bot.message_handler(commands=['start'])
+def start(message):
+    ensure_user(message.from_user)
+    uid = message.from_user.id
+    u = get_user(uid)
+    if u and u[16] == 1:  # is_banned
+        bot.reply_to(message, "🚫 حساب شما مسدود است.")
+        return
 
-    update_wallet(message.from_user.id, -amount)
-    update_wallet(target_id, amount)
-    bot.send_message(
-        message.chat.id,
-        f"✅ مبلغ {amount:,} سکه با موفقیت به کاربر {target_id} منتقل شد.",
-    )
-    bot.send_message(
-        target_id,
-        f"🎉 کاربر {message.from_user.id} مبلغ {amount:,} سکه به شما منتقل"
-        " کرد!",
-    )
+    text = f"""
+🌟 به **Virtual Life** خوش آمدی!
 
+پول اولیه: **{u[3]:,}** تومان
+لول: **{u[5]}**
+خانه: **{u[8]}**
 
-@bot.message_handler(func=lambda m: m.text == "🎁 دعوت دوستان")
-def referral_system(message):
-  if is_banned(message.from_user.id):
-    return
-  bot_info = bot.get_me()
-  link = f"https://t.me/{bot_info.username}?start={message.from_user.id}"
-  text = (
-      f"🎁 **دعوت از دوستان:**\n\nبا دعوت دوستان خود به ربات، **2,000"
-      f" سکه** پاداش بگیرید!\n\nلینک اختصاصی شما:\n`{link}`"
-  )
-  bot.send_message(message.chat.id, text, parse_mode="Markdown")
-        # ==========================================
-# بخش 5 از 8: کار، دزدی، مأموریت و لیدربورد
-# ==========================================
-@bot.message_handler(func=lambda m: m.text == '💼 کار کردن')
-def work_game(message):
-  if is_banned(message.from_user.id):
-    return
-  reward = random.randint(200, 800)
-  xp_gained = random.randint(10, 30)
+زندگی مجازیت رو از صفر بساز 🚀
+"""
+    bot.reply_to(message, text, reply_markup=main_menu(uid), parse_mode="Markdown")
 
-  update_wallet(message.from_user.id, reward)
-  lvl_up = add_xp(message.from_user.id, xp_gained)
+@bot.message_handler(commands=['help', 'راهنما', 'دستورات'])
+def help_cmd(message):
+    ensure_user(message.from_user)
+    bot.reply_to(message, help_text(), parse_mode="Markdown", reply_markup=main_menu(message.from_user.id))
 
-  msg = f'🔨 شما کار کردید و **{reward:,} سکه** و **{xp_gained} XP** به دست آوردید!'
-  if lvl_up:
-    msg += '\n🎉 تبریک! سطح شما ارتقا یافت!'
-  bot.send_message(message.chat.id, msg, parse_mode='Markdown')
+@bot.message_handler(commands=['profile'])
+def profile_cmd(message):
+    ensure_user(message.from_user)
+    show_profile(message.from_user.id, message.chat.id)
 
+@bot.message_handler(commands=['work'])
+def work_cmd(message):
+    ensure_user(message.from_user)
+    do_work(message.from_user.id, message.chat.id)
 
-@bot.message_handler(func=lambda m: m.text == '🦹 دزدی و جرم')
-def crime_game(message):
-  if is_banned(message.from_user.id):
-    return
-  user = get_user(message.from_user.id)
-  success = random.choice([True, False, True])  # 66% شانس موفقیت
+def show_profile(uid, chat_id):
+    u = get_user(uid)
+    if not u:
+        return
+    job = u[7] or "بیکار"
+    car = u[9] or "ندارد"
+    partner = "ندارد"
+    if u[13]:
+        p = get_user(u[13])
+        partner = p[2] if p else str(u[13])
 
-  if success:
-    stolen = random.randint(500, 2000)
-    update_wallet(message.from_user.id, stolen)
-    add_xp(message.from_user.id, 40)
-    bot.send_message(
-        message.chat.id,
-        f'🎭 دزدی با موفقیت انجام شد! **{stolen:,} سکه** جیب زدید!',
-        parse_mode='Markdown',
-    )
-  else:
-    fine = random.randint(300, 1000)
-    if user[2] >= fine:
-      update_wallet(message.from_user.id, -fine)
-      bot.send_message(
-          message.chat.id,
-          f'🚨 پلیس دستگیرتون کرد و **{fine:,} سکه** جریمه شدید!',
-          parse_mode='Markdown',
-      )
-    else:
-      bot.send_message(
-          message.chat.id,
-          '🚨 پلیس دستگیرتون کرد ولی چون پولی تو کیف پولتون نبود از دستش'
-          ' فرار کردید!',
-      )
+    text = f"""
+👤 **پروفایل شما**
 
+🆔 `{u[0]}`
+👤 {u[2]}
+💰 پول نقد: **{u[3]:,}** تومان
+🏦 بانک: **{u[4]:,}** تومان
+⭐ لول: **{u[5]}** | XP: {u[6]}/{u[5]*100}
+💼 شغل: {job}
+🏠 خانه: {u[8]}
+🚗 ماشین: {car}
+⚡ انرژی: {u[10]}/100
+💍 همسر: {partner}
+🎯 مأموریت‌ها: {u[14]}
+"""
+    bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=main_menu(uid))
 
-@bot.message_handler(func=lambda m: m.text == '🎯 مأموریت‌ها')
-def missions_menu(message):
-  if is_banned(message.from_user.id):
-    return
-  text = (
-      '🎯 **مأموریت‌های فعال:**\n\n'
-      '1️⃣ **کارگر نمونه:** 5 بار کار کنید 🎁 پاداش: 1,500 سکه\n'
-      '2️⃣ **دزد حرفه‌ای:** 3 دزدی موفق انجام دهید 🎁 پاداش: 3,000 سکه\n\n'
-      '*(مأموریت‌ها به صورت خودکار محاسبه و اعمال می‌شوند)*'
-  )
-  bot.send_message(message.chat.id, text, parse_mode='Markdown')
+def do_work(uid, chat_id):
+    u = get_user(uid)
+    if not u:
+        return
+    if not u[7]:
+        bot.send_message(chat_id, "اول باید شغل انتخاب کنی! از فروشگاه برو.", reply_markup=main_menu(uid))
+        return
 
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT income, cooldown, min_level FROM jobs WHERE name=?", (u[7],))
+    job = c.fetchone()
+    conn.close()
+    if not job:
+        bot.send_message(chat_id, "شغل نامعتبر.", reply_markup=main_menu(uid))
+        return
 
-@bot.message_handler(func=lambda m: m.text == '🏆 رتبه‌بندی')
-def leaderboard(message):
-  if is_banned(message.from_user.id):
-    return
-  conn = sqlite3.connect('economy_game.db')
-  cursor = conn.cursor()
-  cursor.execute(
-      'SELECT username, user_id, (wallet + bank) as total FROM users ORDER BY'
-      ' total DESC LIMIT 10'
-  )
-  top_users = cursor.fetchall()
-  conn.close()
+    now = time.time()
+    if now - u[11] < job[1]:
+        remain = int(job[1] - (now - u[11]))
+        bot.send_message(chat_id, f"⏳ {remain} ثانیه تا کار بعدی.", reply_markup=main_menu(uid))
+        return
 
-  text = '🏆 **برترین و ثروتمندترین کاربران:**\n\n'
-  for idx, u in enumerate(top_users, 1):
-    uname = f'@{u[0]}' if u[0] else f'کاربر {u[1]}'
-    text += f'{idx}. {uname} ➔ {u[2]:,} سکه\n'
+    if u[10] < 10:
+        bot.send_message(chat_id, "⚡ انرژی کافی نداری!", reply_markup=main_menu(uid))
+        return
 
-  bot.send_message(message.chat.id, text, parse_mode='Markdown')
-# ==========================================
-# بخش 6 از 8: فروشگاه املاک و سیستم ازدواج
-# ==========================================
-@bot.message_handler(func=lambda m: m.text == '🛒 فروشگاه و املاک')
-def shop_menu(message):
-  if is_banned(message.from_user.id):
-    return
-  markup = types.InlineKeyboardMarkup(row_width=2)
-  markup.add(
-      types.InlineKeyboardButton('🏎 ماشین‌ها', callback_data='shop_car'),
-      types.InlineKeyboardButton(
-          '🏰 املاک و خانه', callback_data='shop_house'
-      ),
-      types.InlineKeyboardButton('📦 سایر آیتم‌ها', callback_data='shop_item'),
-  )
-  bot.send_message(
-      message.chat.id,
-      '🛍 دسته مورد نظر را انتخاب کنید:',
-      reply_markup=markup,
-  )
+    income = job[0] + (u[5] * 12)
 
+    # بونوس خانه و ماشین
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT bonus FROM houses WHERE name=?", (u[8],))
+    h = c.fetchone()
+    c.execute("SELECT bonus FROM cars WHERE name=?", (u[9],))
+    car = c.fetchone()
+    conn.close()
+    bonus = (h[0] if h else 0) + (car[0] if car else 0)
+    income = int(income * (1 + bonus / 100))
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith('shop_'))
-def show_category_items(call):
-  category = call.data.split('_')[1]
-  items = get_shop_items(category)
+    add_money(uid, income)
+    leveled, new_lvl = add_xp(uid, 12 + u[5])
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("UPDATE users SET last_work=?, energy=? WHERE user_id=?", (now, max(0, u[10]-8), uid))
+    conn.commit()
+    conn.close()
 
-  if not items:
-    bot.answer_callback_query(
-        call.id, 'آیتمی در این دسته وجود ندارد!', show_alert=True
-    )
-    return
+    text = f"💼 کار انجام شد!\n+{income:,} تومان\n⚡ انرژی: {max(0, u[10]-8)}/100"
+    if leveled:
+        text += f"\n\n🎉 لول‌آپ! حالا لول **{new_lvl}** هستی!"
+    bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=main_menu(uid))
 
-  markup = types.InlineKeyboardMarkup()
-  for name, price in items:
-    markup.add(
-        types.InlineKeyboardButton(
-            f'{name} - {price:,} سکه', callback_data=f'buy_{name}'
+    if random.randint(1, 100) <= 10:
+        random_event(uid, chat_id)
+
+def random_event(uid, chat_id):
+    events = [
+        ("دزدی", -random.randint(800, 4000), "🔫 دزدیدنت! پول از دست دادی."),
+        ("جایزه", random.randint(1500, 6000), "🎁 جایزه تصادفی گرفتی!"),
+        ("پیدا کردن پول", random.randint(500, 2500), "💵 کیف پول پیدا کردی!"),
+        ("جریمه", -random.randint(600, 2500), "👮 جریمه شدی!"),
+    ]
+    ev = random.choice(events)
+    add_money(uid, ev[1])
+    bot.send_message(chat_id, f"⚡ **اتفاق تصادفی**\n{ev[2]}\nتغییر: {ev[1]:,} تومان")
+
+print("✅ بخش ۲ آماده شد")
+# ==================== بخش ۳ از ۶ ====================
+# کال‌بک‌های اصلی کاربر
+
+@bot.callback_query_handler(func=lambda call: True)
+def callbacks(call):
+    uid = call.from_user.id
+    ensure_user(call.from_user)
+    data = call.data
+
+    if data == "back_main" or data == "back":
+        bot.edit_message_text("منوی اصلی:", call.message.chat.id, call.message.message_id, reply_markup=main_menu(uid))
+
+    elif data == "profile":
+        show_profile(uid, call.message.chat.id)
+
+    elif data == "work":
+        do_work(uid, call.message.chat.id)
+
+    elif data == "help":
+        bot.edit_message_text(help_text(), call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=main_menu(uid))
+
+    # ----- فروشگاه و املاک -----
+    elif data == "shop":
+        mk = InlineKeyboardMarkup(row_width=1)
+        mk.add(
+            InlineKeyboardButton("🏠 خرید خانه", callback_data="buy_house"),
+            InlineKeyboardButton("🚗 خرید ماشین", callback_data="buy_car"),
+            InlineKeyboardButton("💼 انتخاب شغل", callback_data="choose_job"),
+            InlineKeyboardButton("🔙 بازگشت", callback_data="back_main")
         )
-    )
+        bot.edit_message_text("🛒 فروشگاه و املاک:", call.message.chat.id, call.message.message_id, reply_markup=mk)
 
-  bot.edit_message_text(
-      'لیست موارد موجود:',
-      call.message.chat.id,
-      call.message.message_id,
-      reply_markup=markup,
-  )
+    elif data == "buy_house":
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("SELECT name, price, bonus, emoji FROM houses ORDER BY price")
+        houses = c.fetchall()
+        conn.close()
+        mk = InlineKeyboardMarkup(row_width=1)
+        for h in houses:
+            mk.add(InlineKeyboardButton(f"{h[3]} {h[0]} - {h[1]:,} تومان", callback_data=f"house_{h[0]}"))
+        mk.add(InlineKeyboardButton("🔙", callback_data="shop"))
+        bot.edit_message_text("خانه‌ها:", call.message.chat.id, call.message.message_id, reply_markup=mk)
 
+    elif data.startswith("house_"):
+        name = data[6:]
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("SELECT price FROM houses WHERE name=?", (name,))
+        row = c.fetchone()
+        u = get_user(uid)
+        if row and u[3] >= row[0]:
+            c.execute("UPDATE users SET money = money - ?, house = ? WHERE user_id=?", (row[0], name, uid))
+            conn.commit()
+            bot.answer_callback_query(call.id, f"✅ {name} خریداری شد!", show_alert=True)
+            show_profile(uid, call.message.chat.id)
+        else:
+            bot.answer_callback_query(call.id, "پول کافی نداری!", show_alert=True)
+        conn.close()
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith('buy_'))
-def buy_item(call):
-  item_name = call.data.split('_')[1]
-  conn = sqlite3.connect('economy_game.db')
-  cursor = conn.cursor()
-  cursor.execute(
-      'SELECT category, price FROM shop_items WHERE name = ?', (item_name,)
-  )
-  item = cursor.fetchone()
+    elif data == "buy_car":
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("SELECT name, price, bonus, emoji FROM cars ORDER BY price")
+        cars = c.fetchall()
+        conn.close()
+        mk = InlineKeyboardMarkup(row_width=1)
+        for car in cars:
+            mk.add(InlineKeyboardButton(f"{car[3]} {car[0]} - {car[1]:,} تومان", callback_data=f"car_{car[0]}"))
+        mk.add(InlineKeyboardButton("🔙", callback_data="shop"))
+        bot.edit_message_text("ماشین‌ها:", call.message.chat.id, call.message.message_id, reply_markup=mk)
 
-  if not item:
-    bot.answer_callback_query(call.id, 'این آیتم پیدا نشد!')
-    conn.close()
-    return
+    elif data.startswith("car_"):
+        name = data[4:]
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("SELECT price FROM cars WHERE name=?", (name,))
+        row = c.fetchone()
+        u = get_user(uid)
+        if row and u[3] >= row[0]:
+            c.execute("UPDATE users SET money = money - ?, car = ? WHERE user_id=?", (row[0], name, uid))
+            conn.commit()
+            bot.answer_callback_query(call.id, f"✅ {name} خریداری شد!", show_alert=True)
+            show_profile(uid, call.message.chat.id)
+        else:
+            bot.answer_callback_query(call.id, "پول کافی نداری!", show_alert=True)
+        conn.close()
 
-  category, price = item
-  user = get_user(call.from_user.id)
+    elif data == "choose_job":
+        u = get_user(uid)
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("SELECT name, income, min_level, emoji FROM jobs ORDER BY min_level")
+        jobs = c.fetchall()
+        conn.close()
+        mk = InlineKeyboardMarkup(row_width=1)
+        for j in jobs:
+            status = "✅" if u[5] >= j[2] else f"🔒 لول {j[2]}"
+            mk.add(InlineKeyboardButton(f"{j[3]} {j[0]} ({j[1]}/کار) {status}", callback_data=f"job_{j[0]}"))
+        mk.add(InlineKeyboardButton("🔙", callback_data="shop"))
+        bot.edit_message_text("شغل‌ها:", call.message.chat.id, call.message.message_id, reply_markup=mk)
 
-  if user[2] < price:
-    bot.answer_callback_query(
-        call.id, f'❌ شما به {price:,} سکه نیاز دارید!', show_alert=True
-    )
-    conn.close()
-    return
+    elif data.startswith("job_"):
+        name = data[4:]
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("SELECT min_level FROM jobs WHERE name=?", (name,))
+        row = c.fetchone()
+        u = get_user(uid)
+        if row and u[5] >= row[0]:
+            c.execute("UPDATE users SET job=? WHERE user_id=?", (name, uid))
+            conn.commit()
+            bot.answer_callback_query(call.id, f"✅ شغل {name} انتخاب شد!", show_alert=True)
+            show_profile(uid, call.message.chat.id)
+        else:
+            bot.answer_callback_query(call.id, "لولت کافی نیست!", show_alert=True)
+        conn.close()
 
-  update_wallet(call.from_user.id, -price)
-  cursor.execute(
-      'INSERT INTO user_inventory (user_id, item_name, category) VALUES (?,'
-      ' ?, ?)',
-      (call.from_user.id, item_name, category),
-  )
-  conn.commit()
-  conn.close()
+    # ----- دزدی -----
+    elif data == "crime":
+        mk = InlineKeyboardMarkup(row_width=1)
+        mk.add(
+            InlineKeyboardButton("🔫 دزدی از دیگران", callback_data="steal"),
+            InlineKeyboardButton("🔙 بازگشت", callback_data="back_main")
+        )
+        bot.edit_message_text("🦹 دزدی و جرم:\nشانس موفقیت و شکست داری!", call.message.chat.id, call.message.message_id, reply_markup=mk)
 
-  bot.answer_callback_query(
-      call.id, f'🎉 با موفقیت {item_name} خریده شد!', show_alert=True
-  )
+    elif data == "steal":
+        u = get_user(uid)
+        now = time.time()
+        if now - u[12] < 180:
+            bot.answer_callback_query(call.id, "هنوز نمی‌تونی دزدی کنی (۳ دقیقه کول‌داون)", show_alert=True)
+            return
+        if u[10] < 15:
+            bot.answer_callback_query(call.id, "انرژی کافی نداری!", show_alert=True)
+            return
 
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("SELECT user_id, money FROM users WHERE user_id != ? AND money > 1000 ORDER BY RANDOM() LIMIT 1", (uid,))
+        target = c.fetchone()
+        if not target:
+            bot.answer_callback_query(call.id, "کسی برای دزدی پیدا نشد!", show_alert=True)
+            conn.close()
+            return
 
-@bot.message_handler(func=lambda m: m.text == '💍 ازدواج')
-def marriage_menu(message):
-  if is_banned(message.from_user.id):
-    return
-  user = get_user(message.from_user.id)
-  if user[6] != 0:
-    bot.send_message(message.chat.id, '💍 شما در حال حاضر متأهل هستید!')
-    return
+        success = random.randint(1, 100) <= 45
+        if success:
+            stolen = min(target[1] // 4, random.randint(1000, 8000))
+            c.execute("UPDATE users SET money = money - ? WHERE user_id=?", (stolen, target[0]))
+            c.execute("UPDATE users SET money = money + ?, last_steal=?, energy=energy-15 WHERE user_id=?", (stolen, now, uid))
+            conn.commit()
+            bot.send_message(call.message.chat.id, f"✅ دزدی موفق!\n+{stolen:,} تومان", reply_markup=main_menu(uid))
+            try:
+                bot.send_message(target[0], f"🔫 از تو دزدی شد! -{stolen:,} تومان")
+            except:
+                pass
+        else:
+            fine = random.randint(500, 3000)
+            c.execute("UPDATE users SET money = money - ?, last_steal=?, energy=energy-15 WHERE user_id=?", (fine, now, uid))
+            conn.commit()
+            bot.send_message(call.message.chat.id, f"❌ دزدی شکست خورد!\nجریمه: -{fine:,} تومان", reply_markup=main_menu(uid))
+        conn.close()
 
-  msg = bot.send_message(
-      message.chat.id,
-      'برای درخواست ازدواج، آیدی عددی فرد مورد نظر را ارسال کنید:',
-  )
-  bot.register_next_step_handler(msg, process_marriage_request)
+    # ----- بانک -----
+    elif data == "bank":
+        u = get_user(uid)
+        mk = InlineKeyboardMarkup(row_width=1)
+        mk.add(
+            InlineKeyboardButton("📥 واریز به بانک", callback_data="bank_deposit"),
+            InlineKeyboardButton("📤 برداشت از بانک", callback_data="bank_withdraw"),
+            InlineKeyboardButton("🔙", callback_data="back_main")
+        )
+        bot.edit_message_text(f"🏦 بانک\n\nپول نقد: {u[3]:,}\nموجودی بانک: {u[4]:,}", call.message.chat.id, call.message.message_id, reply_markup=mk)
 
+    elif data == "bank_deposit":
+        user_steps[uid] = {"step": "bank_dep"}
+        bot.edit_message_text("مبلغ واریز به بانک را بفرستید:", call.message.chat.id, call.message.message_id)
 
-def process_marriage_request(message):
-  try:
-    target_id = int(message.text)
-    if target_id == message.from_user.id:
-      bot.send_message(message.chat.id, '❌ نمی‌توانید با خودتان ازدواج کنید!')
-      return
+    elif data == "bank_withdraw":
+        user_steps[uid] = {"step": "bank_wit"}
+        bot.edit_message_text("مبلغ برداشت از بانک را بفرستید:", call.message.chat.id, call.message.message_id)
 
-    target = get_user(target_id)
-    if not target or target[6] != 0:
-      bot.send_message(
-          message.chat.id, '❌ کاربر یافت نشد یا در حال حاضر متأهل است!'
-      )
-      return
+    # ----- رتبه‌بندی -----
+    elif data == "rank":
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("SELECT full_name, username, money+bank FROM users ORDER BY money+bank DESC LIMIT 10")
+        rich = c.fetchall()
+        c.execute("SELECT full_name, username, level FROM users ORDER BY level DESC, xp DESC LIMIT 10")
+        levels = c.fetchall()
+        conn.close()
 
-    markup = types.InlineKeyboardMarkup()
-    markup.add(
-        types.InlineKeyboardButton(
-            '✅ قبول درخواست', callback_data=f'acceptm_{message.from_user.id}'
-        ),
-        types.InlineKeyboardButton(
-            '❌ رد درخواست', callback_data=f'rejectm_{message.from_user.id}'
-        ),
-    )
-    bot.send_message(
-        target_id,
-        f'💍 کاربر {message.from_user.id} به شما پیشنهاد ازدواج داده است!',
-        reply_markup=markup,
-    )
-    bot.send_message(message.chat.id, '💌 پیشنهاد ازدواج ارسال شد.')
-  except Exception:
-    bot.send_message(message.chat.id, '❌ آیدی عددی نامعتبر است.')
+        text = "🏆 **ثروتمندترین‌ها**\n\n"
+        for i, r in enumerate(rich, 1):
+            name = r[0] or (f"@{r[1]}" if r[1] else "بدون‌نام")
+            text += f"{i}. {name} — {r[2]:,}\n"
+        text += "\n⭐ **بالاترین لول**\n\n"
+        for i, r in enumerate(levels, 1):
+            name = r[0] or (f"@{r[1]}" if r[1] else "بدون‌نام")
+            text += f"{i}. {name} — لول {r[2]}\n"
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=main_menu(uid))
 
+    # ----- دعوت -----
+    elif data == "invite":
+        bot_username = bot.get_me().username
+        link = f"https://t.me/{bot_username}?start={uid}"
+        bot.edit_message_text(f"🎁 لینک دعوت شما:\n`{link}`\n\nبا دعوت هر نفر جایزه می‌گیری!", call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=main_menu(uid))
 
-@bot.callback_query_handler(
-    func=lambda call: call.data.startswith(('acceptm_', 'rejectm_'))
-)
-def marriage_response(call):
-  action, sender_id = call.data.split('_')
-  sender_id = int(sender_id)
+    # ----- ازدواج -----
+    elif data == "marriage":
+        u = get_user(uid)
+        if u[13]:
+            bot.answer_callback_query(call.id, "قبلاً ازدواج کردی!", show_alert=True)
+            return
+        user_steps[uid] = {"step": "marry"}
+        bot.edit_message_text("آیدی عددی یا یوزرنیم کسی که می‌خوای باهاش ازدواج کنی رو بفرست:", call.message.chat.id, call.message.message_id)
 
-  if action == 'acceptm':
-    conn = sqlite3.connect('economy_game.db')
-    cursor = conn.cursor()
-    cursor.execute(
-        'UPDATE users SET spouse_id = ? WHERE user_id = ?',
-        (call.from_user.id, sender_id),
-    )
-    cursor.execute(
-        'UPDATE users SET spouse_id = ? WHERE user_id = ?',
-        (sender_id, call.from_user.id),
-    )
-    conn.commit()
-    conn.close()
+    # ----- کیف پول -----
+    elif data == "wallet":
+        user_steps[uid] = {"step": "transfer_id"}
+        bot.edit_message_text("آیدی عددی گیرنده را بفرستید:", call.message.chat.id, call.message.message_id)
 
-    bot.send_message(
-        call.message.chat.id, '🎉 پیوندتان مبارک! شما با هم ازدواج کردید.'
-    )
-    bot.send_message(
-        sender_id, '🎉 پیشنهاد ازدواج شما پذیرفته شد! مبارک باشد.'
-    )
-  else:
-    bot.send_message(call.message.chat.id, '❌ درخواست رد شد.')
-    bot.send_message(sender_id, '💔 پیشنهاد ازدواج شما رد شد.')
-      # ==========================================
-# بخش 7 از 8: پنل مدیریت - مدیریت کاربران
-# ==========================================
-@bot.message_handler(
-    func=lambda m: m.text == '⚙️ پنل مدیریت'
-    or m.text == '🔙 بازگشت به منوی ادمین'
-)
-def admin_panel(message):
-  if message.from_user.id != ADMIN_ID:
-    return
+    # ----- مأموریت -----
+    elif data == "missions":
+        bot.edit_message_text("🎯 مأموریت‌های روزانه به زودی کامل‌تر می‌شود.\nفعلاً با کار کردن و دزدی XP و پول جمع کن!", call.message.chat.id, call.message.message_id, reply_markup=main_menu(uid))
 
-  markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-  markup.add('📊 آمار و لیست کاربران', '🔍 جستجوی کاربر')
-  markup.add('💰 تغییر موجودی کاربر', '⭐ تغییر لول کاربر')
-  markup.add('🚫 مسدود کاربر', '✅ رفع مسدود')
-  markup.add('➕ اضافه کردن ماشین', '➕ اضافه کردن خانه')
-  markup.add('✏️ تغییر قیمت آیتم', '🔙 بازگشت به منوی اصلی')
+    # ----- پنل ادمین -----
+    elif data == "admin" and is_admin(uid):
+        mk = InlineKeyboardMarkup(row_width=2)
+        mk.add(
+            InlineKeyboardButton("👥 کاربران", callback_data="adm_users"),
+            InlineKeyboardButton("💰 تغییر پول", callback_data="adm_money")
+        )
+        mk.add(
+            InlineKeyboardButton("🏠 ساخت خانه", callback_data="adm_house"),
+            InlineKeyboardButton("🚗 ساخت ماشین", callback_data="adm_car")
+        )
+        mk.add(
+            InlineKeyboardButton("💼 ساخت شغل", callback_data="adm_job"),
+            InlineKeyboardButton("📢 همگانی", callback_data="adm_broad")
+        )
+        mk.add(
+            InlineKeyboardButton("🔍 جستجوی کاربر", callback_data="adm_search"),
+            InlineKeyboardButton("🔙", callback_data="back_main")
+        )
+        bot.edit_message_text("👑 پنل ادمین:", call.message.chat.id, call.message.message_id, reply_markup=mk)
 
-  bot.send_message(
-      message.chat.id, '🛠 **پنل مدیریت ربات:**', reply_markup=markup
-  )
+    elif data == "adm_users" and is_admin(uid):
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("SELECT user_id, username, full_name, money, level FROM users ORDER BY money DESC LIMIT 15")
+        rows = c.fetchall()
+        conn.close()
+        text = "👥 کاربران:\n\n"
+        for r in rows:
+            text += f"`{r[0]}` @{r[1] or '-'} | {r[2] or '-'}\nپول: {r[3]:,} | لول: {r[4]}\n───\n"
+        bot.send_message(call.message.chat.id, text, parse_mode="Markdown")
 
+    elif data == "adm_money" and is_admin(uid):
+        user_steps[uid] = {"step": "adm_money_id"}
+        bot.edit_message_text("آیدی کاربر را بفرست:", call.message.chat.id, call.message.message_id)
 
-@bot.message_handler(func=lambda m: m.text == '📊 آمار و لیست کاربران')
-def admin_user_list(message):
-  if message.from_user.id != ADMIN_ID:
-    return
+    elif data == "adm_house" and is_admin(uid):
+        user_steps[uid] = {"step": "adm_house_name"}
+        bot.edit_message_text("نام خانه جدید را بفرست:", call.message.chat.id, call.message.message_id)
 
-  conn = sqlite3.connect('economy_game.db')
-  cursor = conn.cursor()
-  cursor.execute(
-      'SELECT user_id, username, wallet, bank, is_banned FROM users LIMIT 20'
-  )
-  users = cursor.fetchall()
-  cursor.execute('SELECT COUNT(*) FROM users')
-  total_users = cursor.fetchone()[0]
-  conn.close()
+    elif data == "adm_car" and is_admin(uid):
+        user_steps[uid] = {"step": "adm_car_name"}
+        bot.edit_message_text("نام ماشین جدید را بفرست:", call.message.chat.id, call.message.message_id)
 
-  text = (
-      f'📊 **آمار کلی:** {total_users} کاربر ثبت‌نام کرده‌اند.\n\n📋 **لیست'
-      ' آخرین کاربران:**\n'
-  )
-  for u in users:
-    ban_status = ' 🚫[مسدود]' if u[4] == 1 else ''
-    uname = f'@{u[1]}' if u[1] else 'بدون یوزرنیم'
-    text += (
-        f'🆔 `{u[0]}` | {uname}\n💵 کیف: {u[2]:,} | 🏦 بانک:'
-        f' {u[3]:,}{ban_status}\n-------------------\n'
-    )
+    elif data == "adm_job" and is_admin(uid):
+        user_steps[uid] = {"step": "adm_job_name"}
+        bot.edit_message_text("نام شغل جدید را بفرست:", call.message.chat.id, call.message.message_id)
 
-  bot.send_message(message.chat.id, text, parse_mode='Markdown')
+    elif data == "adm_broad" and is_admin(uid):
+        user_steps[uid] = {"step": "broadcast"}
+        bot.edit_message_text("پیام همگانی را بفرست:", call.message.chat.id, call.message.message_id)
 
+    elif data == "adm_search" and is_admin(uid):
+        user_steps[uid] = {"step": "adm_search"}
+        bot.edit_message_text("آیدی عددی کاربر را بفرست:", call.message.chat.id, call.message.message_id)
 
-@bot.message_handler(func=lambda m: m.text == '🔍 جستجوی کاربر')
-def admin_search_start(message):
-  if message.from_user.id != ADMIN_ID:
-    return
-  msg = bot.send_message(
-      message.chat.id,
-      'آیدی عددی یا یوزرنیم کاربر (بدون @) را جهت جستجو بفرستید:',
-  )
-  bot.register_next_step_handler(msg, process_admin_search)
+    bot.answer_callback_query(call.id)
 
+print("✅ بخش ۳ آماده شد")
+# ==================== بخش ۴ از ۶ ====================
+# هندلر پیام‌ها (کاربر + بخش خفن دزدی چندمرحله‌ای)
 
-def process_admin_search(message):
-  query = message.text.replace('@', '').strip()
-  conn = sqlite3.connect('economy_game.db')
-  cursor = conn.cursor()
-  if query.isdigit():
-    cursor.execute('SELECT * FROM users WHERE user_id = ?', (int(query),))
-  else:
-    cursor.execute('SELECT * FROM users WHERE username = ?', (query,))
-  user = cursor.fetchone()
-  conn.close()
+@bot.message_handler(content_types=['text'])
+def handle_messages(message):
+    uid = message.from_user.id
+    ensure_user(message.from_user)
+    step_data = user_steps.get(uid, {})
+    step = step_data.get("step")
+    text = message.text.strip() if message.text else ""
 
-  if not user:
-    bot.send_message(message.chat.id, '❌ کاربر یافت نشد!')
-    return
+    # ---------- بانک ----------
+    if step == "bank_dep":
+        try:
+            amount = int(text)
+            u = get_user(uid)
+            if amount <= 0 or u[3] < amount:
+                bot.reply_to(message, "مبلغ نامعتبر یا پول کافی نداری.")
+                return
+            conn = get_db()
+            c = conn.cursor()
+            c.execute("UPDATE users SET money = money - ?, bank = bank + ? WHERE user_id=?", (amount, amount, uid))
+            conn.commit()
+            conn.close()
+            bot.reply_to(message, f"✅ {amount:,} تومان به بانک واریز شد.", reply_markup=main_menu(uid))
+        except:
+            bot.reply_to(message, "فقط عدد بفرست.")
+        user_steps[uid] = {}
+        return
 
-  text = (
-      f'🔍 **اطلاعات کاربر:**\n\n🆔 آیدی: `{user[0]}`\n👤 یوزرنیم:'
-      f' @{user[1]}\n💵 کیف پول: {user[2]:,} | 🏦 بانک: {user[3]:,}\n⭐ لول:'
-      f' {user[4]} | 🚫 مسدود: {"بله" if user[7]==1 else "خیر"}'
-  )
-  bot.send_message(message.chat.id, text, parse_mode='Markdown')
+    if step == "bank_wit":
+        try:
+            amount = int(text)
+            u = get_user(uid)
+            if amount <= 0 or u[4] < amount:
+                bot.reply_to(message, "مبلغ نامعتبر یا موجودی بانک کافی نیست.")
+                return
+            conn = get_db()
+            c = conn.cursor()
+            c.execute("UPDATE users SET money = money + ?, bank = bank - ? WHERE user_id=?", (amount, amount, uid))
+            conn.commit()
+            conn.close()
+            bot.reply_to(message, f"✅ {amount:,} تومان از بانک برداشت شد.", reply_markup=main_menu(uid))
+        except:
+            bot.reply_to(message, "فقط عدد بفرست.")
+        user_steps[uid] = {}
+        return
 
+    # ---------- انتقال پول ----------
+    if step == "transfer_id":
+        try:
+            target = int(text)
+            if target == uid:
+                bot.reply_to(message, "نمی‌تونی به خودت پول بدی!")
+                return
+            if not get_user(target):
+                bot.reply_to(message, "کاربر پیدا نشد.")
+                return
+            user_steps[uid] = {"step": "transfer_amount", "target": target}
+            bot.reply_to(message, "مبلغ را بفرست:")
+        except:
+            bot.reply_to(message, "آیدی عددی معتبر بفرست.")
+        return
 
-@bot.message_handler(func=lambda m: m.text == '💰 تغییر موجودی کاربر')
-def admin_change_wallet_start(message):
-  if message.from_user.id != ADMIN_ID:
-    return
-  msg = bot.send_message(
-      message.chat.id,
-      'اطلاعات را به شکل زیر بفرستید:\n\n`آیدی_عددی مبلغ`\nمثال برای اضافه'
-      ' کردن 5000 سکه:\n`123456789 5000`\nمثال برای کم کردن 2000'
-      ' سکه:\n`123456789 -2000`',
-      parse_mode='Markdown',
-  )
-  bot.register_next_step_handler(msg, process_admin_change_wallet)
+    if step == "transfer_amount":
+        try:
+            amount = int(text)
+            target = step_data["target"]
+            u = get_user(uid)
+            if amount <= 0 or u[3] < amount:
+                bot.reply_to(message, "مبلغ نامعتبر یا پول کافی نداری.")
+                return
+            add_money(uid, -amount)
+            add_money(target, amount)
+            bot.reply_to(message, f"✅ {amount:,} تومان به `{target}` ارسال شد.", parse_mode="Markdown", reply_markup=main_menu(uid))
+            try:
+                bot.send_message(target, f"💰 {amount:,} تومان از کاربر `{uid}` دریافت کردی!", parse_mode="Markdown")
+            except:
+                pass
+        except:
+            bot.reply_to(message, "عدد معتبر بفرست.")
+        user_steps[uid] = {}
+        return
 
+    # ---------- ازدواج ----------
+    if step == "marry":
+        try:
+            if text.startswith("@"):
+                bot.reply_to(message, "فعلاً فقط آیدی عددی پشتیبانی می‌شود.")
+                user_steps[uid] = {}
+                return
+            target = int(text)
+            if target == uid:
+                bot.reply_to(message, "با خودت نمی‌تونی ازدواج کنی!")
+                user_steps[uid] = {}
+                return
+            tuser = get_user(target)
+            if not tuser:
+                bot.reply_to(message, "کاربر پیدا نشد.")
+                user_steps[uid] = {}
+                return
+            if tuser[13]:
+                bot.reply_to(message, "این کاربر قبلاً ازدواج کرده!")
+                user_steps[uid] = {}
+                return
+            conn = get_db()
+            c = conn.cursor()
+            c.execute("UPDATE users SET partner_id=? WHERE user_id=?", (target, uid))
+            c.execute("UPDATE users SET partner_id=? WHERE user_id=?", (uid, target))
+            conn.commit()
+            conn.close()
+            bot.reply_to(message, f"💍 ازدواج با `{target}` ثبت شد! مبارکه", parse_mode="Markdown", reply_markup=main_menu(uid))
+            try:
+                bot.send_message(target, f"💍 کاربر `{uid}` با تو ازدواج کرد!", parse_mode="Markdown")
+            except:
+                pass
+        except:
+            bot.reply_to(message, "آیدی عددی معتبر بفرست.")
+        user_steps[uid] = {}
+        return
 
-def process_admin_change_wallet(message):
-  try:
-    parts = message.text.split()
-    uid = int(parts[0])
-    amount = int(parts[1])
-    update_wallet(uid, amount)
-    bot.send_message(
-        message.chat.id, f'✅ موجودی کیف پول کاربر {uid} به میزان {amount} تغییر یافت.'
-    )
-  except Exception:
-    bot.send_message(message.chat.id, '❌ فرمت نامعتبر است.')
+    # ---------- دزدی چندمرحله‌ای خفن ----------
+    if step == "crime_plan":
+        # انتخاب هدف
+        user_steps[uid] = {"step": "crime_action", "plan": text}
+        mk = InlineKeyboardMarkup(row_width=1)
+        mk.add(
+            InlineKeyboardButton("🔪 حمله مستقیم", callback_data="crime_attack"),
+            InlineKeyboardButton("🕵️ دزدی مخفیانه", callback_data="crime_sneak"),
+            InlineKeyboardButton("💣 نقشه پیچیده", callback_data="crime_smart"),
+            InlineKeyboardButton("❌ انصراف", callback_data="back_main")
+        )
+        bot.reply_to(message, "نقشه‌ت چیه؟ یکی رو انتخاب کن:", reply_markup=mk)
+        return
 
+    # ---------- ادمین ----------
+    if is_admin(uid):
+        if step == "adm_money_id":
+            user_steps[uid] = {"step": "adm_money_amount", "target": text}
+            bot.reply_to(message, "مبلغ (مثبت برای اضافه، منفی برای کم کردن):")
+            return
 
-@bot.message_handler(func=lambda m: m.text == '⭐ تغییر لول کاربر')
-def admin_change_lvl_start(message):
-  if message.from_user.id != ADMIN_ID:
-    return
-  msg = bot.send_message(
-      message.chat.id,
-      'فرمت بفرستید:\n`آیدی_عددی لول_جدید`\nمثال:\n`123456789 5`',
-      parse_mode='Markdown',
-  )
-  bot.register_next_step_handler(msg, process_admin_change_lvl)
+        if step == "adm_money_amount":
+            try:
+                target = int(step_data["target"])
+                amount = int(text)
+                add_money(target, amount)
+                bot.reply_to(message, f"✅ پول کاربر `{target}` تغییر کرد.", parse_mode="Markdown", reply_markup=main_menu(uid))
+                try:
+                    bot.send_message(target, f"💰 موجودی شما توسط ادمین تغییر کرد: {amount:,}")
+                except:
+                    pass
+            except:
+                bot.reply_to(message, "خطا در مقدار.")
+            user_steps[uid] = {}
+            return
 
+        if step == "adm_house_name":
+            user_steps[uid] = {"step": "adm_house_price", "name": text}
+            bot.reply_to(message, "قیمت خانه را بفرست:")
+            return
 
-def process_admin_change_lvl(message):
-  try:
-    parts = message.text.split()
-    uid = int(parts[0])
-    lvl = int(parts[1])
-    conn = sqlite3.connect('economy_game.db')
-    cursor = conn.cursor()
-    cursor.execute(
-        'UPDATE users SET level = ? WHERE user_id = ?', (lvl, uid)
-    )
-    conn.commit()
-    conn.close()
-    bot.send_message(message.chat.id, f'✅ لول کاربر {uid} به {lvl} تغییر کرد.')
-  except Exception:
-    bot.send_message(message.chat.id, '❌ فرمت نامعتبر.')
+        if step == "adm_house_price":
+            try:
+                price = int(text)
+                name = step_data["name"]
+                conn = get_db()
+                c = conn.cursor()
+                c.execute("INSERT OR REPLACE INTO houses (name, price, bonus, emoji) VALUES (?, ?, 10, '🏠')", (name, price))
+                conn.commit()
+                conn.close()
+                bot.reply_to(message, f"✅ خانه «{name}» با قیمت {price:,} اضافه شد.", reply_markup=main_menu(uid))
+            except:
+                bot.reply_to(message, "قیمت عدد باشد.")
+            user_steps[uid] = {}
+            return
 
+        if step == "adm_car_name":
+            user_steps[uid] = {"step": "adm_car_price", "name": text}
+            bot.reply_to(message, "قیمت ماشین را بفرست:")
+            return
 
-@bot.message_handler(
-    func=lambda m: m.text == '🚫 مسدود کاربر' or m.text == '✅ رفع مسدود'
-)
-def admin_ban_unban(message):
-  if message.from_user.id != ADMIN_ID:
-    return
-  action = 'ban' if '🚫' in message.text else 'unban'
-  msg = bot.send_message(
-      message.chat.id, f'آیدی عددی کاربر جهت {message.text} را وارد کنید:'
-  )
-  bot.register_next_step_handler(
-      msg, lambda m: process_ban_unban(m, action)
-  )
+        if step == "adm_car_price":
+            try:
+                price = int(text)
+                name = step_data["name"]
+                conn = get_db()
+                c = conn.cursor()
+                c.execute("INSERT OR REPLACE INTO cars (name, price, bonus, emoji) VALUES (?, ?, 10, '🚗')", (name, price))
+                conn.commit()
+                conn.close()
+                bot.reply_to(message, f"✅ ماشین «{name}» با قیمت {price:,} اضافه شد.", reply_markup=main_menu(uid))
+            except:
+                bot.reply_to(message, "قیمت عدد باشد.")
+            user_steps[uid] = {}
+            return
 
+        if step == "adm_job_name":
+            user_steps[uid] = {"step": "adm_job_income", "name": text}
+            bot.reply_to(message, "درآمد هر بار کار را بفرست:")
+            return
 
-def process_ban_unban(message, action):
-  if not message.text.isdigit():
-    bot.send_message(message.chat.id, '❌ فقط عدد وارد کنید.')
-    return
-  uid = int(message.text)
-  status = 1 if action == 'ban' else 0
-  conn = sqlite3.connect('economy_game.db')
-  cursor = conn.cursor()
-  cursor.execute(
-      'UPDATE users SET is_banned = ? WHERE user_id = ?', (status, uid)
-  )
-  conn.commit()
-  conn.close()
-  bot.send_message(
-      message.chat.id,
-      f'✅ وضعیت مسدودی کاربر {uid} به {"مسدود" if status==1 else "آزاد"} تغییر'
-      ' یافت.',
-      )
-# ==========================================
-# بخش 8 از 8: اصلاح بخش فروشگاه و استارت ربات
-# ==========================================
-@bot.message_handler(func=lambda m: m.text == "➕ اضافه کردن ماشین")
-def add_car_start(message):
-  if message.from_user.id != ADMIN_ID:
-    return
-  msg = bot.send_message(
-      message.chat.id,
-      "نام ماشین و قیمت آن را با علامت `-` بفرستید:\n\nفرمت:\n`نام ماشین -"
-      " قیمت`\nمثال:\n`پراید - 50000`",
-      parse_mode="Markdown",
-  )
-  bot.register_next_step_handler(
-      msg, lambda m: process_add_shop(m, category="car")
-  )
+        if step == "adm_job_income":
+            user_steps[uid] = {"step": "adm_job_level", "name": step_data["name"], "income": text}
+            bot.reply_to(message, "حداقل لول مورد نیاز را بفرست:")
+            return
 
+        if step == "adm_job_level":
+            try:
+                name = step_data["name"]
+                income = int(step_data["income"])
+                min_level = int(text)
+                conn = get_db()
+                c = conn.cursor()
+                c.execute("INSERT OR REPLACE INTO jobs (name, income, cooldown, min_level, emoji) VALUES (?, ?, 90, ?, '💼')",
+                          (name, income, min_level))
+                conn.commit()
+                conn.close()
+                bot.reply_to(message, f"✅ شغل «{name}» اضافه شد.", reply_markup=main_menu(uid))
+            except:
+                bot.reply_to(message, "مقادیر عددی باشند.")
+            user_steps[uid] = {}
+            return
 
-@bot.message_handler(func=lambda m: m.text == "➕ اضافه کردن خانه")
-def add_house_start(message):
-  if message.from_user.id != ADMIN_ID:
-    return
-  msg = bot.send_message(
-      message.chat.id,
-      "نام خانه/املاک و قیمت آن را با علامت `-` بفرستید:\n\nفرمت:\n`نام خانه -"
-      " قیمت`\nمثال:\n`ویلا ساحلی - 500000`",
-      parse_mode="Markdown",
-  )
-  bot.register_next_step_handler(
-      msg, lambda m: process_add_shop(m, category="house")
-  )
+        if step == "broadcast":
+            conn = get_db()
+            c = conn.cursor()
+            c.execute("SELECT user_id FROM users")
+            users = c.fetchall()
+            conn.close()
+            ok = 0
+            for u in users:
+                try:
+                    bot.send_message(u[0], text)
+                    ok += 1
+                except:
+                    pass
+            bot.reply_to(message, f"✅ به {ok} کاربر ارسال شد.", reply_markup=main_menu(uid))
+            user_steps[uid] = {}
+            return
 
+        if step == "adm_search":
+            try:
+                target = int(text)
+                u = get_user(target)
+                if u:
+                    msg = f"🔍 کاربر `{u[0]}`\nنام: {u[2]}\nیوزرنیم: @{u[1] or '-'}\nپول: {u[3]:,}\nبانک: {u[4]:,}\nلول: {u[5]}\nشغل: {u[7] or 'بیکار'}\nخانه: {u[8]}\nماشین: {u[9] or 'ندارد'}"
+                    bot.reply_to(message, msg, parse_mode="Markdown", reply_markup=main_menu(uid))
+                else:
+                    bot.reply_to(message, "پیدا نشد.")
+            except:
+                bot.reply_to(message, "آیدی عددی بفرست.")
+            user_steps[uid] = {}
+            return
 
-def process_add_shop(message, category):
-  try:
-    parts = message.text.split("-")
-    name = parts[0].strip()
-    price = int(parts[1].strip())
+    # اگر هیچ استپی نبود
+    if text.startswith("/"):
+        return
+    bot.reply_to(message, "از منو استفاده کن یا /help بزن.", reply_markup=main_menu(uid))
 
-    if add_shop_item(name, category, price):
-      bot.send_message(
-          message.chat.id,
-          f"✅ آیتم **{name}** با موفقیت در دسته {category} و با قیمت {price:,}"
-          " ثبت شد.",
-          parse_mode="Markdown",
-      )
-    else:
-      bot.send_message(message.chat.id, "❌ خطایی رخ داد یا نام آیتم تکراری است.")
-  except Exception:
-    bot.send_message(
-        message.chat.id,
-        "❌ فرمت ارسال اشتباه است! باید به صورت `نام - قیمت` فرستاده شود.",
-        parse_mode="Markdown",
-    )
+print("✅ بخش ۴ آماده شد")
+# ==================== بخش ۵ از ۶ ====================
+# دزدی چندمرحله‌ای خفن + کال‌بک‌های جرم
 
+@bot.callback_query_handler(func=lambda call: call.data in ["steal", "crime_attack", "crime_sneak", "crime_smart"] or call.data.startswith("crime_"))
+def crime_callbacks(call):
+    uid = call.from_user.id
+    ensure_user(call.from_user)
+    data = call.data
 
-@bot.message_handler(func=lambda m: m.text == "✏️ تغییر قیمت آیتم")
-def change_price_start(message):
-  if message.from_user.id != ADMIN_ID:
-    return
-  items = get_shop_items()
-  if not items:
-    bot.send_message(message.chat.id, "هیچ آیتمی در فروشگاه موجود نیست.")
-    return
+    if data == "steal":
+        # مرحله ۱: شروع نقشه
+        user_steps[uid] = {"step": "crime_plan"}
+        bot.edit_message_text(
+            "🦹 **نقشه دزدی**\n\n"
+            "اول بگو هدفت چیه؟\n"
+            "می‌تونی بنویسی:\n"
+            "• بانک\n"
+            "• خونه لوکس\n"
+            "• ماشین گران\n"
+            "• یا هر چیزی که تو ذهنته",
+            call.message.chat.id, call.message.message_id
+        )
+        bot.answer_callback_query(call.id)
+        return
 
-  text = "📜 **لیست آیتم‌های فروشگاه:**\n\n"
-  for item in items:
-    text += f"🔹 `{item[0]}` (دسته: {item[1]}) ➔ {item[2]:,} سکه\n"
+    # مرحله ۲: انتخاب روش
+    if data in ["crime_attack", "crime_sneak", "crime_smart"]:
+        u = get_user(uid)
+        now = time.time()
 
-  text += "\nبرای تغییر قیمت فرمت زیر را فرستید:\n`نام دقیق آیتم - قیمت جدید`"
-  msg = bot.send_message(message.chat.id, text, parse_mode="Markdown")
-  bot.register_next_step_handler(msg, process_change_price)
+        if now - u[12] < 180:
+            bot.answer_callback_query(call.id, "۳ دقیقه کول‌داون داری!", show_alert=True)
+            return
+        if u[10] < 20:
+            bot.answer_callback_query(call.id, "انرژی کافی نداری (حداقل ۲۰)", show_alert=True)
+            return
 
+        plan = user_steps.get(uid, {}).get("plan", "هدف نامشخص")
+        method = {
+            "crime_attack": ("حمله مستقیم", 35, 1.4),
+            "crime_sneak": ("دزدی مخفیانه", 55, 1.0),
+            "crime_smart": ("نقشه پیچیده", 70, 1.8)
+        }[data]
 
-def process_change_price(message):
-  try:
-    parts = message.text.split("-")
-    name = parts[0].strip()
-    new_price = int(parts[1].strip())
+        success_chance = method[1] + min(u[5] * 2, 20)  # لول بالاتر شانس بیشتر
+        success = random.randint(1, 100) <= success_chance
 
-    if update_item_price(name, new_price):
-      bot.send_message(
-          message.chat.id,
-          f"✅ قیمت آیتم **{name}** با موفقیت به {new_price:,} سکه به روز شد.",
-          parse_mode="Markdown",
-      )
-    else:
-      bot.send_message(
-          message.chat.id, "❌ آیتمی با این نام دقیق پیدا نشد!"
-      )
-  except Exception:
-    bot.send_message(
-        message.chat.id, "❌ فرمت ورودی اشتباه است. (مثال: پراید - 60000)"
-    )
+        conn = get_db()
+        c = conn.cursor()
 
+        if success:
+            # پیدا کردن قربانی
+            c.execute("SELECT user_id, money FROM users WHERE user_id != ? AND money > 2000 ORDER BY RANDOM() LIMIT 1", (uid,))
+            target = c.fetchone()
 
-@bot.message_handler(func=lambda m: m.text == "🔙 بازگشت به منوی اصلی")
-def back_to_main(message):
-  send_welcome(message)
+            if target:
+                stolen = int(min(target[1] // 3, random.randint(2000, 12000)) * method[2])
+                c.execute("UPDATE users SET money = money - ? WHERE user_id=?", (stolen, target[0]))
+                c.execute("UPDATE users SET money = money + ?, last_steal=?, energy = energy - 20 WHERE user_id=?", (stolen, now, uid))
+                conn.commit()
 
+                text = f"""
+✅ **دزدی موفق!**
 
-# اجرای ربات
-if __name__ == "__main__":
-  print("ربات بازی اقتصادی KiAN با موفقیت آنلاین شد...")
-  bot.infinity_polling(skip_pending=True)
-    
+🎯 هدف: {plan}
+🗡️ روش: {method[0]}
+💰 غنیمت: **+{stolen:,}** تومان
+
+آفرین، فرار کردی!
+"""
+                bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=main_menu(uid))
+                try:
+                    bot.send_message(target[0], f"🔫 از تو دزدی شد!\n-{stolen:,} تومان از دست دادی.")
+                except:
+                    pass
+            else:
+                # اگر کسی نبود، جایزه سیستم بده
+                reward = random.randint(3000, 9000)
+                c.execute("UPDATE users SET money = money + ?, last_steal=?, energy = energy - 20 WHERE user_id=?", (reward, now, uid))
+                conn.commit()
+                bot.edit_message_text(f"✅ دزدی از سیستم موفق!\n+{reward:,} تومان", call.message.chat.id, call.message.message_id, reply_markup=main_menu(uid))
+        else:
+            # شکست
+            fine = random.randint(1500, 6000)
+            jail_time = random.randint(1, 3)
+            c.execute("UPDATE users SET money = money - ?, last_steal=?, energy = energy - 25 WHERE user_id=?", (fine, now, uid))
+            conn.commit()
+
+            text = f"""
+❌ **دزدی شکست خورد!**
+
+پلیس گرفتت!
+💸 جریمه: -{fine:,} تومان
+⏱ انرژی کم شد
+
+دفعه بعد محتاط‌تر باش...
+"""
+            bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=main_menu(uid))
+
+        conn.close()
+        user_steps[uid] = {}
+        bot.answer_callback_query(call.id)
+
+print("✅ بخش ۵ آماده شد")
+# ==================== بخش ۶ از ۶ ====================
+# اجرا نهایی + اطمینان از کارکرد
+
+# اگر کاربر در گپ یا پیوی پیام داد و استپی نداشت
+@bot.message_handler(func=lambda m: True, content_types=['text'])
+def fallback(message):
+    # این هندلر فقط زمانی اجرا می‌شود که هیچ هندلر دیگری پیام را نگرفته باشد
+    pass
+
+print("🤖 ربات Virtual Life با موفقیت روشن شد")
+print("=" * 45)
+print("توکن تنظیم شد")
+print("آیدی ادمین:", ADMIN_IDS)
+print()
+print("قابلیت‌های فعال:")
+print("• پروفایل کامل + انرژی + بانک")
+print("• سیستم شغل (قابل ساخت از ادمین)")
+print("• خانه و ماشین (قابل ساخت از ادمین)")
+print("• کار کردن با کول‌داون و بونوس")
+print("• دزدی چندمرحله‌ای خفن")
+print("• ازدواج")
+print("• انتقال پول")
+print("• بانک (واریز / برداشت)")
+print("• رتبه‌بندی ثروت و لول")
+print("• دعوت دوستان")
+print("• اتفاقات تصادفی")
+print("• پنل ادمین کامل (ساخت خانه/ماشین/شغل + تغییر پول + همگانی + جستجو)")
+print("• راهنما و دستورات")
+print("=" * 45)
+
+bot.infinity_polling()
