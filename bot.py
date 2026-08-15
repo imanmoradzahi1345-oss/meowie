@@ -1,30 +1,40 @@
-# ==================== بخش ۱ از ۸ - ZOMBIE SURVIVAL ====================
-import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 import sqlite3
-import random
-import time
 import json
-from datetime import datetime, timedelta
+import os
+import random
+from datetime import datetime
+import telebot
+from telebot import types
 
+# ==========================================
+# ⚙️ تنظیمات اصلی و کلیدهای ارتباطی
+# ==========================================
 BOT_TOKEN = "8875102057:AAE5JvIk9HhGoeizZhYUjyRvSdCRIsEzoxU"
-ADMIN_IDS = [7530457395]
+ADMIN_ID = 7530457395
+DB_NAME = "zombie_survival.db"
 
-bot = telebot.TeleBot(BOT_TOKEN)
-user_steps = {}
+bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 
+# ==========================================
+# 🗄️ راه‌اندازی و ساختار کامل دیتابیس (DB ENGINE)
+# ==========================================
 def get_db():
-    return sqlite3.connect("zombie_survival.db", check_same_thread=False)
+    """ارتباط امن با پایگاه داده SQLite"""
+    conn = sqlite3.connect(DB_NAME, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 def init_db():
+    """ایجاد کلیه جداول لازم برای بازی ZOMBIE SURVIVAL"""
     conn = get_db()
-    c = conn.cursor()
+    cursor = conn.cursor()
 
-    # ---------- بازیکن ----------
-    c.execute('''CREATE TABLE IF NOT EXISTS users (
+    # 1. جدول کاربران
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS users (
         user_id INTEGER PRIMARY KEY,
         username TEXT,
-        full_name TEXT,
+        first_name TEXT,
         level INTEGER DEFAULT 1,
         xp INTEGER DEFAULT 0,
         hp INTEGER DEFAULT 100,
@@ -34,1852 +44,1889 @@ def init_db():
         energy INTEGER DEFAULT 100,
         sanity INTEGER DEFAULT 100,
         infection INTEGER DEFAULT 0,
-        scrap INTEGER DEFAULT 500,
+        scrap INTEGER DEFAULT 100,
         zombie_kills INTEGER DEFAULT 0,
         deaths INTEGER DEFAULT 0,
         current_region_id INTEGER DEFAULT NULL,
         current_weapon_id INTEGER DEFAULT NULL,
         current_shelter_id INTEGER DEFAULT NULL,
         clan_id INTEGER DEFAULT NULL,
+        role TEXT DEFAULT 'player',
         is_banned INTEGER DEFAULT 0,
-        joined_at TEXT,
-        last_active TEXT
-    )''')
-
-    # ---------- نقشه ----------
-    c.execute('''CREATE TABLE IF NOT EXISTS maps (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        description TEXT,
-        image_file_id TEXT,
-        is_active INTEGER DEFAULT 1,
         created_at TEXT
-    )''')
+    )
+    ''')
 
-    # ---------- منطقه (سلسله‌مراتبی) ----------
-    c.execute('''CREATE TABLE IF NOT EXISTS regions (
+    # 2. نقشه‌ها (Maps)
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS maps (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        map_id INTEGER,
-        parent_id INTEGER DEFAULT NULL,
+        name TEXT UNIQUE NOT NULL,
+        description TEXT,
+        image_id TEXT,
+        is_active INTEGER DEFAULT 1
+    )
+    ''')
+
+    # 3. مناطق (Regions - چندلایه و تو در تو)
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS regions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        map_id INTEGER NOT NULL,
+        parent_region_id INTEGER DEFAULT NULL,
         name TEXT NOT NULL,
         description TEXT,
-        image_file_id TEXT,
+        image_id TEXT,
         region_type TEXT DEFAULT 'normal',
         danger_level INTEGER DEFAULT 1,
         min_level INTEGER DEFAULT 1,
-        zombie_chance INTEGER DEFAULT 40,
-        loot_chance INTEGER DEFAULT 50,
-        rare_loot_chance INTEGER DEFAULT 10,
-        infection_chance INTEGER DEFAULT 15,
+        is_secret INTEGER DEFAULT 0,
+        is_locked INTEGER DEFAULT 0,
         is_active INTEGER DEFAULT 1,
-        created_at TEXT,
-        FOREIGN KEY(map_id) REFERENCES maps(id),
-        FOREIGN KEY(parent_id) REFERENCES regions(id)
-    )''')
+        zombie_chance INTEGER DEFAULT 40,
+        loot_chance INTEGER DEFAULT 30,
+        rare_loot_chance INTEGER DEFAULT 10,
+        survivor_chance INTEGER DEFAULT 5,
+        event_chance INTEGER DEFAULT 5,
+        FOREIGN KEY (map_id) REFERENCES maps(id) ON DELETE CASCADE,
+        FOREIGN KEY (parent_region_id) REFERENCES regions(id) ON DELETE SET NULL
+    )
+    ''')
 
-    # ---------- سلاح ----------
-    c.execute('''CREATE TABLE IF NOT EXISTS weapons (
+    # 4. سلاح‌ها (Weapons)
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS weapons (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
+        name TEXT UNIQUE NOT NULL,
         description TEXT,
-        image_file_id TEXT,
+        image_id TEXT,
         price INTEGER DEFAULT 0,
         damage INTEGER DEFAULT 10,
-        ammo_capacity INTEGER DEFAULT 0,
-        rarity TEXT DEFAULT 'common',
-        min_level INTEGER DEFAULT 1,
-        weapon_type TEXT DEFAULT 'gun',
+        ammo_capacity INTEGER DEFAULT 10,
+        rarity TEXT DEFAULT 'Common',
+        req_level INTEGER DEFAULT 1,
+        weapon_type TEXT DEFAULT 'Melee',
         is_active INTEGER DEFAULT 1
-    )''')
+    )
+    ''')
 
-    # ---------- پناهگاه ----------
-    c.execute('''CREATE TABLE IF NOT EXISTS shelters (
+    # 5. پناهگاه‌ها (Shelters)
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS shelters (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
+        name TEXT UNIQUE NOT NULL,
         description TEXT,
-        image_file_id TEXT,
+        image_id TEXT,
         price INTEGER DEFAULT 0,
         defense INTEGER DEFAULT 10,
-        capacity INTEGER DEFAULT 5,
-        min_level INTEGER DEFAULT 1,
-        rarity TEXT DEFAULT 'common',
+        capacity INTEGER DEFAULT 50,
+        req_level INTEGER DEFAULT 1,
+        rarity TEXT DEFAULT 'Common',
         is_active INTEGER DEFAULT 1
-    )''')
+    )
+    ''')
 
-    # ---------- آیتم ----------
-    c.execute('''CREATE TABLE IF NOT EXISTS items (
+    # 6. آیتم‌ها (Items)
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS items (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
+        name TEXT UNIQUE NOT NULL,
         description TEXT,
-        image_file_id TEXT,
+        image_id TEXT,
         item_type TEXT DEFAULT 'misc',
         price INTEGER DEFAULT 0,
-        rarity TEXT DEFAULT 'common',
+        rarity TEXT DEFAULT 'Common',
         max_stack INTEGER DEFAULT 99,
         heal_hp INTEGER DEFAULT 0,
         heal_hunger INTEGER DEFAULT 0,
         heal_thirst INTEGER DEFAULT 0,
-        heal_energy INTEGER DEFAULT 0,
+        heal_sanity INTEGER DEFAULT 0,
         reduce_infection INTEGER DEFAULT 0,
         is_active INTEGER DEFAULT 1
-    )''')
+    )
+    ''')
 
-    # ---------- اینونتوری ----------
-    c.execute('''CREATE TABLE IF NOT EXISTS inventory (
+    # 7. کوله‌پشتی کاربران (User Inventory)
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS user_inventory (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        item_type TEXT,
-        item_id INTEGER,
+        user_id INTEGER NOT NULL,
+        item_id INTEGER NOT NULL,
         quantity INTEGER DEFAULT 1,
-        UNIQUE(user_id, item_type, item_id)
-    )''')
+        FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+        FOREIGN KEY (item_id) REFERENCES items(id) ON DELETE CASCADE
+    )
+    ''')
 
-    # ---------- زامبی ----------
-    c.execute('''CREATE TABLE IF NOT EXISTS zombies (
+    # 8. سلاح‌های خریداری شده کاربر (User Weapons)
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS user_weapons (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        weapon_id INTEGER NOT NULL,
+        ammo_left INTEGER DEFAULT 0,
+        FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+        FOREIGN KEY (weapon_id) REFERENCES weapons(id) ON DELETE CASCADE
+    )
+    ''')
+
+    # 9. زامبی‌ها (Zombies)
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS zombies (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
         description TEXT,
-        image_file_id TEXT,
+        image_id TEXT,
         hp INTEGER DEFAULT 50,
         damage INTEGER DEFAULT 10,
-        defense INTEGER DEFAULT 0,
+        defense INTEGER DEFAULT 2,
         speed INTEGER DEFAULT 5,
         xp_reward INTEGER DEFAULT 20,
         scrap_reward INTEGER DEFAULT 15,
-        infection_chance INTEGER DEFAULT 20,
-        rarity TEXT DEFAULT 'common',
+        infection_chance INTEGER DEFAULT 10,
+        rarity TEXT DEFAULT 'Common',
         is_active INTEGER DEFAULT 1
-    )''')
+    )
+    ''')
 
-    # ---------- مأموریت ----------
-    c.execute('''CREATE TABLE IF NOT EXISTS quests (
+    # 10. سیستم نبرد زنده (Active Combat State)
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS active_combat (
+        user_id INTEGER PRIMARY KEY,
+        zombie_id INTEGER NOT NULL,
+        zombie_current_hp INTEGER NOT NULL,
+        player_turn INTEGER DEFAULT 1,
+        is_resolved INTEGER DEFAULT 0,
+        created_at TEXT,
+        FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+        FOREIGN KEY (zombie_id) REFERENCES zombies(id) ON DELETE CASCADE
+    )
+    ''')
+
+    # 11. مأموریت‌ها (Quests)
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS quests (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
+        title TEXT NOT NULL,
         description TEXT,
-        image_file_id TEXT,
-        quest_type TEXT DEFAULT 'kill',
-        target_id INTEGER,
+        image_id TEXT,
+        target_type TEXT NOT NULL,
+        target_id INTEGER DEFAULT 0,
         target_count INTEGER DEFAULT 1,
-        region_id INTEGER,
-        reward_xp INTEGER DEFAULT 50,
-        reward_scrap INTEGER DEFAULT 100,
-        reward_item_id INTEGER,
+        region_id INTEGER DEFAULT NULL,
+        xp_reward INTEGER DEFAULT 50,
+        scrap_reward INTEGER DEFAULT 50,
+        item_reward_id INTEGER DEFAULT NULL,
         is_active INTEGER DEFAULT 1
-    )''')
+    )
+    ''')
 
-    c.execute('''CREATE TABLE IF NOT EXISTS user_quests (
+    # 12. وضعیت مأموریت‌های کاربر (User Quests)
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS user_quests (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        quest_id INTEGER,
-        progress INTEGER DEFAULT 0,
-        completed INTEGER DEFAULT 0,
-        claimed INTEGER DEFAULT 0,
-        UNIQUE(user_id, quest_id)
-    )''')
+        user_id INTEGER NOT NULL,
+        quest_id INTEGER NOT NULL,
+        current_count INTEGER DEFAULT 0,
+        is_completed INTEGER DEFAULT 0,
+        is_reward_claimed INTEGER DEFAULT 0,
+        FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+        FOREIGN KEY (quest_id) REFERENCES quests(id) ON DELETE CASCADE
+    )
+    ''')
 
-    # ---------- کلن ----------
-    c.execute('''CREATE TABLE IF NOT EXISTS clans (
+    # 13. کلن‌ها (Clans)
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS clans (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT UNIQUE,
+        name TEXT UNIQUE NOT NULL,
         description TEXT,
-        image_file_id TEXT,
-        owner_id INTEGER,
+        image_id TEXT,
+        owner_id INTEGER NOT NULL,
         level INTEGER DEFAULT 1,
         xp INTEGER DEFAULT 0,
         created_at TEXT
-    )''')
+    )
+    ''')
 
-    c.execute('''CREATE TABLE IF NOT EXISTS clan_members (
-        clan_id INTEGER,
-        user_id INTEGER,
+    # 14. اعضای کلن (Clan Members)
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS clan_members (
+        user_id INTEGER PRIMARY KEY,
+        clan_id INTEGER NOT NULL,
         role TEXT DEFAULT 'member',
         joined_at TEXT,
-        PRIMARY KEY(clan_id, user_id)
-    )''')
+        FOREIGN KEY (clan_id) REFERENCES clans(id) ON DELETE CASCADE
+    )
+    ''')
 
-    # ---------- ایونت ----------
-    c.execute('''CREATE TABLE IF NOT EXISTS events (
+    # 15. رویدادها (Events)
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        description TEXT,
+        image_id TEXT,
+        region_id INTEGER DEFAULT NULL,
+        zombie_mult REAL DEFAULT 1.0,
+        loot_mult REAL DEFAULT 1.0,
+        xp_mult REAL DEFAULT 1.0,
+        is_active INTEGER DEFAULT 0
+    )
+    ''')
+
+    # 16. غول‌های جهانی (World Bosses)
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS world_bosses (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
         description TEXT,
-        image_file_id TEXT,
-        region_id INTEGER,
-        start_time TEXT,
-        end_time TEXT,
-        zombie_multiplier REAL DEFAULT 1.0,
-        loot_multiplier REAL DEFAULT 1.0,
-        xp_multiplier REAL DEFAULT 1.0,
-        is_active INTEGER DEFAULT 1
-    )''')
-
-    # ---------- ورلد باس ----------
-    c.execute('''CREATE TABLE IF NOT EXISTS world_bosses (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        description TEXT,
-        image_file_id TEXT,
+        image_id TEXT,
         max_hp INTEGER DEFAULT 10000,
         current_hp INTEGER DEFAULT 10000,
         damage INTEGER DEFAULT 50,
-        defense INTEGER DEFAULT 20,
-        region_id INTEGER,
-        start_time TEXT,
-        end_time TEXT,
-        is_active INTEGER DEFAULT 0
-    )''')
+        scrap_reward_pool INTEGER DEFAULT 10000,
+        is_active INTEGER DEFAULT 0,
+        is_defeated INTEGER DEFAULT 0
+    )
+    ''')
 
-    c.execute('''CREATE TABLE IF NOT EXISTS boss_damage (
-        boss_id INTEGER,
-        user_id INTEGER,
-        damage INTEGER DEFAULT 0,
-        claimed INTEGER DEFAULT 0,
-        PRIMARY KEY(boss_id, user_id)
-    )''')
-
-    # ---------- راهنما ----------
-    c.execute('''CREATE TABLE IF NOT EXISTS help_sections (
+    # 17. مشارکت در مبارزه با غول جهانی (Boss Contributions)
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS boss_contributions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        boss_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
+        damage_dealt INTEGER DEFAULT 0,
+        reward_claimed INTEGER DEFAULT 0,
+        FOREIGN KEY (boss_id) REFERENCES world_bosses(id) ON DELETE CASCADE,
+        FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+    )
+    ''')
+
+    # 18. صفحات راهنمای بازی (Dynamic Help Pages)
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS help_pages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        key_name TEXT UNIQUE NOT NULL,
         title TEXT NOT NULL,
-        content TEXT,
-        image_file_id TEXT,
-        sort_order INTEGER DEFAULT 0,
+        content TEXT NOT NULL,
+        image_id TEXT,
+        display_order INTEGER DEFAULT 0,
         is_active INTEGER DEFAULT 1
-    )''')
+    )
+    ''')
 
-    # ---------- لاگ ----------
-    c.execute('''CREATE TABLE IF NOT EXISTS logs (
+    # 19. ثبت لاگ‌های امنیتی سیستم (System Logs)
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS system_logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER,
-        action TEXT,
+        action TEXT NOT NULL,
         details TEXT,
-        created_at TEXT
-    )''')
+        timestamp TEXT
+    )
+    ''')
 
-    # تنظیمات
-    c.execute('''CREATE TABLE IF NOT EXISTS settings (
-        key TEXT PRIMARY KEY,
-        value TEXT
-    )''')
-
-    c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('start_scrap', '500')")
-    c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('start_hp', '100')")
+    # 20. مدیریت وضعیت فرم‌های مدیریتی (User States)
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS user_states (
+        user_id INTEGER PRIMARY KEY,
+        state TEXT,
+        data TEXT
+    )
+    ''')
 
     conn.commit()
     conn.close()
 
+# اجرای راه‌اندازی دیتابیس در زمان فراخوانی اولیه
 init_db()
 
-def is_admin(uid):
-    return uid in ADMIN_IDS
+# ==========================================
+# 🔄 توابع پایه و سرویس‌های کاربردی (CORE SERVICES)
+# ==========================================
 
-def ensure_user(user):
+def log_system_action(user_id: int, action: str, details: str = ""):
+    """ثبت لاگ‌های امنیتی و مدیریتی"""
     conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT user_id FROM users WHERE user_id=?", (user.id,))
-    if not c.fetchone():
-        c.execute('''INSERT INTO users 
-            (user_id, username, full_name, scrap, hp, max_hp, joined_at, last_active)
-            VALUES (?, ?, ?, 500, 100, 100, ?, ?)''',
-            (user.id, user.username or "", user.full_name or "",
-             datetime.now().strftime("%Y-%m-%d %H:%M"),
-             datetime.now().strftime("%Y-%m-%d %H:%M")))
-        conn.commit()
-    else:
-        c.execute("UPDATE users SET username=?, full_name=?, last_active=? WHERE user_id=?",
-                  (user.username or "", user.full_name or "",
-                   datetime.now().strftime("%Y-%m-%d %H:%M"), user.id))
-        conn.commit()
-    conn.close()
-
-def get_user(uid):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT * FROM users WHERE user_id=?", (uid,))
-    row = c.fetchone()
-    conn.close()
-    return row
-
-def log_action(uid, action, details=""):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("INSERT INTO logs (user_id, action, details, created_at) VALUES (?, ?, ?, ?)",
-              (uid, action, details, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    conn.execute(
+        "INSERT INTO system_logs (user_id, action, details, timestamp) VALUES (?, ?, ?, ?)",
+        (user_id, action, details, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    )
     conn.commit()
     conn.close()
 
-print("✅ بخش ۱ آماده شد - دیتابیس کامل Dynamic")
-# ==================== بخش ۲ از ۸ ====================
-# منوی اصلی + /start + پروفایل + راهنما پایه
-
-def main_menu(uid):
-    m = InlineKeyboardMarkup(row_width=2)
-    m.add(
-        InlineKeyboardButton("👤 پروفایل", callback_data="profile"),
-        InlineKeyboardButton("🗺️ نقشه", callback_data="map")
-    )
-    m.add(
-        InlineKeyboardButton("🔫 سلاح‌ها", callback_data="weapons"),
-        InlineKeyboardButton("🏠 پناهگاه", callback_data="shelters")
-    )
-    m.add(
-        InlineKeyboardButton("🎒 کوله‌پشتی", callback_data="inventory"),
-        InlineKeyboardButton("🧟 بقا / جستجو", callback_data="explore")
-    )
-    m.add(
-        InlineKeyboardButton("📜 مأموریت‌ها", callback_data="quests"),
-        InlineKeyboardButton("👥 کلن", callback_data="clan")
-    )
-    m.add(
-        InlineKeyboardButton("🏆 رتبه‌بندی", callback_data="ranking"),
-        InlineKeyboardButton("📖 راهنما", callback_data="help")
-    )
-    if is_admin(uid):
-        m.add(InlineKeyboardButton("👑 پنل مدیریت", callback_data="admin"))
-    return m
-
-def get_location_path(region_id):
-    """ساخت مسیر کامل موقعیت بازیکن"""
-    if not region_id:
-        return "نامشخص"
-    path = []
+def set_user_state(user_id: int, state: str, data: dict = None):
+    """ذخیره استیت فعلی کاربر برای فرم‌های چند مرحله‌ای Admin"""
     conn = get_db()
-    c = conn.cursor()
-    current = region_id
-    while current:
-        c.execute("SELECT id, name, parent_id FROM regions WHERE id=?", (current,))
-        row = c.fetchone()
-        if not row:
+    data_str = json.dumps(data or {})
+    conn.execute(
+        "INSERT OR REPLACE INTO user_states (user_id, state, data) VALUES (?, ?, ?)",
+        (user_id, state, data_str)
+    )
+    conn.commit()
+    conn.close()
+
+def get_user_state(user_id: int):
+    """دریافت استیت فعال کاربر"""
+    conn = get_db()
+    row = conn.execute("SELECT state, data FROM user_states WHERE user_id = ?", (user_id,)).fetchone()
+    conn.close()
+    if row:
+        return row["state"], json.loads(row["data"] or "{}")
+    return None, {}
+
+def clear_user_state(user_id: int):
+    """پاکسازی استیت کاربر"""
+    conn = get_db()
+    conn.execute("DELETE FROM user_states WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+    # ==========================================
+# 👤 مدیریت کاربر و سیستم ارتقاء سطح (USER ENGINE)
+# ==========================================
+
+def get_or_create_user(user_id: int, username: str, first_name: str):
+    """ثبت‌نام خودکار کاربر جدید یا دریافت اطلاعات ثبت‌شده"""
+    conn = get_db()
+    cursor = conn.cursor()
+    user = cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
+
+    role = 'admin' if str(user_id) == str(ADMIN_ID) else 'player'
+
+    if not user:
+        cursor.execute('''
+        INSERT INTO users (user_id, username, first_name, role, created_at)
+        VALUES (?, ?, ?, ?, DATETIME('now'))
+        ''', (user_id, username or "Survivor", first_name or "بازیکن", role))
+        conn.commit()
+        log_system_action(user_id, "REGISTER", "ورود بازیکن جدید به دنیای ZOMBIE SURVIVAL")
+        user = cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
+
+    conn.close()
+    return user
+
+def add_xp_and_scrap(user_id: int, xp_gain: int, scrap_gain: int):
+    """افزایش XP و Scrap همراه با سیستم سطح‌بندی (Level-Up) خودکار"""
+    conn = get_db()
+    cursor = conn.cursor()
+    user = cursor.execute("SELECT level, xp, scrap, max_hp, hp FROM users WHERE user_id = ?", (user_id,)).fetchone()
+
+    if not user:
+        conn.close()
+        return False, 0
+
+    new_xp = user['xp'] + xp_gain
+    new_scrap = user['scrap'] + scrap_gain
+    current_level = user['level']
+    max_hp = user['max_hp']
+    current_hp = user['hp']
+
+    required_xp = current_level * 100
+    leveled_up = False
+
+    while new_xp >= required_xp:
+        new_xp -= required_xp
+        current_level += 1
+        max_hp += 20
+        current_hp = max_hp  # بازیابی کامل سلامتی هنگام افزایش سطح
+        required_xp = current_level * 100
+        leveled_up = True
+
+    cursor.execute('''
+    UPDATE users 
+    SET level = ?, xp = ?, scrap = ?, max_hp = ?, hp = ?
+    WHERE user_id = ?
+    ''', (current_level, new_xp, new_scrap, max_hp, current_hp, user_id))
+
+    conn.commit()
+    conn.close()
+    return leveled_up, current_level
+
+# ==========================================
+# 🗺️ سیستم موقعیت‌نمایی تو در تو (LOCATION ENGINE)
+# ==========================================
+
+def get_full_location_path(region_id: int):
+    """محاسبه کامل مسیر چندلایه موقعیت (کشور ↓ شهر ↓ منطقه ↓ ساختمان)"""
+    if not region_id:
+        return "🌐 بیابان‌های آخرالزمانی"
+
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    path = []
+    curr_id = region_id
+
+    while curr_id:
+        region = cursor.execute("SELECT id, parent_region_id, name, map_id FROM regions WHERE id = ?", (curr_id,)).fetchone()
+        if not region:
             break
-        path.append(row[1])
-        current = row[2]
+        path.append(region['name'])
+        curr_id = region['parent_region_id']
+        
+        if not curr_id and region['map_id']:
+            map_data = cursor.execute("SELECT name FROM maps WHERE id = ?", (region['map_id'],)).fetchone()
+            if map_data:
+                path.append(f"🏙️ {map_data['name']}")
+
     conn.close()
     path.reverse()
-    return " → ".join(path) if path else "نامشخص"
+    return " ↓ ".join(path)
 
-def show_profile(uid, chat_id):
-    u = get_user(uid)
-    if not u:
-        return
+def update_user_location(user_id: int, region_id: int):
+    """تغییر موقعیت ثبت‌شده بازیکن"""
+    conn = get_db()
+    conn.execute("UPDATE users SET current_region_id = ? WHERE user_id = ?", (region_id, user_id))
+    conn.commit()
+    conn.close()
 
-    location = get_location_path(u[15])  # current_region_id
+# ==========================================
+# 🎒 سیستم مدیریت کوله‌پشتی (INVENTORY ENGINE)
+# ==========================================
 
-    # سلاح فعلی
-    weapon_name = "ندارد"
-    if u[16]:
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("SELECT name FROM weapons WHERE id=?", (u[16],))
-        w = c.fetchone()
+def add_item_to_inventory(user_id: int, item_id: int, quantity: int = 1):
+    """افزودن آیتم با پشتیبانی کامل از سیستم Stack"""
+    conn = get_db()
+    cursor = conn.cursor()
+
+    existing = cursor.execute(
+        "SELECT id, quantity FROM user_inventory WHERE user_id = ? AND item_id = ?", 
+        (user_id, item_id)
+    ).fetchone()
+
+    if existing:
+        new_qty = existing['quantity'] + quantity
+        cursor.execute("UPDATE user_inventory SET quantity = ? WHERE id = ?", (new_qty, existing['id']))
+    else:
+        cursor.execute(
+            "INSERT INTO user_inventory (user_id, item_id, quantity) VALUES (?, ?, ?)", 
+            (user_id, item_id, quantity)
+        )
+
+    conn.commit()
+    conn.close()
+    return True
+
+def remove_item_from_inventory(user_id: int, item_id: int, quantity: int = 1):
+    """کاهش یا حذف ایمن آیتم از اینونتوری بدون منفی شدن"""
+    conn = get_db()
+    cursor = conn.cursor()
+
+    existing = cursor.execute(
+        "SELECT id, quantity FROM user_inventory WHERE user_id = ? AND item_id = ?", 
+        (user_id, item_id)
+    ).fetchone()
+
+    if not existing or existing['quantity'] < quantity:
         conn.close()
-        if w:
-            weapon_name = w[0]
+        return False
 
-    # پناهگاه فعلی
-    shelter_name = "ندارد"
-    if u[17]:
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("SELECT name FROM shelters WHERE id=?", (u[17],))
-        s = c.fetchone()
-        conn.close()
-        if s:
-            shelter_name = s[0]
+    if existing['quantity'] == quantity:
+        cursor.execute("DELETE FROM user_inventory WHERE id = ?", (existing['id'],))
+    else:
+        cursor.execute(
+            "UPDATE user_inventory SET quantity = quantity - ? WHERE id = ?", 
+            (quantity, existing['id'])
+        )
 
-    text = f"""
-🧟 **ZOMBIE SURVIVAL** - پروفایل
+    conn.commit()
+    conn.close()
+    return True
 
-👤 {u[2]}
-🆔 `{u[0]}`
+# ==========================================
+# ⌨️ کیبوردهای منوی اصلی (MAIN UI KEYBOARDS)
+# ==========================================
 
-⭐ Level: **{u[3]}** | XP: {u[4]}
-❤️ HP: {u[5]}/{u[6]}
-🍖 Hunger: {u[7]} | 💧 Thirst: {u[8]}
-⚡ Energy: {u[9]} | 🧠 Sanity: {u[10]}
-☣️ Infection: **{u[11]}%**
+def get_main_keyboard(user_id: int):
+    """کیبورد اصلی بازی با کنترل سطح دسترسی ادمین"""
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    
+    btn_profile = types.KeyboardButton("👤 پروفایل")
+    btn_map = types.KeyboardButton("🗺️ نقشه")
+    btn_weapons = types.KeyboardButton("🔫 سلاح‌ها")
+    btn_shelter = types.KeyboardButton("🏠 پناهگاه")
+    btn_inventory = types.KeyboardButton("🎒 کوله‌پشتی")
+    btn_survival = types.KeyboardButton("🧟 بقا / جستجو")
+    btn_quests = types.KeyboardButton("📜 مأموریت‌ها")
+    btn_clan = types.KeyboardButton("👥 کلن")
+    btn_ranking = types.KeyboardButton("🏆 رتبه‌بندی")
+    btn_help = types.KeyboardButton("📖 راهنما")
 
-🪙 Scrap: **{u[12]:,}**
-🧟 Zombie Kills: {u[13]}
-☠️ Deaths: {u[14]}
+    kb.add(btn_profile, btn_map)
+    kb.add(btn_weapons, btn_shelter)
+    kb.add(btn_inventory, btn_survival)
+    kb.add(btn_quests, btn_clan)
+    kb.add(btn_ranking, btn_help)
 
-📍 موقعیت فعلی:
-{location}
+    if str(user_id) == str(ADMIN_ID):
+        btn_admin = types.KeyboardButton("⚙️ پنل مدیریت")
+        kb.add(btn_admin)
 
-🔫 سلاح: {weapon_name}
-🏠 پناهگاه: {shelter_name}
-"""
-    bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=main_menu(uid))
+    return kb
+
+# ==========================================
+# 🎯 هندلرهای شروع (/start & Profile)
+# ==========================================
 
 @bot.message_handler(commands=['start'])
-def start(message):
-    ensure_user(message.from_user)
-    uid = message.from_user.id
-    u = get_user(uid)
+def cmd_start(message):
+    user_id = message.from_user.id
+    username = message.from_user.username
+    first_name = message.from_user.first_name
 
-    if u and u[19] == 1:  # is_banned
-        bot.reply_to(message, "🚫 حساب شما مسدود شده است.")
+    user = get_or_create_user(user_id, username, first_name)
+
+    if user['is_banned']:
+        bot.send_message(message.chat.id, "🚫 حساب شما در بازی مسدود شده است.")
         return
 
-    text = """
-🧟‍♂️ **ZOMBIE SURVIVAL**
+    welcome_text = (
+        f"🧟 <b>به دنیای ZOMBIE SURVIVAL خوش آمدید، {first_name}!</b>\n\n"
+        f"دنیای ویران‌شده‌ای که تنها هدف شما در آن <b>زنده ماندن</b> است.\n"
+        f"منابع جمع‌آوری کنید، با زامبی‌ها مبارزه کنید، پناهگاه بسازید و منطقه را تسخیر کنید.\n\n"
+        f"دستورات سریع:\n"
+        f"👤 /profile - مشاهده وضعیت\n"
+        f"🗺️ /map - نقشه دنیای بازی\n"
+        f"🎒 /inventory - کوله‌پشتی\n"
+        f"📖 /help - راهنمای جامع"
+    )
 
-دنیای آخرالزمان شروع شده...
-زامبی‌ها همه‌جا هستن.
-
-تو باید زنده بمونی، منابع جمع کنی، سلاح پیدا کنی، پناهگاه بسازی و از Infection جلوگیری کنی.
-
-از منوی زیر شروع کن.
-"""
-    bot.reply_to(message, text, parse_mode="Markdown", reply_markup=main_menu(uid))
+    bot.send_message(
+        message.chat.id, 
+        welcome_text, 
+        reply_markup=get_main_keyboard(user_id)
+    )
 
 @bot.message_handler(commands=['profile'])
-def profile_cmd(message):
-    ensure_user(message.from_user)
-    show_profile(message.from_user.id, message.chat.id)
+@bot.message_handler(func=lambda msg: msg.text == "👤 پروفایل")
+def show_profile(message):
+    user_id = message.from_user.id
+    user = get_or_create_user(user_id, message.from_user.username, message.from_user.first_name)
 
-@bot.message_handler(commands=['help'])
-def help_cmd(message):
-    ensure_user(message.from_user)
-    show_help(message.chat.id, message.from_user.id)
+    if user['is_banned']:
+        return
 
-def show_help(chat_id, uid):
     conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT title, content FROM help_sections WHERE is_active=1 ORDER BY sort_order, id")
-    sections = c.fetchall()
+    weapon_name = "مشت خالی"
+    if user['current_weapon_id']:
+        w = conn.execute("SELECT name FROM weapons WHERE id = ?", (user['current_weapon_id'],)).fetchone()
+        if w: weapon_name = w['name']
+
+    shelter_name = "بدون پناهگاه"
+    if user['current_shelter_id']:
+        s = conn.execute("SELECT name FROM shelters WHERE id = ?", (user['current_shelter_id'],)).fetchone()
+        if s: shelter_name = s['name']
+
     conn.close()
 
-    if not sections:
-        text = """
-📖 **راهنمای ZOMBIE SURVIVAL**
+    location_path = get_full_location_path(user['current_region_id'])
 
-هنوز بخشی توسط ادمین اضافه نشده.
+    profile_text = (
+        f"👤 <b>پروفایل بازمانده: {user['first_name']}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"🏅 <b>سطح (Level):</b> {user['level']} | <b>XP:</b> {user['xp']}/{user['level'] * 100}\n"
+        f"❤️ <b>سلامت (HP):</b> {user['hp']}/{user['max_hp']}\n"
+        f"🍖 <b>گرسنگی:</b> {user['hunger']}/100 | 💧 <b>تشنگی:</b> {user['thirst']}/100\n"
+        f"⚡ <b>انرژی:</b> {user['energy']}/100 | 🧠 <b>روان (Sanity):</b> {user['sanity']}/100\n"
+        f"☣️ <b>میزان عفونت:</b> {user['infection']}%\n"
+        f"💰 <b>قطعات (Scrap):</b> {user['scrap']} 🪙\n"
+        f"🧟 <b>زامبی‌های کشته‌شده:</b> {user['zombie_kills']} | ☠️ <b>دفعات مرگ:</b> {user['deaths']}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"🔫 <b>سلاح فعلی:</b> {weapon_name}\n"
+        f"🏠 <b>پناهگاه فعلی:</b> {shelter_name}\n"
+        f"📍 <b>موقعیت فعلی:</b>\n{location_path}\n"
+        f"━━━━━━━━━━━━━━━━━━"
+    )
 
-دستورات اصلی:
-/start - شروع
-/profile - پروفایل
-/help - راهنما
-"""
+    bot.send_message(message.chat.id, profile_text, reply_markup=get_main_keyboard(user_id))
+    # ==========================================
+# 🗺️ سیستم نقشه و مناطق تو در تو (MAP & REGION HANDLERS)
+# ==========================================
+
+@bot.message_handler(commands=['map'])
+@bot.message_handler(func=lambda msg: msg.text == "🗺️ نقشه")
+def show_maps_menu(message):
+    user_id = message.from_user.id
+    user = get_or_create_user(user_id, message.from_user.username, message.from_user.first_name)
+
+    if user['is_banned']:
+        return
+
+    conn = get_db()
+    active_maps = conn.execute("SELECT * FROM maps WHERE is_active = 1").fetchall()
+    conn.close()
+
+    if not active_maps:
+        bot.send_message(
+            message.chat.id, 
+            "🗺️ <b>هیچ نقشه‌ای در حال حاضر توسط مدیریت ایجاد نشده است.</b>"
+        )
+        return
+
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    for m in active_maps:
+        kb.add(types.InlineKeyboardButton(f"🗺️ {m['name']}", callback_data=f"map_view_{m['id']}"))
+
+    current_loc = get_full_location_path(user['current_region_id'])
+
+    text = (
+        f"🗺️ <b>نقشه‌های فعال جهان ZOMBIE SURVIVAL</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"📍 <b>موقعیت فعلی شما:</b>\n{current_loc}\n\n"
+        f"یک نقشه را برای مشاهده و کاوش انتخاب کنید:"
+    )
+
+    bot.send_message(message.chat.id, text, reply_markup=kb)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("map_view_"))
+def callback_map_view(call):
+    map_id = int(call.data.split("_")[2])
+    user_id = call.from_user.id
+
+    conn = get_db()
+    map_data = conn.execute("SELECT * FROM maps WHERE id = ?", (map_id,)).fetchone()
+    # دریافت مناطق سطح اول (بدون منطقه والد)
+    top_regions = conn.execute(
+        "SELECT * FROM regions WHERE map_id = ? AND parent_region_id IS NULL AND is_active = 1", 
+        (map_id,)
+    ).fetchall()
+    conn.close()
+
+    if not map_data:
+        bot.answer_callback_query(call.id, "نقشه یافت نشد.")
+        return
+
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    for r in top_regions:
+        kb.add(types.InlineKeyboardButton(f"📍 {r['name']} (سطح {r['min_level']}+)", callback_data=f"reg_view_{r['id']}"))
+    
+    kb.add(types.InlineKeyboardButton("⬅️ بازگشت به لیست نقشه‌ها", callback_data="map_list_back"))
+
+    caption = (
+        f"🗺️ <b>نقشه: {map_data['name']}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"📝 {map_data['description'] or 'بدون توضیح'}\n\n"
+        f"👇 <b>مناطق اصلی این نقشه:</b>"
+    )
+
+    if map_data['image_id']:
+        try:
+            bot.send_photo(call.message.chat.id, map_data['image_id'], caption=caption, reply_markup=kb)
+            bot.delete_message(call.message.chat.id, call.message.message_id)
+        except Exception:
+            bot.send_message(call.message.chat.id, caption, reply_markup=kb)
     else:
-        text = "📖 **راهنمای بازی**\n\n"
-        for s in sections:
-            text += f"**{s[0]}**\n{s[1]}\n\n"
-
-    bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=main_menu(uid))
-
-print("✅ بخش ۲ آماده شد")
-# ==================== بخش ۳ از ۸ ====================
-# نقشه + مناطق + ورود به منطقه + موقعیت
-
-@bot.callback_query_handler(func=lambda call: True)
-def main_callbacks(call):
-    uid = call.from_user.id
-    ensure_user(call.from_user)
-    data = call.data
-
-    if data in ["back_main", "back"]:
-        bot.edit_message_text("منوی اصلی:", call.message.chat.id, call.message.message_id, reply_markup=main_menu(uid))
-        bot.answer_callback_query(call.id)
-        return
-
-    elif data == "profile":
-        show_profile(uid, call.message.chat.id)
-        bot.answer_callback_query(call.id)
-        return
-
-    elif data == "help":
-        show_help(call.message.chat.id, uid)
-        bot.answer_callback_query(call.id)
-        return
-
-    # ---------- نقشه ----------
-    elif data == "map":
-        show_maps(uid, call.message.chat.id, call.message.message_id)
-
-    elif data.startswith("select_map_"):
-        map_id = int(data.split("_")[2])
-        show_map_regions(uid, map_id, call.message.chat.id, call.message.message_id)
-
-    elif data.startswith("select_region_"):
-        region_id = int(data.split("_")[2])
-        show_region_detail(uid, region_id, call.message.chat.id, call.message.message_id)
-
-    elif data.startswith("enter_region_"):
-        region_id = int(data.split("_")[2])
-        enter_region(uid, region_id, call.message.chat.id, call.message.message_id)
-
-    elif data.startswith("back_map_"):
-        map_id = int(data.split("_")[2])
-        show_map_regions(uid, map_id, call.message.chat.id, call.message.message_id)
-
-    # ---------- سلاح ----------
-    elif data == "weapons":
-        show_weapons(uid, call.message.chat.id, call.message.message_id)
-
-    elif data.startswith("weapon_"):
-        weapon_id = int(data.split("_")[1])
-        show_weapon_detail(uid, weapon_id, call.message.chat.id, call.message.message_id)
-
-    elif data.startswith("buy_weapon_"):
-        weapon_id = int(data.split("_")[2])
-        buy_weapon(uid, weapon_id, call)
-
-    # ---------- پناهگاه ----------
-    elif data == "shelters":
-        show_shelters(uid, call.message.chat.id, call.message.message_id)
-
-    elif data.startswith("shelter_"):
-        shelter_id = int(data.split("_")[1])
-        show_shelter_detail(uid, shelter_id, call.message.chat.id, call.message.message_id)
-
-    elif data.startswith("buy_shelter_"):
-        shelter_id = int(data.split("_")[2])
-        buy_shelter(uid, shelter_id, call)
-
-    # ---------- کوله‌پشتی ----------
-    elif data == "inventory":
-        show_inventory(uid, call.message.chat.id, call.message.message_id)
-
-    # ---------- بقا / جستجو ----------
-    elif data == "explore":
-        start_explore(uid, call.message.chat.id, call.message.message_id)
-
-    # ---------- مأموریت ----------
-    elif data == "quests":
-        show_quests(uid, call.message.chat.id, call.message.message_id)
-
-    # ---------- کلن ----------
-    elif data == "clan":
-        show_clan_menu(uid, call.message.chat.id, call.message.message_id)
-
-    # ---------- رتبه‌بندی ----------
-    elif data == "ranking":
-        show_ranking(call.message.chat.id, uid)
-
-    # ---------- پنل ادمین ----------
-    elif data == "admin" and is_admin(uid):
-        show_admin_panel(call.message.chat.id, call.message.message_id)
-
-    bot.answer_callback_query(call.id)
-
-def show_maps(uid, chat_id, message_id=None):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT id, name, description, image_file_id FROM maps WHERE is_active=1")
-    maps = c.fetchall()
-    conn.close()
-
-    if not maps:
-        text = "🗺️ هنوز هیچ نقشه‌ای توسط ادمین ساخته نشده."
-        mk = InlineKeyboardMarkup().add(InlineKeyboardButton("🔙 بازگشت", callback_data="back_main"))
-        if message_id:
-            bot.edit_message_text(text, chat_id, message_id, reply_markup=mk)
-        else:
-            bot.send_message(chat_id, text, reply_markup=mk)
-        return
-
-    u = get_user(uid)
-    current_loc = get_location_path(u[15]) if u else "نامشخص"
-
-    text = f"🗺️ **نقشه‌های موجود**\n\n📍 موقعیت فعلی شما:\n{current_loc}\n\nیک نقشه انتخاب کن:"
-    mk = InlineKeyboardMarkup(row_width=1)
-    for m in maps:
-        mk.add(InlineKeyboardButton(f"🗺️ {m[1]}", callback_data=f"select_map_{m[0]}"))
-    mk.add(InlineKeyboardButton("🔙 بازگشت", callback_data="back_main"))
-
-    # اگر نقشه عکس داشت، اولی رو بفرست
-    first_image = maps[0][3] if maps and maps[0][3] else None
-    if message_id:
-        try:
-            bot.edit_message_text(text, chat_id, message_id, parse_mode="Markdown", reply_markup=mk)
-        except:
-            bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=mk)
-    else:
-        if first_image:
-            try:
-                bot.send_photo(chat_id, first_image, caption=text, parse_mode="Markdown", reply_markup=mk)
-            except:
-                bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=mk)
-        else:
-            bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=mk)
-
-def show_map_regions(uid, map_id, chat_id, message_id):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT name, description, image_file_id FROM maps WHERE id=? AND is_active=1", (map_id,))
-    m = c.fetchone()
-    if not m:
-        bot.answer_callback_query(call.id if 'call' in dir() else None, "نقشه پیدا نشد")
-        return
-
-    # مناطق سطح بالا (بدون parent)
-    c.execute("SELECT id, name, danger_level, min_level FROM regions WHERE map_id=? AND parent_id IS NULL AND is_active=1", (map_id,))
-    regions = c.fetchall()
-    conn.close()
-
-    u = get_user(uid)
-    current_loc = get_location_path(u[15]) if u else "نامشخص"
-
-    text = f"🗺️ **{m[0]}**\n\n{m[1] or ''}\n\n📍 موقعیت فعلی:\n{current_loc}\n\nمناطق قابل انتخاب:"
-    mk = InlineKeyboardMarkup(row_width=1)
-    for r in regions:
-        danger = "🔴" if r[2] >= 4 else "🟡" if r[2] >= 2 else "🟢"
-        mk.add(InlineKeyboardButton(f"{danger} {r[1]} (خطر {r[2]} | لول {r[3]}+)", callback_data=f"select_region_{r[0]}"))
-    mk.add(InlineKeyboardButton("🔙 بازگشت به نقشه‌ها", callback_data="map"))
-
-    try:
-        bot.edit_message_text(text, chat_id, message_id, parse_mode="Markdown", reply_markup=mk)
-    except:
-        bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=mk)
-
-def show_region_detail(uid, region_id, chat_id, message_id):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT * FROM regions WHERE id=? AND is_active=1", (region_id,))
-    r = c.fetchone()
-    if not r:
-        bot.send_message(chat_id, "منطقه پیدا نشد.")
-        return
-
-    # زیرمنطقه‌ها
-    c.execute("SELECT id, name, danger_level FROM regions WHERE parent_id=? AND is_active=1", (region_id,))
-    children = c.fetchall()
-    conn.close()
-
-    u = get_user(uid)
-    path = get_location_path(region_id)
-
-    text = f"""
-📍 **{r[3]}**
-
-{r[4] or 'بدون توضیحات'}
-
-⚠️ سطح خطر: {r[7]}
-🔓 حداقل لول: {r[8]}
-🏷️ نوع: {r[6]}
-
-📍 مسیر:
-{path}
-"""
-    mk = InlineKeyboardMarkup(row_width=1)
-    mk.add(InlineKeyboardButton("🚶 ورود به این منطقه", callback_data=f"enter_region_{region_id}"))
-
-    for ch in children:
-        mk.add(InlineKeyboardButton(f"➡️ {ch[1]} (خطر {ch[2]})", callback_data=f"select_region_{ch[0]}"))
-
-    mk.add(InlineKeyboardButton("🔙 بازگشت", callback_data=f"back_map_{r[1]}"))
-
-    # عکس منطقه
-    if r[5]:
-        try:
-            bot.send_photo(chat_id, r[5], caption=text, parse_mode="Markdown", reply_markup=mk)
-            return
-        except:
-            pass
-    try:
-        bot.edit_message_text(text, chat_id, message_id, parse_mode="Markdown", reply_markup=mk)
-    except:
-        bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=mk)
-
-def enter_region(uid, region_id, chat_id, message_id):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT name, min_level, is_active FROM regions WHERE id=?", (region_id,))
-    r = c.fetchone()
-    if not r or not r[2]:
-        bot.send_message(chat_id, "این منطقه در دسترس نیست.")
-        conn.close()
-        return
-
-    u = get_user(uid)
-    if u[3] < r[1]:
-        bot.send_message(chat_id, f"برای ورود به این منطقه حداقل لول {r[1]} لازم است.")
-        conn.close()
-        return
-
-    c.execute("UPDATE users SET current_region_id=? WHERE user_id=?", (region_id, uid))
-    conn.commit()
-    conn.close()
-
-    path = get_location_path(region_id)
-    bot.send_message(chat_id, f"✅ وارد منطقه **{r[0]}** شدی.\n\n📍 موقعیت جدید:\n{path}", parse_mode="Markdown", reply_markup=main_menu(uid))
-    log_action(uid, "enter_region", str(region_id))
-
-print("✅ بخش ۳ آماده شد")
-# ==================== بخش ۴ از ۸ ====================
-# سلاح‌ها + پناهگاه + کوله‌پشتی + خرید
-
-def show_weapons(uid, chat_id, message_id):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT id, name, price, damage, rarity, min_level FROM weapons WHERE is_active=1 ORDER BY price")
-    weapons = c.fetchall()
-    conn.close()
-
-    if not weapons:
-        text = "🔫 هنوز هیچ سلاحی توسط ادمین اضافه نشده."
-        mk = InlineKeyboardMarkup().add(InlineKeyboardButton("🔙 بازگشت", callback_data="back_main"))
-        try:
-            bot.edit_message_text(text, chat_id, message_id, reply_markup=mk)
-        except:
-            bot.send_message(chat_id, text, reply_markup=mk)
-        return
-
-    text = "🔫 **سلاح‌های موجود**\n\nیک سلاح انتخاب کن:"
-    mk = InlineKeyboardMarkup(row_width=1)
-    for w in weapons:
-        mk.add(InlineKeyboardButton(f"🔫 {w[1]} | {w[2]:,}🪙 | DMG {w[3]} | {w[4]}", callback_data=f"weapon_{w[0]}"))
-    mk.add(InlineKeyboardButton("🔙 بازگشت", callback_data="back_main"))
-    try:
-        bot.edit_message_text(text, chat_id, message_id, parse_mode="Markdown", reply_markup=mk)
-    except:
-        bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=mk)
-
-def show_weapon_detail(uid, weapon_id, chat_id, message_id):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT * FROM weapons WHERE id=? AND is_active=1", (weapon_id,))
-    w = c.fetchone()
-    conn.close()
-    if not w:
-        bot.send_message(chat_id, "سلاح پیدا نشد.")
-        return
-
-    text = f"""
-🔫 **{w[1]}**
-
-{w[2] or ''}
-
-⚔️ قدرت: {w[5]}
-🔫 ظرفیت خشاب: {w[6]}
-⭐ کمیابی: {w[7]}
-🔓 لول مورد نیاز: {w[8]}
-💰 قیمت: **{w[4]:,}** Scrap
-"""
-    mk = InlineKeyboardMarkup(row_width=1)
-    mk.add(InlineKeyboardButton("💰 خرید سلاح", callback_data=f"buy_weapon_{weapon_id}"))
-    mk.add(InlineKeyboardButton("🔙 بازگشت", callback_data="weapons"))
-
-    if w[3]:  # image
-        try:
-            bot.send_photo(chat_id, w[3], caption=text, parse_mode="Markdown", reply_markup=mk)
-            return
-        except:
-            pass
-    try:
-        bot.edit_message_text(text, chat_id, message_id, parse_mode="Markdown", reply_markup=mk)
-    except:
-        bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=mk)
-
-def buy_weapon(uid, weapon_id, call):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT name, price, min_level FROM weapons WHERE id=? AND is_active=1", (weapon_id,))
-    w = c.fetchone()
-    if not w:
-        bot.answer_callback_query(call.id, "سلاح موجود نیست", show_alert=True)
-        conn.close()
-        return
-
-    u = get_user(uid)
-    if u[3] < w[2]:
-        bot.answer_callback_query(call.id, f"لول {w[2]} لازم است!", show_alert=True)
-        conn.close()
-        return
-    if u[12] < w[1]:
-        bot.answer_callback_query(call.id, "Scrap کافی نداری!", show_alert=True)
-        conn.close()
-        return
-
-    # کم کردن پول و اضافه کردن به اینونتوری + تجهیز
-    c.execute("UPDATE users SET scrap = scrap - ?, current_weapon_id = ? WHERE user_id=?", (w[1], weapon_id, uid))
-    c.execute("INSERT OR IGNORE INTO inventory (user_id, item_type, item_id, quantity) VALUES (?, 'weapon', ?, 1)", (uid, weapon_id))
-    conn.commit()
-    conn.close()
-
-    bot.answer_callback_query(call.id, f"✅ {w[0]} خریداری و تجهیز شد!", show_alert=True)
-    show_profile(uid, call.message.chat.id)
-    log_action(uid, "buy_weapon", str(weapon_id))
-
-def show_shelters(uid, chat_id, message_id):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT id, name, price, defense, min_level FROM shelters WHERE is_active=1 ORDER BY price")
-    shelters = c.fetchall()
-    conn.close()
-
-    if not shelters:
-        text = "🏠 هنوز هیچ پناهگاهی توسط ادمین اضافه نشده."
-        mk = InlineKeyboardMarkup().add(InlineKeyboardButton("🔙 بازگشت", callback_data="back_main"))
-        try:
-            bot.edit_message_text(text, chat_id, message_id, reply_markup=mk)
-        except:
-            bot.send_message(chat_id, text, reply_markup=mk)
-        return
-
-    text = "🏠 **پناهگاه‌های موجود**"
-    mk = InlineKeyboardMarkup(row_width=1)
-    for s in shelters:
-        mk.add(InlineKeyboardButton(f"🏠 {s[1]} | {s[2]:,}🪙 | دفاع {s[3]}", callback_data=f"shelter_{s[0]}"))
-    mk.add(InlineKeyboardButton("🔙 بازگشت", callback_data="back_main"))
-    try:
-        bot.edit_message_text(text, chat_id, message_id, parse_mode="Markdown", reply_markup=mk)
-    except:
-        bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=mk)
-
-def show_shelter_detail(uid, shelter_id, chat_id, message_id):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT * FROM shelters WHERE id=? AND is_active=1", (shelter_id,))
-    s = c.fetchone()
-    conn.close()
-    if not s:
-        bot.send_message(chat_id, "پناهگاه پیدا نشد.")
-        return
-
-    text = f"""
-🏠 **{s[1]}**
-
-{s[2] or ''}
-
-🛡️ دفاع: {s[5]}
-👥 ظرفیت: {s[6]}
-🔓 لول مورد نیاز: {s[7]}
-💰 قیمت: **{s[4]:,}** Scrap
-"""
-    mk = InlineKeyboardMarkup(row_width=1)
-    mk.add(InlineKeyboardButton("🏠 خرید پناهگاه", callback_data=f"buy_shelter_{shelter_id}"))
-    mk.add(InlineKeyboardButton("🔙 بازگشت", callback_data="shelters"))
-
-    if s[3]:
-        try:
-            bot.send_photo(chat_id, s[3], caption=text, parse_mode="Markdown", reply_markup=mk)
-            return
-        except:
-            pass
-    try:
-        bot.edit_message_text(text, chat_id, message_id, parse_mode="Markdown", reply_markup=mk)
-    except:
-        bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=mk)
-
-def buy_shelter(uid, shelter_id, call):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT name, price, min_level FROM shelters WHERE id=? AND is_active=1", (shelter_id,))
-    s = c.fetchone()
-    if not s:
-        bot.answer_callback_query(call.id, "پناهگاه موجود نیست", show_alert=True)
-        conn.close()
-        return
-
-    u = get_user(uid)
-    if u[3] < s[2]:
-        bot.answer_callback_query(call.id, f"لول {s[2]} لازم است!", show_alert=True)
-        conn.close()
-        return
-    if u[12] < s[1]:
-        bot.answer_callback_query(call.id, "Scrap کافی نداری!", show_alert=True)
-        conn.close()
-        return
-
-    c.execute("UPDATE users SET scrap = scrap - ?, current_shelter_id = ? WHERE user_id=?", (s[1], shelter_id, uid))
-    conn.commit()
-    conn.close()
-
-    bot.answer_callback_query(call.id, f"✅ {s[0]} خریداری شد!", show_alert=True)
-    show_profile(uid, call.message.chat.id)
-    log_action(uid, "buy_shelter", str(shelter_id))
-
-def show_inventory(uid, chat_id, message_id):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT item_type, item_id, quantity FROM inventory WHERE user_id=? AND quantity > 0", (uid,))
-    items = c.fetchall()
-
-    text = "🎒 **کوله‌پشتی**\n\n"
-    if not items:
-        text += "خالی است."
-    else:
-        for it in items:
-            if it[0] == "weapon":
-                c.execute("SELECT name FROM weapons WHERE id=?", (it[1],))
-                name = c.fetchone()
-                text += f"🔫 {name[0] if name else 'سلاح'} ×{it[2]}\n"
-            elif it[0] == "item":
-                c.execute("SELECT name FROM items WHERE id=?", (it[1],))
-                name = c.fetchone()
-                text += f"📦 {name[0] if name else 'آیتم'} ×{it[2]}\n"
-            else:
-                text += f"• {it[0]} #{it[1]} ×{it[2]}\n"
-    conn.close()
-
-    mk = InlineKeyboardMarkup().add(InlineKeyboardButton("🔙 بازگشت", callback_data="back_main"))
-    try:
-        bot.edit_message_text(text, chat_id, message_id, parse_mode="Markdown", reply_markup=mk)
-    except:
-        bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=mk)
-
-print("✅ بخش ۴ آماده شد")
-# ==================== بخش ۵ از ۸ ====================
-# سیستم جستجو (Explore) + مبارزه با زامبی
-
-def start_explore(uid, chat_id, message_id):
-    u = get_user(uid)
-    if not u or not u[15]:
-        text = "اول باید وارد یک منطقه بشی.\nاز بخش 🗺️ نقشه یک منطقه انتخاب کن و وارد شو."
-        mk = InlineKeyboardMarkup().add(InlineKeyboardButton("🗺️ رفتن به نقشه", callback_data="map"),
-                                        InlineKeyboardButton("🔙 بازگشت", callback_data="back_main"))
-        try:
-            bot.edit_message_text(text, chat_id, message_id, reply_markup=mk)
-        except:
-            bot.send_message(chat_id, text, reply_markup=mk)
-        return
-
-    if u[9] < 10:  # energy
-        bot.send_message(chat_id, "⚡ انرژی کافی برای جستجو نداری!", reply_markup=main_menu(uid))
-        return
+        bot.send_message(call.message.chat.id, caption, reply_markup=kb)
+
+@bot.callback_query_handler(func=lambda call: call.data == "map_list_back")
+def callback_map_list_back(call):
+    bot.delete_message(call.message.chat.id, call.message.message_id)
+    show_maps_menu(call.message)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("reg_view_"))
+def callback_region_view(call):
+    region_id = int(call.data.split("_")[2])
+    user_id = call.from_user.id
+    user = get_or_create_user(user_id, call.from_user.username, call.from_user.first_name)
 
     conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT name, zombie_chance, loot_chance, rare_loot_chance, infection_chance, danger_level FROM regions WHERE id=?", (u[15],))
-    region = c.fetchone()
+    region = conn.execute("SELECT * FROM regions WHERE id = ?", (region_id,)).fetchone()
+    sub_regions = conn.execute(
+        "SELECT * FROM regions WHERE parent_region_id = ? AND is_active = 1", 
+        (region_id,)
+    ).fetchall()
     conn.close()
 
     if not region:
-        bot.send_message(chat_id, "منطقه نامعتبر است.", reply_markup=main_menu(uid))
+        bot.answer_callback_query(call.id, "منطقه یافت نشد.")
         return
 
-    # کم کردن انرژی
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("UPDATE users SET energy = energy - 10 WHERE user_id=?", (uid,))
-    conn.commit()
-    conn.close()
+    kb = types.InlineKeyboardMarkup(row_width=1)
 
-    # تصمیم‌گیری اتفاق
-    roll = random.randint(1, 100)
-    zombie_chance = region[1] or 40
+    # دکمه ورود به منطقه
+    kb.add(types.InlineKeyboardButton("🚶 ورود به این منطقه", callback_data=f"reg_enter_{region['id']}"))
 
-    if roll <= zombie_chance:
-        # برخورد با زامبی
-        start_combat(uid, chat_id, message_id)
-    elif roll <= zombie_chance + (region[2] or 30):
-        # لوت معمولی
-        give_loot(uid, chat_id, rare=False)
-    elif roll <= zombie_chance + (region[2] or 30) + (region[3] or 10):
-        # لوت کمیاب
-        give_loot(uid, chat_id, rare=True)
+    # زیرمجموعه‌ها (مناطق داخل این منطقه)
+    for sub in sub_regions:
+        kb.add(types.InlineKeyboardButton(f"↳ 🏢 {sub['name']} (سطح {sub['min_level']}+)", callback_data=f"reg_view_{sub['id']}"))
+
+    if region['parent_region_id']:
+        kb.add(types.InlineKeyboardButton("⬅️ بازگشت به منطقه والد", callback_data=f"reg_view_{region['parent_region_id']}"))
     else:
-        # چیزی پیدا نشد + احتمال عفونت
-        text = f"🔍 تو منطقه **{region[0]}** جستجو کردی...\n\nچیزی پیدا نشد."
-        if random.randint(1, 100) <= (region[4] or 10):
-            add_infection(uid, random.randint(3, 12))
-            text += "\n\n☣️ احساس بیماری می‌کنی... Infection افزایش یافت!"
-        bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=main_menu(uid))
+        kb.add(types.InlineKeyboardButton("⬅️ بازگشت به نقشه", callback_data=f"map_view_{region['map_id']}"))
 
-def give_loot(uid, chat_id, rare=False):
-    conn = get_db()
-    c = conn.cursor()
-    if rare:
-        c.execute("SELECT id, name FROM items WHERE is_active=1 AND rarity IN ('rare','epic','legendary') ORDER BY RANDOM() LIMIT 1")
-    else:
-        c.execute("SELECT id, name FROM items WHERE is_active=1 ORDER BY RANDOM() LIMIT 1")
-    item = c.fetchone()
+    danger_stars = "⚠️" * region['danger_level']
+    is_here = "✅ شما هم‌اکنون اینجا هستید" if user['current_region_id'] == region['id'] else "❌ در این منطقه نیستید"
 
-    scrap = random.randint(20, 80) if not rare else random.randint(80, 250)
-    c.execute("UPDATE users SET scrap = scrap + ? WHERE user_id=?", (scrap, uid))
-
-    text = f"🎒 چیزی پیدا کردی!\n\n🪙 +{scrap} Scrap"
-    if item:
-        c.execute("INSERT INTO inventory (user_id, item_type, item_id, quantity) VALUES (?, 'item', ?, 1) ON CONFLICT(user_id, item_type, item_id) DO UPDATE SET quantity = quantity + 1", (uid, item[0]))
-        text += f"\n📦 {item[1]} ×1"
-    conn.commit()
-    conn.close()
-    bot.send_message(chat_id, text, reply_markup=main_menu(uid))
-
-def add_infection(uid, amount):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("UPDATE users SET infection = MIN(100, infection + ?) WHERE user_id=?", (amount, uid))
-    conn.commit()
-    conn.close()
-
-def start_combat(uid, chat_id, message_id):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT id, name, hp, damage, defense, xp_reward, scrap_reward, infection_chance, image_file_id FROM zombies WHERE is_active=1 ORDER BY RANDOM() LIMIT 1")
-    z = c.fetchone()
-    conn.close()
-
-    if not z:
-        bot.send_message(chat_id, "زامبی‌ای برای مبارزه تعریف نشده. ادمین باید زامبی اضافه کند.", reply_markup=main_menu(uid))
-        return
-
-    # ذخیره وضعیت مبارزه موقت
-    user_steps[uid] = {
-        "step": "combat",
-        "zombie_id": z[0],
-        "zombie_name": z[1],
-        "zombie_hp": z[2],
-        "zombie_max_hp": z[2],
-        "zombie_damage": z[3],
-        "zombie_defense": z[4],
-        "xp_reward": z[5],
-        "scrap_reward": z[6],
-        "infection_chance": z[7]
-    }
-
-    u = get_user(uid)
-    text = f"""
-⚔️ **مبارزه شروع شد!**
-
-🧟 **{z[1]}**
-❤️ HP: {z[2]}/{z[2]}
-
-👤 تو
-❤️ HP: {u[5]}/{u[6]}
-"""
-    mk = InlineKeyboardMarkup(row_width=2)
-    mk.add(
-        InlineKeyboardButton("⚔️ حمله", callback_data="combat_attack"),
-        InlineKeyboardButton("🏃 فرار", callback_data="combat_escape")
+    text = (
+        f"📍 <b>منطقه: {region['name']}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"📝 {region['description'] or 'بدون توضیح'}\n"
+        f"⚠️ <b>سطح خطر:</b> {danger_stars} ({region['danger_level']}/5)\n"
+        f"🔓 <b>سطح مورد نیاز:</b> {region['min_level']}\n"
+        f"📍 <b>وضعیت حضوری:</b> {is_here}\n"
+        f"━━━━━━━━━━━━━━━━━━"
     )
-    mk.add(InlineKeyboardButton("🎒 کوله‌پشتی", callback_data="inventory"))
 
-    if z[8]:
+    if region['image_id']:
         try:
-            bot.send_photo(chat_id, z[8], caption=text, parse_mode="Markdown", reply_markup=mk)
-            return
-        except:
-            pass
-    bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=mk)
+            bot.send_photo(call.message.chat.id, region['image_id'], caption=text, reply_markup=kb)
+            bot.delete_message(call.message.chat.id, call.message.message_id)
+        except Exception:
+            bot.send_message(call.message.chat.id, text, reply_markup=kb)
+    else:
+        bot.send_message(call.message.chat.id, text, reply_markup=kb)
 
-@bot.callback_query_handler(func=lambda call: call.data in ["combat_attack", "combat_escape"])
-def combat_handler(call):
-    uid = call.from_user.id
-    data = call.data
-    combat = user_steps.get(uid, {})
+@bot.callback_query_handler(func=lambda call: call.data.startswith("reg_enter_"))
+def callback_region_enter(call):
+    region_id = int(call.data.split("_")[2])
+    user_id = call.from_user.id
+    user = get_or_create_user(user_id, call.from_user.username, call.from_user.first_name)
 
-    if combat.get("step") != "combat":
-        bot.answer_callback_query(call.id, "مبارزه منقضی شده", show_alert=True)
+    conn = get_db()
+    region = conn.execute("SELECT * FROM regions WHERE id = ?", (region_id,)).fetchone()
+    conn.close()
+
+    if not region:
+        bot.answer_callback_query(call.id, "منطقه موجود نیست.")
         return
 
-    u = get_user(uid)
-
-    if data == "combat_escape":
-        # شانس فرار
-        if random.randint(1, 100) <= 55:
-            user_steps[uid] = {}
-            bot.edit_message_text("🏃 با موفقیت فرار کردی!", call.message.chat.id, call.message.message_id, reply_markup=main_menu(uid))
-        else:
-            # زامبی حمله می‌کنه
-            dmg = max(1, combat["zombie_damage"] - 5)
-            new_hp = max(0, u[5] - dmg)
-            conn = get_db()
-            c = conn.cursor()
-            c.execute("UPDATE users SET hp=? WHERE user_id=?", (new_hp, uid))
-            conn.commit()
-            conn.close()
-            if new_hp <= 0:
-                handle_death(uid, call.message.chat.id)
-                user_steps[uid] = {}
-            else:
-                bot.edit_message_text(f"❌ فرار ناموفق!\nزامبی بهت زد: -{dmg} HP\n❤️ HP باقی‌مانده: {new_hp}", call.message.chat.id, call.message.message_id, reply_markup=main_menu(uid))
-        bot.answer_callback_query(call.id)
+    if user['level'] < region['min_level']:
+        bot.answer_callback_query(
+            call.id, 
+            f"⛔ سطح شما ({user['level']}) برای ورود به این منطقه کافی نیست! (سطح لازم: {region['min_level']})",
+            show_alert=True
+        )
         return
 
-    # حمله بازیکن
-    weapon_damage = 8
-    if u[16]:
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("SELECT damage FROM weapons WHERE id=?", (u[16],))
-        w = c.fetchone()
+    if region['is_locked']:
+        bot.answer_callback_query(call.id, "🔒 این منطقه قفل است و امکان ورود وجود ندارد.", show_alert=True)
+        return
+
+    update_user_location(user_id, region_id)
+    loc_path = get_full_location_path(region_id)
+
+    bot.answer_callback_query(call.id, f"✅ شما وارد {region['name']} شدید!")
+    bot.send_message(
+        call.message.chat.id, 
+        f"🚶 <b>موقعیت شما تغییر کرد:</b>\n{loc_path}"
+    )
+
+# ==========================================
+# 🔫 فروشگاه پویای سلاح‌ها (WEAPONS SYSTEM)
+# ==========================================
+
+@bot.message_handler(commands=['weapons'])
+@bot.message_handler(func=lambda msg: msg.text == "🔫 سلاح‌ها")
+def show_weapons_shop(message):
+    user_id = message.from_user.id
+    user = get_or_create_user(user_id, message.from_user.username, message.from_user.first_name)
+
+    if user['is_banned']:
+        return
+
+    conn = get_db()
+    weapons = conn.execute("SELECT * FROM weapons WHERE is_active = 1").fetchall()
+    conn.close()
+
+    if not weapons:
+        bot.send_message(message.chat.id, "🔫 <b>هیچ سلاحی در فروشگاه موجود نیست.</b>")
+        return
+
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    for w in weapons:
+        kb.add(types.InlineKeyboardButton(
+            f"🔫 {w['name']} | 💰 {w['price']} Scrap | ⭐ {w['rarity']}", 
+            callback_data=f"wpn_view_{w['id']}"
+        ))
+
+    text = (
+        f"🔫 <b>فروشگاه سلاح‌های آخرالزمانی</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"💰 <b>موجودی Scrap شما:</b> {user['scrap']} 🪙\n"
+        f"جهت مشاهده جزئیات و خرید، سلاح مورد نظر را انتخاب کنید:"
+    )
+
+    bot.send_message(message.chat.id, text, reply_markup=kb)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("wpn_view_"))
+def callback_weapon_view(call):
+    weapon_id = int(call.data.split("_")[2])
+    user_id = call.from_user.id
+    user = get_or_create_user(user_id, call.from_user.username, call.from_user.first_name)
+
+    conn = get_db()
+    w = conn.execute("SELECT * FROM weapons WHERE id = ?", (weapon_id,)).fetchone()
+    already_owned = conn.execute(
+        "SELECT id FROM user_weapons WHERE user_id = ? AND weapon_id = ?", 
+        (user_id, weapon_id)
+    ).fetchone()
+    conn.close()
+
+    if not w:
+        bot.answer_callback_query(call.id, "سلاح یافت نشد.")
+        return
+
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    if already_owned:
+        kb.add(types.InlineKeyboardButton("✅ این سلاح را دارید (تجهیز)", callback_data=f"wpn_equip_{w['id']}"))
+    else:
+        kb.add(types.InlineKeyboardButton(f"💰 خرید سلاح ({w['price']} Scrap)", callback_data=f"wpn_buy_{w['id']}"))
+
+    kb.add(types.InlineKeyboardButton("⬅️ بازگشت به فروشگاه", callback_data="wpn_shop_back"))
+
+    text = (
+        f"🔫 <b>سلاح: {w['name']}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"⚔️ <b>قدرت (Damage):</b> {w['damage']}\n"
+        f"🔫 <b>ظرفیت خشاب:</b> {w['ammo_capacity']}\n"
+        f"⭐ <b>کمیابی:</b> {w['rarity']}\n"
+        f"🔓 <b>سطح مورد نیاز:</b> {w['req_level']}\n"
+        f"💰 <b>قیمت:</b> {w['price']} Scrap\n"
+        f"📝 <b>توضیحات:</b> {w['description'] or 'بدون توضیح'}\n"
+        f"━━━━━━━━━━━━━━━━━━"
+    )
+
+    if w['image_id']:
+        try:
+            bot.send_photo(call.message.chat.id, w['image_id'], caption=text, reply_markup=kb)
+            bot.delete_message(call.message.chat.id, call.message.message_id)
+        except Exception:
+            bot.send_message(call.message.chat.id, text, reply_markup=kb)
+    else:
+        bot.send_message(call.message.chat.id, text, reply_markup=kb)
+
+@bot.callback_query_handler(func=lambda call: call.data == "wpn_shop_back")
+def callback_wpn_shop_back(call):
+    bot.delete_message(call.message.chat.id, call.message.message_id)
+    show_weapons_shop(call.message)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("wpn_buy_"))
+def callback_weapon_buy(call):
+    weapon_id = int(call.data.split("_")[2])
+    user_id = call.from_user.id
+    user = get_or_create_user(user_id, call.from_user.username, call.from_user.first_name)
+
+    conn = get_db()
+    cursor = conn.cursor()
+    w = cursor.execute("SELECT * FROM weapons WHERE id = ?", (weapon_id,)).fetchone()
+
+    if not w:
         conn.close()
-        if w:
-            weapon_damage = w[0]
+        bot.answer_callback_query(call.id, "سلاح وجود ندارد.")
+        return
 
-    player_dmg = max(1, weapon_damage - combat["zombie_defense"] // 2)
-    combat["zombie_hp"] -= player_dmg
+    if user['level'] < w['req_level']:
+        conn.close()
+        bot.answer_callback_query(call.id, f"⛔ سطح شما برای خرید این سلاح کافی نیست! (سطح لازم: {w['req_level']})", show_alert=True)
+        return
 
-    if combat["zombie_hp"] <= 0:
-        # پیروزی
+    if user['scrap'] < w['price']:
+        conn.close()
+        bot.answer_callback_query(call.id, f"❌ Scrap کافی ندارید! (موجود: {user['scrap']} / لازم: {w['price']})", show_alert=True)
+        return
+
+    # کسر وجه، اضافه کردن به تجهیزات و فعال‌سازی سلاح
+    new_scrap = user['scrap'] - w['price']
+    cursor.execute("UPDATE users SET scrap = ?, current_weapon_id = ? WHERE user_id = ?", (new_scrap, weapon_id, user_id))
+    cursor.execute("INSERT INTO user_weapons (user_id, weapon_id, ammo_left) VALUES (?, ?, ?)", (user_id, weapon_id, w['ammo_capacity']))
+
+    conn.commit()
+    conn.close()
+
+    bot.answer_callback_query(call.id, f"🎉 سلاح {w['name']} با موفقیت خریداری و مجهز شد!", show_alert=True)
+    show_weapons_shop(call.message)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("wpn_equip_"))
+def callback_weapon_equip(call):
+    weapon_id = int(call.data.split("_")[2])
+    user_id = call.from_user.id
+
+    conn = get_db()
+    conn.execute("UPDATE users SET current_weapon_id = ? WHERE user_id = ?", (weapon_id, user_id))
+    conn.commit()
+    conn.close()
+
+    bot.answer_callback_query(call.id, "✅ سلاح مجهز شد!", show_alert=True)
+
+# ==========================================
+# 🏠 سیستم پناهگاه‌ها (SHELTER SYSTEM)
+# ==========================================
+
+@bot.message_handler(commands=['shelter'])
+@bot.message_handler(func=lambda msg: msg.text == "🏠 پناهگاه")
+def show_shelters_shop(message):
+    user_id = message.from_user.id
+    user = get_or_create_user(user_id, message.from_user.username, message.from_user.first_name)
+
+    if user['is_banned']:
+        return
+
+    conn = get_db()
+    shelters = conn.execute("SELECT * FROM shelters WHERE is_active = 1").fetchall()
+    conn.close()
+
+    if not shelters:
+        bot.send_message(message.chat.id, "🏠 <b>هیچ پناهگاهی برای خرید وجود ندارد.</b>")
+        return
+
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    for s in shelters:
+        kb.add(types.InlineKeyboardButton(
+            f"🏠 {s['name']} | 🛡️ دفاع: {s['defense']} | 💰 {s['price']} Scrap", 
+            callback_data=f"shl_view_{s['id']}"
+        ))
+
+    text = (
+        f"🏠 <b>لیست پناهگاه‌های قابل ساخت و خرید</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"💰 <b>موجودی شما:</b> {user['scrap']} Scrap\n"
+        f"پناهگاه‌ها امنیت شما را در برابر حملات زامبی‌ها افزایش می‌دهند:"
+    )
+
+    bot.send_message(message.chat.id, text, reply_markup=kb)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("shl_view_"))
+def callback_shelter_view(call):
+    shelter_id = int(call.data.split("_")[2])
+    user_id = call.from_user.id
+    user = get_or_create_user(user_id, call.from_user.username, call.from_user.first_name)
+
+    conn = get_db()
+    s = conn.execute("SELECT * FROM shelters WHERE id = ?", (shelter_id,)).fetchone()
+    conn.close()
+
+    if not s:
+        bot.answer_callback_query(call.id, "پناهگاه یافت نشد.")
+        return
+
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    if user['current_shelter_id'] == s['id']:
+        kb.add(types.InlineKeyboardButton("✅ پناهگاه فعلی شما", callback_data="none"))
+    else:
+        kb.add(types.InlineKeyboardButton(f"🏠 خرید پناهگاه ({s['price']} Scrap)", callback_data=f"shl_buy_{s['id']}"))
+
+    kb.add(types.InlineKeyboardButton("⬅️ بازگشت", callback_data="shl_shop_back"))
+
+    text = (
+        f"🏠 <b>پناهگاه: {s['name']}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"🛡️ <b>قدرت دفاعی:</b> {s['defense']}\n"
+        f"📦 <b>ظرفیت انبار:</b> {s['capacity']}\n"
+        f"⭐ <b>کمیابی:</b> {s['rarity']}\n"
+        f"🔓 <b>سطح مورد نیاز:</b> {s['req_level']}\n"
+        f"💰 <b>قیمت:</b> {s['price']} Scrap\n"
+        f"📝 <b>توضیحات:</b> {s['description'] or 'بدون توضیح'}\n"
+        f"━━━━━━━━━━━━━━━━━━"
+    )
+
+    if s['image_id']:
+        try:
+            bot.send_photo(call.message.chat.id, s['image_id'], caption=text, reply_markup=kb)
+            bot.delete_message(call.message.chat.id, call.message.message_id)
+        except Exception:
+            bot.send_message(call.message.chat.id, text, reply_markup=kb)
+    else:
+        bot.send_message(call.message.chat.id, text, reply_markup=kb)
+
+@bot.callback_query_handler(func=lambda call: call.data == "shl_shop_back")
+def callback_shelter_shop_back(call):
+    bot.delete_message(call.message.chat.id, call.message.message_id)
+    show_shelters_shop(call.message)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("shl_buy_"))
+def callback_shelter_buy(call):
+    shelter_id = int(call.data.split("_")[2])
+    user_id = call.from_user.id
+    user = get_or_create_user(user_id, call.from_user.username, call.from_user.first_name)
+
+    conn = get_db()
+    cursor = conn.cursor()
+    s = cursor.execute("SELECT * FROM shelters WHERE id = ?", (shelter_id,)).fetchone()
+
+    if not s:
+        conn.close()
+        bot.answer_callback_query(call.id, "پناهگاه یافت نشد.")
+        return
+
+    if user['level'] < s['req_level']:
+        conn.close()
+        bot.answer_callback_query(call.id, f"⛔ سطح شما کافی نیست! (سطح لازم: {s['req_level']})", show_alert=True)
+        return
+
+    if user['scrap'] < s['price']:
+        conn.close()
+        bot.answer_callback_query(call.id, f"❌ Scrap کافی ندارید! (موجود: {user['scrap']} / لازم: {s['price']})", show_alert=True)
+        return
+
+    new_scrap = user['scrap'] - s['price']
+    cursor.execute("UPDATE users SET scrap = ?, current_shelter_id = ? WHERE user_id = ?", (new_scrap, shelter_id, user_id))
+    conn.commit()
+    conn.close()
+
+    bot.answer_callback_query(call.id, f"🎉 پناهگاه {s['name']} با موفقیت خریداری شد!", show_alert=True)
+    show_shelters_shop(call.message)
+    # ==========================================
+# 🔍 موتور کاوش، مبارزه نوبتی و سیستم عفونت (EXPLORATION & COMBAT)
+# ==========================================
+
+import random
+
+@bot.message_handler(commands=['explore'])
+@bot.message_handler(func=lambda msg: msg.text == "🔍 کاوش")
+def handle_explore(message):
+    user_id = message.from_user.id
+    user = get_or_create_user(user_id, message.from_user.username, message.from_user.first_name)
+
+    if user['is_banned']:
+        return
+
+    if user['hp'] <= 0:
+        bot.send_message(message.chat.id, "💀 <b>شما مرده‌اید!</b> ابتدا باید با استفاده از آیتم یا پناهگاه سلامتی خود را بازیابید.")
+        return
+
+    # بررسی منطقه فعلی
+    conn = get_db()
+    region = conn.execute("SELECT * FROM regions WHERE id = ?", (user['current_region_id'],)).fetchone()
+    
+    # دریافت زامبی‌های مربوط به این سطح یا منطقه
+    zombies = conn.execute("SELECT * FROM zombies WHERE req_level <= ?", (user['level'],)).fetchall()
+    conn.close()
+
+    if not region:
+        bot.send_message(message.chat.id, "❌ موقعیت مکانی شما نامشخص است. لطفاً ابتدا از بخش 🗺️ نقشه یک منطقه را انتخاب کنید.")
+        return
+
+    # شانس رویدادها (بر اساس سطح خطر منطقه)
+    danger = region['danger_level']
+    event_roll = random.randint(1, 100)
+
+    # 1. مواجهه با زامبی (احتمال بالا در مناطق خطرناک)
+    zombie_chance = 40 + (danger * 8)
+    if event_roll <= zombie_chance and zombies:
+        zombie = random.choice(zombies)
+        start_combat(message, user, zombie, region)
+        return
+
+    # 2. پیدا کردن لوت / Scrap
+    elif event_roll <= zombie_chance + 25:
+        found_scrap = random.randint(10, 30) * danger
+        found_xp = random.randint(5, 15) * danger
+        
         conn = get_db()
-        c = conn.cursor()
-        c.execute("UPDATE users SET scrap = scrap + ?, zombie_kills = zombie_kills + 1, xp = xp + ? WHERE user_id=?",
-                  (combat["scrap_reward"], combat["xp_reward"], uid))
+        conn.execute("UPDATE users SET scrap = scrap + ?, xp = xp + ? WHERE user_id = ?", (found_scrap, found_xp, user_id))
         conn.commit()
         conn.close()
 
-        # چک لول‌آپ ساده
-        u2 = get_user(uid)
-        needed = u2[3] * 100
-        if u2[4] >= needed:
-            conn = get_db()
-            c = conn.cursor()
-            c.execute("UPDATE users SET level = level + 1, xp = xp - ?, scrap = scrap + 200 WHERE user_id=?", (needed, uid))
-            conn.commit()
-            conn.close()
+        bot.send_message(
+            message.chat.id,
+            f"🔍 <b>کاوش در {region['name']}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🎉 شما منطقه را جستجو کردید و موفق به پیدا کردن منابع شدید!\n\n"
+            f"💰 <b>Scrap دریافتی:</b> +{found_scrap}\n"
+            f"⭐ <b>تجربه (XP):</b> +{found_xp}"
+        )
+        check_level_up(user_id, message.chat.id)
 
-        text = f"""
-✅ **پیروزی!**
+    # 3. تله یا آسیب عفونتی
+    elif event_roll <= zombie_chance + 35:
+        damage = random.randint(5, 15)
+        inf_increase = random.randint(5, 10)
+        
+        new_hp = max(0, user['hp'] - damage)
+        new_inf = min(100, user['infection'] + inf_increase)
 
-🧟 {combat['zombie_name']} کشته شد.
+        conn = get_db()
+        conn.execute("UPDATE users SET hp = ?, infection = ? WHERE user_id = ?", (new_hp, new_inf, user_id))
+        conn.commit()
+        conn.close()
 
-🪙 +{combat['scrap_reward']} Scrap
-⭐ +{combat['xp_reward']} XP
-"""
-        if random.randint(1, 100) <= combat["infection_chance"]:
-            add_infection(uid, random.randint(5, 15))
-            text += "\n☣️ گاز گرفته شدی! Infection افزایش یافت."
+        bot.send_message(
+            message.chat.id,
+            f"⚠️ <b>رویداد غیرمنتظره!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"شما به یک تله سمی برخورد کردید یا زخمی شدید!\n\n"
+            f"💔 <b>آسیب دیده‌شده:</b> -{damage} HP\n"
+            f"☣️ <b>افزایش عفونت:</b> +{inf_increase}%"
+        )
 
-        user_steps[uid] = {}
-        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=main_menu(uid))
-        log_action(uid, "kill_zombie", combat["zombie_name"])
-        bot.answer_callback_query(call.id)
+    # 4. عدم یافتن چیزی
+    else:
+        bot.send_message(
+            message.chat.id,
+            f"🔍 <b>کاوش در {region['name']}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"مدتی در منطقه به کاوش پرداختید اما چیز باارزشی پیدا نکردید."
+        )
+
+def start_combat(message, user, zombie, region):
+    user_id = user['user_id']
+    
+    # ذخیره حالت نبرد در دیتابیس
+    conn = get_db()
+    conn.execute("""
+        INSERT OR REPLACE INTO active_combats (user_id, zombie_id, zombie_hp, max_zombie_hp)
+        VALUES (?, ?, ?, ?)
+    """, (user_id, zombie['id'], zombie['hp'], zombie['hp']))
+    conn.commit()
+    
+    weapon = conn.execute("SELECT * FROM weapons WHERE id = ?", (user['current_weapon_id'],)).fetchone()
+    conn.close()
+
+    weapon_name = weapon['name'] if weapon else "دست خالی"
+
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        types.InlineKeyboardButton("⚔️ حمله", callback_data=f"cbt_atk_{zombie['id']}"),
+        types.InlineKeyboardButton("🏃 فرار", callback_data=f"cbt_flee_{zombie['id']}")
+    )
+
+    text = (
+        f"🧟 <b>مواجهه با زامبی!</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"یک <b>{zombie['name']}</b> سد راه شما شده است!\n\n"
+        f"📊 <b>مشخصات زامبی:</b>\n"
+        f"❤️ سلامتی زامبی: {zombie['hp']}/{zombie['hp']}\n"
+        f"⚔️ قدرت حمله: {zombie['damage']}\n\n"
+        f"🛡️ <b>وضعیت شما:</b>\n"
+        f"❤️ HP: {user['hp']}/{user['max_hp']} | 🔫 سلاح: {weapon_name}\n"
+        f"☣️ عفونت: {user['infection']}%"
+    )
+
+    if zombie['image_id']:
+        try:
+            bot.send_photo(message.chat.id, zombie['image_id'], caption=text, reply_markup=kb)
+        except Exception:
+            bot.send_message(message.chat.id, text, reply_markup=kb)
+    else:
+        bot.send_message(message.chat.id, text, reply_markup=kb)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("cbt_atk_"))
+def callback_combat_attack(call):
+    user_id = call.from_user.id
+    user = get_or_create_user(user_id, call.from_user.username, call.from_user.first_name)
+
+    conn = get_db()
+    combat = conn.execute("SELECT * FROM active_combats WHERE user_id = ?", (user_id,)).fetchone()
+    
+    if not combat:
+        conn.close()
+        bot.answer_callback_query(call.id, "این نبرد به پایان رسیده است.")
+        bot.delete_message(call.message.chat.id, call.message.message_id)
         return
 
-    # نوبت زامبی
-    zombie_dmg = max(1, combat["zombie_damage"] - 3)
-    new_hp = max(0, u[5] - zombie_dmg)
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("UPDATE users SET hp=? WHERE user_id=?", (new_hp, uid))
+    zombie = conn.execute("SELECT * FROM zombies WHERE id = ?", (combat['zombie_id'],)).fetchone()
+    weapon = conn.execute("SELECT * FROM weapons WHERE id = ?", (user['current_weapon_id'],)).fetchone()
+
+    # محاسبه خسارت بازیکن
+    player_damage = weapon['damage'] if weapon else 5
+    player_damage += random.randint(-2, 5)
+    
+    new_zombie_hp = combat['zombie_hp'] - player_damage
+
+    # پیروزی
+    if new_zombie_hp <= 0:
+        conn.execute("DELETE FROM active_combats WHERE user_id = ?", (user_id,))
+        
+        reward_scrap = zombie['reward_scrap']
+        reward_xp = zombie['reward_xp']
+        
+        conn.execute("UPDATE users SET scrap = scrap + ?, xp = xp + ? WHERE user_id = ?", (reward_scrap, reward_xp, user_id))
+        conn.commit()
+        conn.close()
+
+        res_text = (
+            f"🎉 <b>پیروزی در نبرد!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"شما موفق شدید <b>{zombie['name']}</b> را نابود کنید!\n\n"
+            f"💰 <b>پاداش Scrap:</b> +{reward_scrap}\n"
+            f"⭐ <b>تجربه دریافتی:</b> +{reward_xp}"
+        )
+
+        bot.send_message(call.message.chat.id, res_text)
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+        check_level_up(user_id, call.message.chat.id)
+        return
+
+    # نوبت زامبی برای حمله
+    zombie_damage = zombie['damage'] + random.randint(-1, 3)
+    new_player_hp = max(0, user['hp'] - zombie_damage)
+    
+    inf_gain = random.randint(2, 8) if random.random() < 0.6 else 0
+    new_infection = min(100, user['infection'] + inf_gain)
+
+    conn.execute("UPDATE active_combats SET zombie_hp = ? WHERE user_id = ?", (new_zombie_hp, user_id))
+    conn.execute("UPDATE users SET hp = ?, infection = ? WHERE user_id = ?", (new_player_hp, new_infection, user_id))
     conn.commit()
     conn.close()
 
-    if new_hp <= 0:
-        handle_death(uid, call.message.chat.id)
-        user_steps[uid] = {}
-        bot.answer_callback_query(call.id)
+    # مرگ بازیکن
+    if new_player_hp <= 0:
+        conn = get_db()
+        conn.execute("DELETE FROM active_combats WHERE user_id = ?", (user_id,))
+        conn.commit()
+        conn.close()
+
+        bot.answer_callback_query(call.id, "💀 شما کشته شدید!", show_alert=True)
+        bot.send_message(call.message.chat.id, f"💀 <b>شما توسط {zombie['name']} کشته شدید!</b>\n\nبرای ادامه باید خود را درمان کنید.")
+        bot.delete_message(call.message.chat.id, call.message.message_id)
         return
 
     # ادامه مبارزه
-    user_steps[uid] = combat
-    text = f"""
-⚔️ **ادامه مبارزه**
-
-🧟 {combat['zombie_name']}
-❤️ HP: {combat['zombie_hp']}/{combat['zombie_max_hp']}
-
-👤 تو
-❤️ HP: {new_hp}/{u[6]}
-
-تو زدی: -{player_dmg}
-زامبی زد: -{zombie_dmg}
-"""
-    mk = InlineKeyboardMarkup(row_width=2)
-    mk.add(
-        InlineKeyboardButton("⚔️ حمله", callback_data="combat_attack"),
-        InlineKeyboardButton("🏃 فرار", callback_data="combat_escape")
+    weapon_name = weapon['name'] if weapon else "دست خالی"
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        types.InlineKeyboardButton("⚔️ حمله مجدد", callback_data=f"cbt_atk_{zombie['id']}"),
+        types.InlineKeyboardButton("🏃 فرار", callback_data=f"cbt_flee_{zombie['id']}")
     )
-    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=mk)
-    bot.answer_callback_query(call.id)
 
-def handle_death(uid, chat_id):
+    combat_text = (
+        f"🧟 <b>در حال مبارزه با {zombie['name']}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"💥 شما {player_damage} آسیب زدید!\n"
+        f"🩸 زامبی {zombie_damage} آسیب زد! (عفونت: +{inf_gain}%)\n\n"
+        f"📊 <b>وضعیت نبرد:</b>\n"
+        f"❤️ HP زامبی: {new_zombie_hp}/{combat['max_zombie_hp']}\n"
+        f"🛡️ HP شما: {new_player_hp}/{user['max_hp']}\n"
+        f"☣️ درصد عفونت: {new_infection}%\n"
+        f"🔫 سلاح: {weapon_name}"
+    )
+
+    try:
+        if call.message.photo:
+            bot.edit_message_caption(chat_id=call.message.chat.id, message_id=call.message.message_id, caption=combat_text, reply_markup=kb)
+        else:
+            bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text=combat_text, reply_markup=kb)
+    except Exception:
+        pass
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("cbt_flee_"))
+def callback_combat_flee(call):
+    user_id = call.from_user.id
+    
+    if random.random() < 0.5:
+        conn = get_db()
+        conn.execute("DELETE FROM active_combats WHERE user_id = ?", (user_id,))
+        conn.commit()
+        conn.close()
+
+        bot.answer_callback_query(call.id, "🏃 موفق به فرار شدید!", show_alert=True)
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+    else:
+        bot.answer_callback_query(call.id, "❌ فرار ناموفق بود! زامبی ضربه زد.", show_alert=True)
+        callback_combat_attack(call)
+
+def check_level_up(user_id, chat_id):
     conn = get_db()
-    c = conn.cursor()
-    c.execute("UPDATE users SET deaths = deaths + 1, hp = max_hp, energy = 50, infection = MAX(0, infection - 10) WHERE user_id=?", (uid,))
-    # از دست دادن کمی scrap
-    c.execute("UPDATE users SET scrap = MAX(0, scrap - 50) WHERE user_id=?", (uid,))
+    user = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
+    
+    req_xp = user['level'] * 100
+    if user['xp'] >= req_xp:
+        new_level = user['level'] + 1
+        new_max_hp = user['max_hp'] + 20
+        conn.execute("UPDATE users SET level = ?, max_hp = ?, hp = ? WHERE user_id = ?", (new_level, new_max_hp, new_max_hp, user_id))
+        conn.commit()
+
+        bot.send_message(
+            chat_id,
+            f"🎉 <b>ارتقای سطح! (LEVEL UP)</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🎊 تبریک! شما به سطح <b>{new_level}</b> رسیدید!\n"
+            f"❤️ حداکثر HP شما به <b>{new_max_hp}</b> افزایش یافت و کاملاً ترمیم شد."
+        )
+    conn.close()
+    # ==========================================
+# 🎒 سیستم کوله‌پشتی، آیتم‌ها و انتقال منابع (INVENTORY & TRANSFER)
+# ==========================================
+
+@bot.message_handler(commands=['inventory'])
+@bot.message_handler(func=lambda msg: msg.text == "🎒 کوله‌پشتی")
+def show_inventory(message):
+    user_id = message.from_user.id
+    user = get_or_create_user(user_id, message.from_user.username, message.from_user.first_name)
+
+    if user['is_banned']:
+        return
+
+    conn = get_db()
+    # دریافت آیتم‌های موجود در کوله‌پشتی
+    items = conn.execute("""
+        SELECT i.id, i.name, i.description, i.item_type, i.effect_value, ui.quantity
+        FROM user_inventory ui
+        JOIN items i ON ui.item_id = i.id
+        WHERE ui.user_id = ? AND ui.quantity > 0
+    """, (user_id,)).fetchall()
+    
+    weapon = conn.execute("SELECT name FROM weapons WHERE id = ?", (user['current_weapon_id'],)).fetchone()
+    shelter = conn.execute("SELECT name FROM shelters WHERE id = ?", (user['current_shelter_id'],)).fetchone()
+    conn.close()
+
+    weapon_name = weapon['name'] if weapon else "دست خالی"
+    shelter_name = shelter['name'] if shelter else "بدون پناهگاه (آواره)"
+
+    if not items:
+        text = (
+            f"🎒 <b>کوله‌پشتی شما خالی است!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🔫 <b>سلاح مجهز:</b> {weapon_name}\n"
+            f"🏠 <b>پناهگاه:</b> {shelter_name}\n"
+            f"💰 <b>موجودی Scrap:</b> {user['scrap']} 🪙"
+        )
+        bot.send_message(message.chat.id, text)
+        return
+
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    for item in items:
+        kb.add(types.InlineKeyboardButton(
+            f"📦 {item['name']} (تعداد: {item['quantity']})", 
+            callback_data=f"inv_use_{item['id']}"
+        ))
+
+    text = (
+        f"🎒 <b>کوله‌پشتی و تجهیزات شما</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"🔫 <b>سلاح مجهز:</b> {weapon_name}\n"
+        f"🏠 <b>پناهگاه:</b> {shelter_name}\n"
+        f"💰 <b>موجودی Scrap:</b> {user['scrap']} 🪙\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"👇 برای استفاده از هر آیتم روی آن کلیک کنید:"
+    )
+
+    bot.send_message(message.chat.id, text, reply_markup=kb)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("inv_use_"))
+def callback_use_item(call):
+    item_id = int(call.data.split("_")[2])
+    user_id = call.from_user.id
+    user = get_or_create_user(user_id, call.from_user.username, call.from_user.first_name)
+
+    conn = get_db()
+    inv_item = conn.execute("""
+        SELECT ui.quantity, i.* 
+        FROM user_inventory ui
+        JOIN items i ON ui.item_id = i.id
+        WHERE ui.user_id = ? AND ui.item_id = ? AND ui.quantity > 0
+    """, (user_id, item_id)).fetchone()
+
+    if not inv_item:
+        conn.close()
+        bot.answer_callback_query(call.id, "این آیتم در کوله‌پشتی شما موجود نیست.", show_alert=True)
+        return
+
+    item_type = inv_item['item_type']
+    effect_val = inv_item['effect_value']
+    msg_text = ""
+
+    # آیتم‌های ترمیمی (Heal)
+    if item_type == "heal":
+        if user['hp'] >= user['max_hp']:
+            conn.close()
+            bot.answer_callback_query(call.id, "سلامتی شما کامل است و نیازی به درمان ندارید!", show_alert=True)
+            return
+        new_hp = min(user['max_hp'], user['hp'] + effect_val)
+        conn.execute("UPDATE users SET hp = ? WHERE user_id = ?", (new_hp, user_id))
+        msg_text = f"💉 شما از {inv_item['name']} استفاده کردید و {effect_val} واحد HP بازیابی شد!"
+
+    # آیتم‌های پادزهر و درمان عفونت (Cure)
+    elif item_type == "cure":
+        if user['infection'] <= 0:
+            conn.close()
+            bot.answer_callback_query(call.id, "درصد عفونت شما ۰٪ است و نیازی به پادزهر ندارید!", show_alert=True)
+            return
+        new_inf = max(0, user['infection'] - effect_val)
+        conn.execute("UPDATE users SET infection = ? WHERE user_id = ?", (new_inf, user_id))
+        msg_text = f"🧪 شما از {inv_item['name']} استفاده کردید و {effect_val}٪ از عفونت شما کاسته شد!"
+
+    else:
+        msg_text = f"⚙️ از {inv_item['name']} استفاده شد."
+
+    # کاهش تعداد مصرف‌شده از دیتابیس
+    if inv_item['quantity'] > 1:
+        conn.execute("UPDATE user_inventory SET quantity = quantity - 1 WHERE user_id = ? AND item_id = ?", (user_id, item_id))
+    else:
+        conn.execute("DELETE FROM user_inventory WHERE user_id = ? AND item_id = ?", (user_id, item_id))
+
     conn.commit()
     conn.close()
-    bot.send_message(chat_id, "☠️ **کشته شدی!**\n\nدوباره زنده شدی ولی کمی Scrap از دست دادی و Infection کمی کم شد.", reply_markup=main_menu(uid))
-    log_action(uid, "death")
 
-print("✅ بخش ۵ آماده شد")
-# ==================== بخش ۶ از ۸ ====================
-# مأموریت + کلن + رتبه‌بندی + پایه ایونت
+    bot.answer_callback_query(call.id, msg_text, show_alert=True)
+    show_inventory(call.message)
 
-def show_quests(uid, chat_id, message_id):
+# ==========================================
+# 💸 سیستم انتقال Scrap بین بازماندگان (TRANSFER SYSTEM)
+# ==========================================
+
+@bot.message_handler(commands=['transfer', 'pay'])
+def handle_transfer_command(message):
+    user_id = message.from_user.id
+    user = get_or_create_user(user_id, message.from_user.username, message.from_user.first_name)
+
+    if user['is_banned']:
+        return
+
+    args = message.text.split()
+    
+    if len(args) < 3:
+        bot.send_message(
+            message.chat.id,
+            "💡 <b>راهنمای انتقال Scrap:</b>\n"
+            "برای انتقال قطعات Scrap به بازمانده دیگر از دستور زیر استفاده کنید:\n"
+            "<code>/transfer [آیدی_عددی_مقصد] [مقدار]</code>\n\n"
+            "مثال:\n<code>/transfer 123456789 100</code>"
+        )
+        return
+
+    try:
+        target_id = int(args[1])
+        amount = int(args[2])
+    except ValueError:
+        bot.send_message(message.chat.id, "❌ آیدی عددی مقصد و مقدار Scrap باید به صورت عدد وارد شوند.")
+        return
+
+    if target_id == user_id:
+        bot.send_message(message.chat.id, "⛔ شما نمی‌توانید به خودتان Scrap انتقال دهید!")
+        return
+
+    if amount <= 0:
+        bot.send_message(message.chat.id, "⛔ مقدار انتقال باید یک عدد مثبت باشد.")
+        return
+
+    if user['scrap'] < amount:
+        bot.send_message(
+            message.chat.id, 
+            f"❌ <b>موجودی کافی نیست!</b>\n"
+            f"موجودی شما: {user['scrap']} Scrap\n"
+            f"مقدار درخواست‌شده: {amount} Scrap"
+        )
+        return
+
     conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT q.id, q.name, q.description, q.target_count, q.reward_xp, q.reward_scrap, uq.progress, uq.completed FROM quests q LEFT JOIN user_quests uq ON q.id = uq.quest_id AND uq.user_id=? WHERE q.is_active=1", (uid,))
-    quests = c.fetchall()
+    target_user = conn.execute("SELECT * FROM users WHERE user_id = ?", (target_id,)).fetchone()
+
+    if not target_user:
+        conn.close()
+        bot.send_message(message.chat.id, "❌ کاربر مقصد در دیتابیس ربات یافت نشد.")
+        return
+
+    # انجام تراکنش در دیتابیس
+    conn.execute("UPDATE users SET scrap = scrap - ? WHERE user_id = ?", (amount, user_id))
+    conn.execute("UPDATE users SET scrap = scrap + ? WHERE user_id = ?", (amount, target_id))
+    conn.commit()
     conn.close()
+
+    bot.send_message(
+        message.chat.id,
+        f"✅ <b>انتقال با موفقیت انجام شد!</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"💰 <b>مقدار:</b> {amount} Scrap\n"
+        f"👤 <b>گیرنده:</b> {target_user['first_name']} (<code>{target_id}</code>)\n"
+        f"🪙 <b>موجودی جدید شما:</b> {user['scrap'] - amount} Scrap"
+    )
+
+    try:
+        bot.send_message(
+            target_id,
+            f"🎁 <b>دریافت Scrap!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"بازمانده <b>{user['first_name']}</b> مقدار <b>{amount} Scrap</b> به حساب شما واریز کرد!"
+        )
+    except Exception:
+        pass
+    # ==========================================
+# 📜 سیستم ماموریت‌ها و پاداش روزانه (QUESTS & DAILY REWARDS)
+# ==========================================
+
+import datetime
+
+@bot.message_handler(commands=['daily'])
+@bot.message_handler(func=lambda msg: msg.text == "🎁 پاداش روزانه")
+def handle_daily_reward(message):
+    user_id = message.from_user.id
+    user = get_or_create_user(user_id, message.from_user.username, message.from_user.first_name)
+
+    if user['is_banned']:
+        return
+
+    now = datetime.datetime.now()
+    
+    # بررسی زمان آخرین دریافت پاداش
+    conn = get_db()
+    row = conn.execute("SELECT last_daily_claim FROM users WHERE user_id = ?", (user_id,)).fetchone()
+    
+    last_claim_str = row['last_daily_claim'] if row and 'last_daily_claim' in row.keys() else None
+    
+    can_claim = False
+    hours, minutes = 0, 0
+
+    if not last_claim_str:
+        can_claim = True
+    else:
+        try:
+            last_claim = datetime.datetime.fromisoformat(last_claim_str)
+            elapsed_sec = (now - last_claim).total_seconds()
+            if elapsed_sec >= 86400:  # 24 ساعت
+                can_claim = True
+            else:
+                remaining_sec = 86400 - int(elapsed_sec)
+                hours = remaining_sec // 3600
+                minutes = (remaining_sec % 3600) // 60
+        except Exception:
+            can_claim = True
+
+    if not can_claim:
+        conn.close()
+        bot.send_message(
+            message.chat.id,
+            f"⏳ <b>پاداش روزانه قبلاً دریافت شده است!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"لطفاً <b>{hours} ساعت و {minutes} دقیقه</b> دیگر دوباره تلاش کنید."
+        )
+        return
+
+    # محاسبه و اعطای پاداش بر اساس سطح کاربر
+    reward_scrap = 100 + (user['level'] * 15)
+    reward_xp = 50 + (user['level'] * 5)
+    
+    conn.execute(
+        "UPDATE users SET scrap = scrap + ?, xp = xp + ?, last_daily_claim = ? WHERE user_id = ?",
+        (reward_scrap, reward_xp, now.isoformat(), user_id)
+    )
+    conn.commit()
+    conn.close()
+
+    bot.send_message(
+        message.chat.id,
+        f"🎁 <b>پاداش روزانه دریافت شد!</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"💰 <b>Scrap دریافتی:</b> +{reward_scrap} 🪙\n"
+        f"⭐ <b>تجربه (XP):</b> +{reward_xp}\n\n"
+        f"فردا نیز برای دریافت پاداش جدید سر بزنید!"
+    )
+    check_level_up(user_id, message.chat.id)
+
+@bot.message_handler(commands=['quests'])
+@bot.message_handler(func=lambda msg: msg.text == "📜 ماموریت‌ها")
+def show_quests_menu(message):
+    user_id = message.from_user.id
+    user = get_or_create_user(user_id, message.from_user.username, message.from_user.first_name)
+
+    if user['is_banned']:
+        return
+
+    conn = get_db()
+    quests = conn.execute("SELECT * FROM quests WHERE is_active = 1").fetchall()
+    
+    # دریافت وضعیت ماموریت‌های کاربر
+    user_quests = conn.execute("SELECT quest_id, is_completed, reward_claimed FROM user_quests WHERE user_id = ?", (user_id,)).fetchall()
+    conn.close()
+
+    uq_map = {uq['quest_id']: uq for uq in user_quests}
 
     if not quests:
-        text = "📜 هنوز هیچ مأموریتی توسط ادمین ساخته نشده."
-    else:
-        text = "📜 **مأموریت‌های فعال**\n\n"
-        for q in quests:
-            progress = q[6] or 0
-            status = "✅ انجام شده" if q[7] else f"پیشرفت: {progress}/{q[3]}"
-            text += f"**{q[1]}**\n{q[2] or ''}\n{status}\nجایزه: {q[5]}🪙 + {q[4]} XP\n\n"
+        bot.send_message(message.chat.id, "📜 <b>در حال حاضر هیچ ماموریتی فعال نیست.</b>")
+        return
 
-    mk = InlineKeyboardMarkup().add(InlineKeyboardButton("🔙 بازگشت", callback_data="back_main"))
-    try:
-        bot.edit_message_text(text, chat_id, message_id, parse_mode="Markdown", reply_markup=mk)
-    except:
-        bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=mk)
-
-def show_clan_menu(uid, chat_id, message_id):
-    u = get_user(uid)
-    text = "👥 **سیستم کلن**\n\n"
-    mk = InlineKeyboardMarkup(row_width=1)
-
-    if u[18]:  # clan_id
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("SELECT name, level, xp FROM clans WHERE id=?", (u[18],))
-        clan = c.fetchone()
-        conn.close()
-        if clan:
-            text += f"کلن فعلی: **{clan[0]}**\nلول کلن: {clan[1]}\nXP: {clan[2]}"
-            mk.add(InlineKeyboardButton("🚪 خروج از کلن", callback_data="clan_leave"))
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    
+    for q in quests:
+        q_status = uq_map.get(q['id'])
+        if not q_status:
+            status_btn = f"📜 {q['title']} (در حال انجام)"
+            cb_data = f"qst_info_{q['id']}"
+        elif q_status['is_completed'] and not q_status['reward_claimed']:
+            status_btn = f"✅ {q['title']} (دریافت پاداش!)"
+            cb_data = f"qst_claim_{q['id']}"
+        elif q_status['reward_claimed']:
+            status_btn = f"☑️ {q['title']} (تکمیل شده)"
+            cb_data = f"qst_info_{q['id']}"
         else:
-            text += "کلن پیدا نشد."
-    else:
-        text += "تو هنوز عضو هیچ کلنی نیستی."
-        mk.add(InlineKeyboardButton("➕ ساخت کلن", callback_data="clan_create"))
-        mk.add(InlineKeyboardButton("🔎 جستجوی کلن", callback_data="clan_search"))
+            status_btn = f"📜 {q['title']} (در حال انجام)"
+            cb_data = f"qst_info_{q['id']}"
 
-    mk.add(InlineKeyboardButton("🔙 بازگشت", callback_data="back_main"))
-    try:
-        bot.edit_message_text(text, chat_id, message_id, parse_mode="Markdown", reply_markup=mk)
-    except:
-        bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=mk)
+        kb.add(types.InlineKeyboardButton(status_btn, callback_data=cb_data))
 
-@bot.callback_query_handler(func=lambda call: call.data in ["clan_create", "clan_search", "clan_leave"])
-def clan_actions(call):
-    uid = call.from_user.id
-    data = call.data
+    text = (
+        f"📜 <b>لیست ماموریت‌های بازماندگان</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"ماموریت‌ها را انجام دهید تا پاداش ویژه Scrap و XP دریافت کنید:"
+    )
 
-    if data == "clan_create":
-        user_steps[uid] = {"step": "clan_name"}
-        bot.edit_message_text("نام کلن را بفرست (حداقل ۳ حرف):", call.message.chat.id, call.message.message_id)
-    elif data == "clan_leave":
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("UPDATE users SET clan_id=NULL WHERE user_id=?", (uid,))
-        c.execute("DELETE FROM clan_members WHERE user_id=?", (uid,))
-        conn.commit()
-        conn.close()
-        bot.answer_callback_query(call.id, "از کلن خارج شدی", show_alert=True)
-        show_clan_menu(uid, call.message.chat.id, call.message.message_id)
-    elif data == "clan_search":
-        bot.edit_message_text("فعلاً ساخت کلن فعال است. جستجو به زودی کامل‌تر می‌شود.", call.message.chat.id, call.message.message_id, reply_markup=main_menu(uid))
-    bot.answer_callback_query(call.id)
+    bot.send_message(message.chat.id, text, reply_markup=kb)
 
-def show_ranking(chat_id, uid):
+@bot.callback_query_handler(func=lambda call: call.data.startswith("qst_info_"))
+def callback_quest_info(call):
+    quest_id = int(call.data.split("_")[2])
+
     conn = get_db()
-    c = conn.cursor()
-
-    text = "🏆 **رتبه‌بندی**\n\n"
-
-    # Level
-    c.execute("SELECT full_name, username, level FROM users ORDER BY level DESC, xp DESC LIMIT 8")
-    text += "⭐ **بالاترین لول**\n"
-    for i, r in enumerate(c.fetchall(), 1):
-        name = r[0] or (f"@{r[1]}" if r[1] else "ناشناس")
-        text += f"{i}. {name} — لول {r[2]}\n"
-
-    # Zombie Kills
-    c.execute("SELECT full_name, username, zombie_kills FROM users ORDER BY zombie_kills DESC LIMIT 8")
-    text += "\n🧟 **بیشترین کشتار زامبی**\n"
-    for i, r in enumerate(c.fetchall(), 1):
-        name = r[0] or (f"@{r[1]}" if r[1] else "ناشناس")
-        text += f"{i}. {name} — {r[2]} کشته\n"
-
-    # Wealth
-    c.execute("SELECT full_name, username, scrap FROM users ORDER BY scrap DESC LIMIT 8")
-    text += "\n🪙 **ثروتمندترین‌ها**\n"
-    for i, r in enumerate(c.fetchall(), 1):
-        name = r[0] or (f"@{r[1]}" if r[1] else "ناشناس")
-        text += f"{i}. {name} — {r[2]:,} Scrap\n"
-
+    q = conn.execute("SELECT * FROM quests WHERE id = ?", (quest_id,)).fetchone()
     conn.close()
-    bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=main_menu(uid))
 
-print("✅ بخش ۶ آماده شد")
-# ==================== بخش ۷ از ۸ ====================
-# پنل ادمین (فقط پیوی + فقط ادمین اصلی)
-
-def show_admin_panel(chat_id, message_id=None):
-    mk = InlineKeyboardMarkup(row_width=2)
-    mk.add(
-        InlineKeyboardButton("🗺️ نقشه‌ها", callback_data="adm_maps"),
-        InlineKeyboardButton("📍 مناطق", callback_data="adm_regions")
-    )
-    mk.add(
-        InlineKeyboardButton("🔫 سلاح‌ها", callback_data="adm_weapons"),
-        InlineKeyboardButton("🏠 پناهگاه‌ها", callback_data="adm_shelters")
-    )
-    mk.add(
-        InlineKeyboardButton("📦 آیتم‌ها", callback_data="adm_items"),
-        InlineKeyboardButton("🧟 زامبی‌ها", callback_data="adm_zombies")
-    )
-    mk.add(
-        InlineKeyboardButton("📜 مأموریت‌ها", callback_data="adm_quests"),
-        InlineKeyboardButton("📖 راهنما", callback_data="adm_help")
-    )
-    mk.add(
-        InlineKeyboardButton("👤 مدیریت کاربر", callback_data="adm_users"),
-        InlineKeyboardButton("📢 پیام همگانی", callback_data="adm_broadcast")
-    )
-    mk.add(
-        InlineKeyboardButton("📊 آمار ربات", callback_data="adm_stats"),
-        InlineKeyboardButton("🔙 بازگشت", callback_data="back_main")
-    )
-    text = "👑 **پنل مدیریت ZOMBIE SURVIVAL**\n\nفقط برای ادمین اصلی و فقط در پیوی ربات."
-    if message_id:
-        try:
-            bot.edit_message_text(text, chat_id, message_id, parse_mode="Markdown", reply_markup=mk)
-        except:
-            bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=mk)
-    else:
-        bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=mk)
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("adm_") or call.data.startswith("admin"))
-def admin_callbacks(call):
-    uid = call.from_user.id
-
-    # فقط ادمین اصلی
-    if not is_admin(uid):
-        bot.answer_callback_query(call.id, "دسترسی نداری!", show_alert=True)
+    if not q:
+        bot.answer_callback_query(call.id, "ماموریت یافت نشد.")
         return
 
-    # فقط در پیوی
-    if call.message.chat.type != "private":
-        bot.answer_callback_query(call.id, "پنل ادمین فقط در پیوی ربات کار می‌کند!", show_alert=True)
-        return
-
-    data = call.data
-
-    if data == "admin":
-        show_admin_panel(call.message.chat.id, call.message.message_id)
-
-    # ---------- آمار ----------
-    elif data == "adm_stats":
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("SELECT COUNT(*) FROM users")
-        users = c.fetchone()[0]
-        c.execute("SELECT COUNT(*) FROM maps")
-        maps = c.fetchone()[0]
-        c.execute("SELECT COUNT(*) FROM regions")
-        regions = c.fetchone()[0]
-        c.execute("SELECT COUNT(*) FROM weapons")
-        weapons = c.fetchone()[0]
-        c.execute("SELECT COUNT(*) FROM zombies")
-        zombies = c.fetchone()[0]
-        conn.close()
-        text = f"""
-📊 **آمار ربات**
-
-👥 کاربران: {users}
-🗺️ نقشه‌ها: {maps}
-📍 مناطق: {regions}
-🔫 سلاح‌ها: {weapons}
-🧟 زامبی‌ها: {zombies}
-"""
-        bot.send_message(call.message.chat.id, text, parse_mode="Markdown")
-
-    # ---------- مدیریت کاربر ----------
-    elif data == "adm_users":
-        user_steps[uid] = {"step": "adm_find_user"}
-        bot.edit_message_text("آیدی عددی یا یوزرنیم کاربر را بفرست:", call.message.chat.id, call.message.message_id)
-
-    # ---------- پیام همگانی ----------
-    elif data == "adm_broadcast":
-        user_steps[uid] = {"step": "adm_broadcast"}
-        bot.edit_message_text("پیام همگانی را بفرست:", call.message.chat.id, call.message.message_id)
-
-    # ---------- نقشه‌ها ----------
-    elif data == "adm_maps":
-        mk = InlineKeyboardMarkup(row_width=1)
-        mk.add(
-            InlineKeyboardButton("➕ افزودن نقشه", callback_data="adm_add_map"),
-            InlineKeyboardButton("📋 لیست نقشه‌ها", callback_data="adm_list_maps"),
-            InlineKeyboardButton("🔙", callback_data="admin")
-        )
-        bot.edit_message_text("🗺️ مدیریت نقشه‌ها:", call.message.chat.id, call.message.message_id, reply_markup=mk)
-
-    elif data == "adm_add_map":
-        user_steps[uid] = {"step": "adm_map_name"}
-        bot.edit_message_text("نام نقشه را بفرست:", call.message.chat.id, call.message.message_id)
-
-    elif data == "adm_list_maps":
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("SELECT id, name, is_active FROM maps ORDER BY id DESC")
-        rows = c.fetchall()
-        conn.close()
-        text = "📋 لیست نقشه‌ها:\n\n"
-        mk = InlineKeyboardMarkup(row_width=1)
-        for r in rows:
-            status = "🟢" if r[2] else "🔴"
-            text += f"{status} #{r[0]} — {r[1]}\n"
-            mk.add(InlineKeyboardButton(f"{'🔴 غیرفعال' if r[2] else '🟢 فعال'} #{r[0]}", callback_data=f"adm_toggle_map_{r[0]}"))
-        mk.add(InlineKeyboardButton("🔙", callback_data="adm_maps"))
-        bot.send_message(call.message.chat.id, text, reply_markup=mk)
-
-    elif data.startswith("adm_toggle_map_"):
-        mid = int(data.split("_")[3])
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("UPDATE maps SET is_active = 1 - is_active WHERE id=?", (mid,))
-        conn.commit()
-        conn.close()
-        bot.answer_callback_query(call.id, "وضعیت تغییر کرد", show_alert=True)
-
-    # ---------- سلاح‌ها ----------
-    elif data == "adm_weapons":
-        mk = InlineKeyboardMarkup(row_width=1)
-        mk.add(
-            InlineKeyboardButton("➕ افزودن سلاح", callback_data="adm_add_weapon"),
-            InlineKeyboardButton("📋 لیست سلاح‌ها", callback_data="adm_list_weapons"),
-            InlineKeyboardButton("🔙", callback_data="admin")
-        )
-        bot.edit_message_text("🔫 مدیریت سلاح‌ها:", call.message.chat.id, call.message.message_id, reply_markup=mk)
-
-    elif data == "adm_add_weapon":
-        user_steps[uid] = {"step": "adm_weapon_name"}
-        bot.edit_message_text("نام سلاح را بفرست:", call.message.chat.id, call.message.message_id)
-
-    elif data == "adm_list_weapons":
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("SELECT id, name, price, damage, is_active FROM weapons ORDER BY id DESC LIMIT 20")
-        rows = c.fetchall()
-        conn.close()
-        text = "📋 سلاح‌ها:\n\n"
-        for r in rows:
-            status = "🟢" if r[4] else "🔴"
-            text += f"{status} #{r[0]} {r[1]} | {r[2]}🪙 | DMG {r[3]}\n"
-        bot.send_message(call.message.chat.id, text)
-
-    # ---------- زامبی‌ها ----------
-    elif data == "adm_zombies":
-        mk = InlineKeyboardMarkup(row_width=1)
-        mk.add(
-            InlineKeyboardButton("➕ افزودن زامبی", callback_data="adm_add_zombie"),
-            InlineKeyboardButton("📋 لیست زامبی‌ها", callback_data="adm_list_zombies"),
-            InlineKeyboardButton("🔙", callback_data="admin")
-        )
-        bot.edit_message_text("🧟 مدیریت زامبی‌ها:", call.message.chat.id, call.message.message_id, reply_markup=mk)
-
-    elif data == "adm_add_zombie":
-        user_steps[uid] = {"step": "adm_zombie_name"}
-        bot.edit_message_text("نام زامبی را بفرست:", call.message.chat.id, call.message.message_id)
-
-    elif data == "adm_list_zombies":
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("SELECT id, name, hp, damage, is_active FROM zombies ORDER BY id DESC LIMIT 20")
-        rows = c.fetchall()
-        conn.close()
-        text = "📋 زامبی‌ها:\n\n"
-        for r in rows:
-            status = "🟢" if r[4] else "🔴"
-            text += f"{status} #{r[0]} {r[1]} | HP {r[2]} | DMG {r[3]}\n"
-        bot.send_message(call.message.chat.id, text)
-
-    # ---------- پناهگاه ----------
-    elif data == "adm_shelters":
-        mk = InlineKeyboardMarkup(row_width=1)
-        mk.add(
-            InlineKeyboardButton("➕ افزودن پناهگاه", callback_data="adm_add_shelter"),
-            InlineKeyboardButton("🔙", callback_data="admin")
-        )
-        bot.edit_message_text("🏠 مدیریت پناهگاه:", call.message.chat.id, call.message.message_id, reply_markup=mk)
-
-    elif data == "adm_add_shelter":
-        user_steps[uid] = {"step": "adm_shelter_name"}
-        bot.edit_message_text("نام پناهگاه را بفرست:", call.message.chat.id, call.message.message_id)
-
-    # ---------- آیتم ----------
-    elif data == "adm_items":
-        mk = InlineKeyboardMarkup(row_width=1)
-        mk.add(
-            InlineKeyboardButton("➕ افزودن آیتم", callback_data="adm_add_item"),
-            InlineKeyboardButton("🔙", callback_data="admin")
-        )
-        bot.edit_message_text("📦 مدیریت آیتم:", call.message.chat.id, call.message.message_id, reply_markup=mk)
-
-    elif data == "adm_add_item":
-        user_steps[uid] = {"step": "adm_item_name"}
-        bot.edit_message_text("نام آیتم را بفرست:", call.message.chat.id, call.message.message_id)
-
-    # ---------- مناطق ----------
-    elif data == "adm_regions":
-        user_steps[uid] = {"step": "adm_region_map"}
-        bot.edit_message_text("اول آیدی نقشه را بفرست (از لیست نقشه‌ها ببین):", call.message.chat.id, call.message.message_id)
-
-    # ---------- مأموریت و راهنما ----------
-    elif data == "adm_quests":
-        user_steps[uid] = {"step": "adm_quest_name"}
-        bot.edit_message_text("نام مأموریت را بفرست:", call.message.chat.id, call.message.message_id)
-
-    elif data == "adm_help":
-        user_steps[uid] = {"step": "adm_help_title"}
-        bot.edit_message_text("عنوان بخش راهنما را بفرست:", call.message.chat.id, call.message.message_id)
+    text = (
+        f"📜 <b>ماموریت: {q['title']}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"📝 <b>توضیحات:</b>\n{q['description']}\n\n"
+        f"🎁 <b>پاداش:</b>\n"
+        f"💰 Scrap: +{q['reward_scrap']}\n"
+        f"⭐ XP: +{q['reward_xp']}\n"
+        f"━━━━━━━━━━━━━━━━━━"
+    )
 
     bot.answer_callback_query(call.id)
+    bot.send_message(call.message.chat.id, text)
 
-print("✅ بخش ۷ آماده شد - پنل ادمین (فقط پیوی + فقط ادمین)")
-# ==================== بخش ۸ از ۸ ====================
-# هندلر پیام‌های ادمین + ساخت محتوا + مدیریت کاربر + اجرا
+@bot.callback_query_handler(func=lambda call: call.data.startswith("qst_claim_"))
+def callback_quest_claim(call):
+    quest_id = int(call.data.split("_")[2])
+    user_id = call.from_user.id
 
-@bot.message_handler(content_types=['text', 'photo'])
-def handle_all(message):
-    uid = message.from_user.id
-    ensure_user(message.from_user)
+    conn = get_db()
+    q = conn.execute("SELECT * FROM quests WHERE id = ?", (quest_id,)).fetchone()
+    uq = conn.execute("SELECT * FROM user_quests WHERE user_id = ? AND quest_id = ?", (user_id, quest_id)).fetchone()
 
-    # فقط ادمین و فقط پیوی برای عملیات حساس
-    step_data = user_steps.get(uid, {})
-    step = step_data.get("step")
-
-    if not step:
-        if message.chat.type == "private":
-            bot.reply_to(message, "از منو استفاده کن یا /start بزن.", reply_markup=main_menu(uid))
-        return
-
-    text = message.text.strip() if message.text else ""
-
-    # ========== مدیریت کاربر ==========
-    if step == "adm_find_user" and is_admin(uid) and message.chat.type == "private":
-        target = None
-        text_clean = text.lstrip("@")
-        conn = get_db()
-        c = conn.cursor()
-        if text_clean.isdigit():
-            c.execute("SELECT * FROM users WHERE user_id=?", (int(text_clean),))
-        else:
-            c.execute("SELECT * FROM users WHERE username=?", (text_clean,))
-        target = c.fetchone()
+    if not uq or not uq['is_completed']:
         conn.close()
-
-        if not target:
-            bot.reply_to(message, "کاربر پیدا نشد.")
-            user_steps[uid] = {}
-            return
-
-        user_steps[uid] = {"step": "adm_user_action", "target": target[0]}
-        mk = InlineKeyboardMarkup(row_width=2)
-        mk.add(
-            InlineKeyboardButton("💰 دادن Scrap", callback_data=f"adm_give_scrap_{target[0]}"),
-            InlineKeyboardButton("📉 کم کردن Scrap", callback_data=f"adm_take_scrap_{target[0]}")
-        )
-        mk.add(
-            InlineKeyboardButton("⭐ دادن XP/Level", callback_data=f"adm_give_xp_{target[0]}"),
-            InlineKeyboardButton("🚫 بن / آنبن", callback_data=f"adm_ban_{target[0]}")
-        )
-        mk.add(InlineKeyboardButton("🔙", callback_data="admin"))
-
-        info = f"""
-👤 کاربر پیدا شد:
-آیدی: `{target[0]}`
-یوزرنیم: @{target[1] or '-'}
-نام: {target[2]}
-Level: {target[3]} | XP: {target[4]}
-HP: {target[5]}/{target[6]}
-Scrap: {target[12]:,}
-Infection: {target[11]}%
-بن: {'بله' if target[19] else 'خیر'}
-"""
-        bot.reply_to(message, info, parse_mode="Markdown", reply_markup=mk)
+        bot.answer_callback_query(call.id, "این ماموریت هنوز تکمیل نشده است!", show_alert=True)
         return
 
-    # ========== ساخت نقشه ==========
-    if step == "adm_map_name" and is_admin(uid):
-        user_steps[uid] = {"step": "adm_map_desc", "name": text}
-        bot.reply_to(message, "توضیحات نقشه را بفرست (یا بنویس -):")
-        return
-
-    if step == "adm_map_desc" and is_admin(uid):
-        user_steps[uid] = {"step": "adm_map_photo", "name": step_data["name"], "desc": text if text != "-" else ""}
-        bot.reply_to(message, "عکس نقشه را بفرست (یا بنویس رد کردن):")
-        return
-
-    if step == "adm_map_photo" and is_admin(uid):
-        file_id = None
-        if message.photo:
-            file_id = message.photo[-1].file_id
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("INSERT INTO maps (name, description, image_file_id, is_active, created_at) VALUES (?, ?, ?, 1, ?)",
-                  (step_data["name"], step_data.get("desc", ""), file_id, datetime.now().strftime("%Y-%m-%d %H:%M")))
-        conn.commit()
+    if uq['reward_claimed']:
         conn.close()
-        bot.reply_to(message, f"✅ نقشه «{step_data['name']}» ساخته شد.", reply_markup=main_menu(uid))
-        user_steps[uid] = {}
+        bot.answer_callback_query(call.id, "پاداش این ماموریت قبلاً دریافت شده است.", show_alert=True)
         return
 
-    # ========== ساخت سلاح ==========
-    if step == "adm_weapon_name" and is_admin(uid):
-        user_steps[uid] = {"step": "adm_weapon_price", "name": text}
-        bot.reply_to(message, "قیمت سلاح (Scrap):")
+    # اعطای پاداش و ثبت دریافت
+    conn.execute("UPDATE users SET scrap = scrap + ?, xp = xp + ? WHERE user_id = ?", (q['reward_scrap'], q['reward_xp'], user_id))
+    conn.execute("UPDATE user_quests SET reward_claimed = 1 WHERE user_id = ? AND quest_id = ?", (user_id, quest_id))
+    conn.commit()
+    conn.close()
+
+    bot.answer_callback_query(call.id, "🎉 پاداش ماموریت دریافت شد!", show_alert=True)
+    bot.send_message(
+        call.message.chat.id,
+        f"🎉 <b>ماموریت تکمیل شد!</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"🏆 <b>نام ماموریت:</b> {q['title']}\n"
+        f"💰 <b>Scrap دریافتی:</b> +{q['reward_scrap']}\n"
+        f"⭐ <b>تجربه دریافتی:</b> +{q['reward_xp']}"
+    )
+    check_level_up(user_id, call.message.chat.id)
+    show_quests_menu(call.message)
+# ==========================================
+# 🛠️ پنل مدیریت و ادمین (ADMIN PANEL & MANAGEMENT)
+# ==========================================
+
+def is_admin(user_id):
+    return user_id in ADMIN_IDS
+
+@bot.message_handler(commands=['admin'])
+@bot.message_handler(func=lambda msg: msg.text == "🛠️ پنل مدیریت")
+def handle_admin_panel(message):
+    user_id = message.from_user.id
+    if not is_admin(user_id):
+        bot.send_message(message.chat.id, "⛔ شما دسترسی ادمین ندارید.")
         return
 
-    if step == "adm_weapon_price" and is_admin(uid):
-        user_steps[uid] = {"step": "adm_weapon_damage", "name": step_data["name"], "price": text}
-        bot.reply_to(message, "قدرت (Damage) سلاح:")
+    conn = get_db()
+    total_users = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    banned_users = conn.execute("SELECT COUNT(*) FROM users WHERE is_banned = 1").fetchone()[0]
+    total_scrap = conn.execute("SELECT SUM(scrap) FROM users").fetchone()[0] or 0
+    total_maps = conn.execute("SELECT COUNT(*) FROM maps").fetchone()[0]
+    total_zombies = conn.execute("SELECT COUNT(*) FROM zombies").fetchone()[0]
+    conn.close()
+
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        types.InlineKeyboardButton("📊 آمار دیتابیس", callback_data="adm_stats"),
+        types.InlineKeyboardButton("📢 راهنمای همگانی", callback_data="adm_bc_help")
+    )
+
+    text = (
+        f"🛠️ <b>پنل مدیریت ZOMBIE SURVIVAL BOT</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"👥 <b>تعداد کل بازماندگان:</b> {total_users}\n"
+        f"🚫 <b>کاربران مسدودشده:</b> {banned_users}\n"
+        f"💰 <b>کل Scrap درون بازی:</b> {total_scrap}\n"
+        f"🗺️ <b>تعداد نقشه‌ها:</b> {total_maps} | 🧟 <b>تعداد زامبی‌ها:</b> {total_zombies}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"📋 <b>دستورات سریع ادمین:</b>\n"
+        f"▫️ <code>/ban [user_id]</code> - مسدودسازی کاربر\n"
+        f"▫️ <code>/unban [user_id]</code> - رفع مسدودسازی کاربر\n"
+        f"▫️ <code>/givescrap [user_id] [amount]</code> - اعطای Scrap به کاربر\n"
+        f"▫️ <code>/broadcast [متن پیام]</code> - ارسال پیام همگانی به همه"
+    )
+
+    bot.send_message(message.chat.id, text, reply_markup=kb)
+
+# ------------------------------------------
+# 🚫 مسدودسازی و رفع مسدودسازی (BAN / UNBAN)
+# ------------------------------------------
+
+@bot.message_handler(commands=['ban'])
+def handle_ban_user(message):
+    if not is_admin(message.from_user.id):
         return
-
-    if step == "adm_weapon_damage" and is_admin(uid):
-        try:
-            name = step_data["name"]
-            price = int(step_data["price"])
-            damage = int(text)
-            conn = get_db()
-            c = conn.cursor()
-            c.execute("INSERT INTO weapons (name, price, damage, ammo_capacity, rarity, min_level, is_active) VALUES (?, ?, ?, 30, 'common', 1, 1)",
-                      (name, price, damage))
-            conn.commit()
-            conn.close()
-            bot.reply_to(message, f"✅ سلاح «{name}» اضافه شد.\nقیمت: {price} | قدرت: {damage}", reply_markup=main_menu(uid))
-        except:
-            bot.reply_to(message, "مقادیر عددی وارد کن.")
-        user_steps[uid] = {}
+    args = message.text.split()
+    if len(args) < 2:
+        bot.send_message(message.chat.id, "💡 راهنما: <code>/ban [user_id]</code>")
         return
-
-    # ========== ساخت زامبی ==========
-    if step == "adm_zombie_name" and is_admin(uid):
-        user_steps[uid] = {"step": "adm_zombie_hp", "name": text}
-        bot.reply_to(message, "HP زامبی:")
-        return
-
-    if step == "adm_zombie_hp" and is_admin(uid):
-        user_steps[uid] = {"step": "adm_zombie_damage", "name": step_data["name"], "hp": text}
-        bot.reply_to(message, "Damage زامبی:")
-        return
-
-    if step == "adm_zombie_damage" and is_admin(uid):
-        try:
-            name = step_data["name"]
-            hp = int(step_data["hp"])
-            damage = int(text)
-            conn = get_db()
-            c = conn.cursor()
-            c.execute("INSERT INTO zombies (name, hp, damage, defense, speed, xp_reward, scrap_reward, infection_chance, is_active) VALUES (?, ?, ?, 5, 5, 25, 20, 20, 1)",
-                      (name, hp, damage))
-            conn.commit()
-            conn.close()
-            bot.reply_to(message, f"✅ زامبی «{name}» اضافه شد.\nHP: {hp} | DMG: {damage}", reply_markup=main_menu(uid))
-        except:
-            bot.reply_to(message, "مقادیر عددی وارد کن.")
-        user_steps[uid] = {}
-        return
-
-    # ========== ساخت پناهگاه ==========
-    if step == "adm_shelter_name" and is_admin(uid):
-        user_steps[uid] = {"step": "adm_shelter_price", "name": text}
-        bot.reply_to(message, "قیمت پناهگاه:")
-        return
-
-    if step == "adm_shelter_price" and is_admin(uid):
-        try:
-            name = step_data["name"]
-            price = int(text)
-            conn = get_db()
-            c = conn.cursor()
-            c.execute("INSERT INTO shelters (name, price, defense, capacity, min_level, is_active) VALUES (?, ?, 20, 5, 1, 1)", (name, price))
-            conn.commit()
-            conn.close()
-            bot.reply_to(message, f"✅ پناهگاه «{name}» اضافه شد.", reply_markup=main_menu(uid))
-        except:
-            bot.reply_to(message, "قیمت عدد باشد.")
-        user_steps[uid] = {}
-        return
-
-    # ========== ساخت آیتم ==========
-    if step == "adm_item_name" and is_admin(uid):
-        user_steps[uid] = {"step": "adm_item_price", "name": text}
-        bot.reply_to(message, "قیمت آیتم:")
-        return
-
-    if step == "adm_item_price" and is_admin(uid):
-        try:
-            name = step_data["name"]
-            price = int(text)
-            conn = get_db()
-            c = conn.cursor()
-            c.execute("INSERT INTO items (name, price, item_type, rarity, max_stack, is_active) VALUES (?, ?, 'misc', 'common', 50, 1)", (name, price))
-            conn.commit()
-            conn.close()
-            bot.reply_to(message, f"✅ آیتم «{name}» اضافه شد.", reply_markup=main_menu(uid))
-        except:
-            bot.reply_to(message, "قیمت عدد باشد.")
-        user_steps[uid] = {}
-        return
-
-    # ========== ساخت منطقه ==========
-    if step == "adm_region_map" and is_admin(uid):
-        user_steps[uid] = {"step": "adm_region_name", "map_id": text}
-        bot.reply_to(message, "نام منطقه را بفرست:")
-        return
-
-    if step == "adm_region_name" and is_admin(uid):
-        try:
-            map_id = int(step_data["map_id"])
-            name = text
-            conn = get_db()
-            c = conn.cursor()
-            c.execute("INSERT INTO regions (map_id, name, danger_level, min_level, zombie_chance, loot_chance, is_active, created_at) VALUES (?, ?, 2, 1, 40, 50, 1, ?)",
-                      (map_id, name, datetime.now().strftime("%Y-%m-%d %H:%M")))
-            conn.commit()
-            conn.close()
-            bot.reply_to(message, f"✅ منطقه «{name}» به نقشه #{map_id} اضافه شد.", reply_markup=main_menu(uid))
-        except Exception as e:
-            bot.reply_to(message, f"خطا: {e}")
-        user_steps[uid] = {}
-        return
-
-    # ========== ساخت مأموریت ==========
-    if step == "adm_quest_name" and is_admin(uid):
-        user_steps[uid] = {"step": "adm_quest_desc", "name": text}
-        bot.reply_to(message, "توضیحات مأموریت:")
-        return
-
-    if step == "adm_quest_desc" and is_admin(uid):
-        try:
-            name = step_data["name"]
-            desc = text
-            conn = get_db()
-            c = conn.cursor()
-            c.execute("INSERT INTO quests (name, description, target_count, reward_xp, reward_scrap, is_active) VALUES (?, ?, 5, 50, 100, 1)", (name, desc))
-            conn.commit()
-            conn.close()
-            bot.reply_to(message, f"✅ مأموریت «{name}» اضافه شد.", reply_markup=main_menu(uid))
-        except:
-            bot.reply_to(message, "خطا در ساخت مأموریت.")
-        user_steps[uid] = {}
-        return
-
-    # ========== راهنما ==========
-    if step == "adm_help_title" and is_admin(uid):
-        user_steps[uid] = {"step": "adm_help_content", "title": text}
-        bot.reply_to(message, "متن راهنما را بفرست:")
-        return
-
-    if step == "adm_help_content" and is_admin(uid):
-        title = step_data["title"]
-        content = text
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("INSERT INTO help_sections (title, content, sort_order, is_active) VALUES (?, ?, 0, 1)", (title, content))
-        conn.commit()
-        conn.close()
-        bot.reply_to(message, f"✅ بخش راهنما «{title}» اضافه شد.", reply_markup=main_menu(uid))
-        user_steps[uid] = {}
-        return
-
-    # ========== پیام همگانی ==========
-    if step == "adm_broadcast" and is_admin(uid):
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("SELECT user_id FROM users")
-        users = c.fetchall()
-        conn.close()
-        ok = 0
-        for u in users:
-            try:
-                bot.send_message(u[0], text)
-                ok += 1
-            except:
-                pass
-        bot.reply_to(message, f"✅ پیام به {ok} کاربر ارسال شد.", reply_markup=main_menu(uid))
-        user_steps[uid] = {}
-        return
-
-    # ========== ساخت کلن توسط کاربر ==========
-    if step == "clan_name":
-        if len(text) < 3:
-            bot.reply_to(message, "نام کلن حداقل ۳ حرف باشد.")
-            return
-        conn = get_db()
-        c = conn.cursor()
-        try:
-            c.execute("INSERT INTO clans (name, owner_id, created_at) VALUES (?, ?, ?)",
-                      (text, uid, datetime.now().strftime("%Y-%m-%d %H:%M")))
-            clan_id = c.lastrowid
-            c.execute("INSERT INTO clan_members (clan_id, user_id, role, joined_at) VALUES (?, ?, 'owner', ?)",
-                      (clan_id, uid, datetime.now().strftime("%Y-%m-%d %H:%M")))
-            c.execute("UPDATE users SET clan_id=? WHERE user_id=?", (clan_id, uid))
-            conn.commit()
-            bot.reply_to(message, f"✅ کلن «{text}» ساخته شد و تو صاحبش هستی.", reply_markup=main_menu(uid))
-        except:
-            bot.reply_to(message, "این نام قبلاً استفاده شده.")
-        conn.close()
-        user_steps[uid] = {}
-        return
-
-# کال‌بک‌های سریع ادمین برای کاربر
-@bot.callback_query_handler(func=lambda call: call.data.startswith("adm_give_scrap_") or call.data.startswith("adm_take_scrap_") or call.data.startswith("adm_ban_") or call.data.startswith("adm_give_xp_"))
-def admin_user_actions(call):
-    uid = call.from_user.id
-    if not is_admin(uid) or call.message.chat.type != "private":
-        bot.answer_callback_query(call.id, "دسترسی نداری", show_alert=True)
-        return
-
-    parts = call.data.split("_")
-    action = parts[1]  # give / take / ban
-    target = int(parts[-1])
-
-    if action == "give" and "scrap" in call.data:
-        user_steps[uid] = {"step": "adm_set_scrap", "target": target, "mode": "add"}
-        bot.edit_message_text("مقدار Scrap برای اضافه کردن:", call.message.chat.id, call.message.message_id)
-    elif action == "take":
-        user_steps[uid] = {"step": "adm_set_scrap", "target": target, "mode": "remove"}
-        bot.edit_message_text("مقدار Scrap برای کم کردن:", call.message.chat.id, call.message.message_id)
-    elif action == "ban":
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("UPDATE users SET is_banned = 1 - is_banned WHERE user_id=?", (target,))
-        conn.commit()
-        c.execute("SELECT is_banned FROM users WHERE user_id=?", (target,))
-        status = c.fetchone()[0]
-        conn.close()
-        bot.answer_callback_query(call.id, "بن شد" if status else "آنبن شد", show_alert=True)
-    elif action == "give" and "xp" in call.data:
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("UPDATE users SET xp = xp + 100, level = level + 1 WHERE user_id=?", (target,))
-        conn.commit()
-        conn.close()
-        bot.answer_callback_query(call.id, "+1 Level و +100 XP داده شد", show_alert=True)
-
-    bot.answer_callback_query(call.id)
-
-# هندلر مقدار scrap
-@bot.message_handler(func=lambda m: user_steps.get(m.from_user.id, {}).get("step") == "adm_set_scrap")
-def set_scrap(message):
-    uid = message.from_user.id
-    if not is_admin(uid):
-        return
-    data = user_steps[uid]
     try:
-        amount = int(message.text.strip())
-        target = data["target"]
-        if data["mode"] == "add":
-            conn = get_db()
-            c = conn.cursor()
-            c.execute("UPDATE users SET scrap = scrap + ? WHERE user_id=?", (amount, target))
-            conn.commit()
-            conn.close()
-            bot.reply_to(message, f"✅ {amount:,} Scrap اضافه شد.")
-            try:
-                bot.send_message(target, f"💰 ادمین {amount:,} Scrap به حسابت اضافه کرد.")
-            except:
-                pass
-        else:
-            conn = get_db()
-            c = conn.cursor()
-            c.execute("UPDATE users SET scrap = MAX(0, scrap - ?) WHERE user_id=?", (amount, target))
-            conn.commit()
-            conn.close()
-            bot.reply_to(message, f"✅ {amount:,} Scrap کم شد.")
-    except:
-        bot.reply_to(message, "عدد معتبر بفرست.")
-    user_steps[uid] = {}
+        target_id = int(args[1])
+        conn = get_db()
+        conn.execute("UPDATE users SET is_banned = 1 WHERE user_id = ?", (target_id,))
+        conn.commit()
+        conn.close()
+        bot.send_message(message.chat.id, f"🚫 کاربر <code>{target_id}</code> با موفقیت بن شد.")
+    except ValueError:
+        bot.send_message(message.chat.id, "❌ آیدی عددی نامعتبر است.")
 
-# ---------- اجرا ----------
-print("🧟 ZOMBIE SURVIVAL روشن شد")
-print("=" * 40)
-print("توکن تنظیم شد")
-print("ادمین:", ADMIN_IDS)
-print("همه سیستم‌ها Dynamic هستند")
-print("پنل ادمین فقط در پیوی و فقط برای ادمین اصلی")
-print("=" * 40)
+@bot.message_handler(commands=['unban'])
+def handle_unban_user(message):
+    if not is_admin(message.from_user.id):
+        return
+    args = message.text.split()
+    if len(args) < 2:
+        bot.send_message(message.chat.id, "💡 راهنما: <code>/unban [user_id]</code>")
+        return
+    try:
+        target_id = int(args[1])
+        conn = get_db()
+        conn.execute("UPDATE users SET is_banned = 0 WHERE user_id = ?", (target_id,))
+        conn.commit()
+        conn.close()
+        bot.send_message(message.chat.id, f"✅ کاربر <code>{target_id}</code> آنبن شد.")
+    except ValueError:
+        bot.send_message(message.chat.id, "❌ آیدی عددی نامعتبر است.")
 
-bot.infinity_polling()
+# ------------------------------------------
+# 🪙 اعطای مستقیم Scrap به کاربر
+# ------------------------------------------
+
+@bot.message_handler(commands=['givescrap'])
+def handle_give_scrap(message):
+    if not is_admin(message.from_user.id):
+        return
+    args = message.text.split()
+    if len(args) < 3:
+        bot.send_message(message.chat.id, "💡 راهنما: <code>/givescrap [user_id] [amount]</code>")
+        return
+    try:
+        target_id = int(args[1])
+        amount = int(args[2])
+        conn = get_db()
+        conn.execute("UPDATE users SET scrap = scrap + ? WHERE user_id = ?", (amount, target_id))
+        conn.commit()
+        conn.close()
+        bot.send_message(message.chat.id, f"🪙 مقدار {amount} Scrap به حساب کاربر <code>{target_id}</code> اضافه شد.")
+    except ValueError:
+        bot.send_message(message.chat.id, "❌ ورودی‌های عددی نامعتبر است.")
+
+# ------------------------------------------
+# 📢 سیستم ارسال همگانی (BROADCAST SYSTEM)
+# ------------------------------------------
+
+@bot.message_handler(commands=['broadcast'])
+def handle_broadcast_command(message):
+    if not is_admin(message.from_user.id):
+        return
+    
+    text = message.text.replace("/broadcast", "").strip()
+    if not text:
+        bot.send_message(
+            message.chat.id, 
+            "💡 لطفاً متن اعلان همگانی را بعد از دستور وارد کنید.\n"
+            "مثال:\n<code>/broadcast توجه! سرورهای بازی آپدیت شدند.</code>"
+        )
+        return
+
+    conn = get_db()
+    users = conn.execute("SELECT user_id FROM users WHERE is_banned = 0").fetchall()
+    conn.close()
+
+    success = 0
+    failed = 0
+
+    bot.send_message(message.chat.id, f"⏳ در حال ارسال همگانی به {len(users)} کاربر...")
+
+    for u in users:
+        try:
+            bot.send_message(u['user_id'], f"📢 <b>اطلاعیه مدیریت:</b>\n\n{text}")
+            success += 1
+        except Exception:
+            failed += 1
+
+    bot.send_message(
+        message.chat.id,
+        f"📢 <b>نتیجه ارسال همگانی:</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"✅ با موفقیت ارسال شد: {success}\n"
+        f"❌ ناموفق (بلاک شده/شکست): {failed}"
+    )
+
+# ------------------------------------------
+# ⚙️ کال‌بک‌های دکمه‌های ادمین
+# ------------------------------------------
+
+@bot.callback_query_handler(func=lambda call: call.data == "adm_stats")
+def callback_admin_stats(call):
+    if not is_admin(call.from_user.id):
+        return
+    conn = get_db()
+    reg_count = conn.execute("SELECT COUNT(*) FROM regions").fetchone()[0]
+    wpn_count = conn.execute("SELECT COUNT(*) FROM weapons").fetchone()[0]
+    item_count = conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
+    quest_count = conn.execute("SELECT COUNT(*) FROM quests").fetchone()[0]
+    conn.close()
+
+    bot.answer_callback_query(
+        call.id,
+        f"📊 آمار اجزای بازی:\n"
+        f"مناطق: {reg_count} | سلاح‌ها: {wpn_count}\n"
+        f"آیتم‌ها: {item_count} | ماموریت‌ها: {quest_count}",
+        show_alert=True
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data == "adm_bc_help")
+def callback_admin_bc_help(call):
+    if not is_admin(call.from_user.id):
+        return
+    bot.answer_callback_query(
+        call.id,
+        "ارسال همگانی با دستور /broadcast [متن] انجام می‌شود.",
+        show_alert=True
+        )
+    # ==========================================
+# 🔄 مدیریت پیام‌های ناشناخته و حلقه اجرا (POLLING & MAIN)
+# ==========================================
+
+@bot.message_handler(func=lambda msg: True)
+def handle_unknown_messages(message):
+    user_id = message.from_user.id
+    user = get_or_create_user(user_id, message.from_user.username, message.from_user.first_name)
+
+    if user['is_banned']:
+        return
+
+    bot.send_message(
+        message.chat.id,
+        "❓ <b>دستور یا پیام وارد شده نامفهوم است!</b>\n\n"
+        "لطفاً از دکمه‌های کیبورد اصلی یا دستور /start استفاده کنید."
+    )
+
+if __name__ == '__main__':
+    print("🤖 ZOMBIE SURVIVAL BOT IS RUNNING...")
+    print("✅ دیتابیس آماده شد و ربات فعال است.")
+    
+    # حلقه مقاوم در برابر قطع و وصلی اینترنت (مناسب برای اجرا روی Pydroid 3)
+    import time
+    while True:
+        try:
+            bot.infinity_polling(timeout=15, long_polling_timeout=5)
+        except Exception as e:
+            print(f"⚠️ خطای اتصال شبکه: {e}")
+            time.sleep(3)
+    
