@@ -1,1095 +1,1312 @@
-# ==================== بخش ۱ از ۶ - Virtual Life کامل ====================
-import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
-import sqlite3
-import random
-import time
-from datetime import datetime, timedelta
+# ==============================================================================
+# 📄 bot.py - PART 1/8: COMPLETE CONFIGURATION, ENUMS & DATABASE MODELS
+# ==============================================================================
 
+import os
+import sys
+import math
+import json
+import random
+import logging
+import asyncio
+from datetime import datetime, timedelta
+from enum import Enum as PyEnum
+from typing import Optional, List, Dict, Any, Union, Callable, Awaitable
+
+from aiogram import Bot, Dispatcher, Router, F, BaseMiddleware
+from aiogram.types import (
+    Message, CallbackQuery, TelegramObject, User as TgUser,
+    ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton,
+    ReplyKeyboardRemove
+)
+from aiogram.filters import CommandStart, Command, CommandObject
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+
+from sqlalchemy import (
+    Column, BigInteger, String, Integer, Float, DateTime, ForeignKey,
+    Boolean, Text, Enum as SQLEnum, select, update, delete, func, and_, or_
+)
+from sqlalchemy.orm import declarative_base, relationship, selectinload
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+
+# ------------------------------------------------------------------------------
+# ⚙️ تنظیمات اصلی و متغیرهای محیطی
+# ------------------------------------------------------------------------------
 BOT_TOKEN = "8378922493:AAGOzhaN3eUcE53Yz49bo5UMR1rrI-MiRlM"
 ADMIN_IDS = [7530457395]
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///zombie_survival_v2.db")
 
-bot = telebot.TeleBot(BOT_TOKEN)
-user_steps = {}
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
 
-def get_db():
-    return sqlite3.connect("vlife.db", check_same_thread=False)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - [%(levelname)s] - %(name)s - %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+logger = logging.getLogger("ZombieSurvivalEngine")
 
-def init_db():
-    conn = get_db()
-    c = conn.cursor()
+Base = declarative_base()
+engine = create_async_engine(DATABASE_URL, echo=False, pool_pre_ping=True)
+AsyncSessionLocal = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
 
-    c.execute('''CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY,
-        username TEXT,
-        full_name TEXT,
-        money INTEGER DEFAULT 5000,
-        bank INTEGER DEFAULT 0,
-        level INTEGER DEFAULT 1,
-        xp INTEGER DEFAULT 0,
-        job TEXT DEFAULT NULL,
-        house TEXT DEFAULT 'اتاق کوچک',
-        car TEXT DEFAULT NULL,
-        energy INTEGER DEFAULT 100,
-        last_work REAL DEFAULT 0,
-        last_steal REAL DEFAULT 0,
-        partner_id INTEGER DEFAULT NULL,
-        missions_done INTEGER DEFAULT 0,
-        is_banned INTEGER DEFAULT 0,
-        joined_at TEXT,
-        last_active TEXT
-    )''')
 
-    c.execute('''CREATE TABLE IF NOT EXISTS jobs (
-        name TEXT PRIMARY KEY,
-        income INTEGER,
-        cooldown INTEGER,
-        min_level INTEGER,
-        emoji TEXT DEFAULT '💼'
-    )''')
+# ------------------------------------------------------------------------------
+# 📊 ENUMها و ساختارهای داده
+# ------------------------------------------------------------------------------
+class ItemType(str, PyEnum):
+    WEAPON = "WEAPON"
+    ARMOR = "ARMOR"
+    FOOD = "FOOD"
+    DRINK = "DRINK"
+    MEDICINE = "MEDICINE"
+    MATERIAL = "MATERIAL"
+    AMMO = "AMMO"
+    SPECIAL = "SPECIAL"
 
-    c.execute('''CREATE TABLE IF NOT EXISTS houses (
-        name TEXT PRIMARY KEY,
-        price INTEGER,
-        bonus INTEGER DEFAULT 0,
-        emoji TEXT DEFAULT '🏠'
-    )''')
 
-    c.execute('''CREATE TABLE IF NOT EXISTS cars (
-        name TEXT PRIMARY KEY,
-        price INTEGER,
-        bonus INTEGER DEFAULT 0,
-        emoji TEXT DEFAULT '🚗'
-    )''')
+class Rarity(str, PyEnum):
+    COMMON = "عادی"
+    UNCOMMON = "غیرعادی"
+    RARE = "کمیاب"
+    EPIC = "حماسی"
+    LEGENDARY = "افسانه‌ای"
 
-    c.execute('''CREATE TABLE IF NOT EXISTS missions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        title TEXT,
-        target INTEGER,
-        progress INTEGER DEFAULT 0,
-        reward_money INTEGER,
-        reward_xp INTEGER,
-        done INTEGER DEFAULT 0
-    )''')
 
-    # شغل‌های پیش‌فرض
-    jobs = [
-        ("کارگر", 90, 55, 1, "👷"),
-        ("فست‌فود", 140, 65, 2, "🍔"),
-        ("راننده", 200, 75, 4, "🚕"),
-        ("برنامه‌نویس", 320, 85, 7, "💻"),
-        ("پزشک", 480, 95, 10, "👨‍⚕️"),
-        ("مدیر", 750, 110, 15, "👨‍💼"),
+class DangerLevel(str, PyEnum):
+    SAFE = "🟢 امن"
+    LOW = "🟡 کم‌خطر"
+    MEDIUM = "🟠 خطر متوسط"
+    HIGH = "🔴 پرخطر"
+    DEADLY = "💀 مرگبار"
+
+
+class QuestType(str, PyEnum):
+    KILL_ZOMBIES = "KILL_ZOMBIES"
+    SCAVENGE = "SCAVENGE"
+    CRAFT = "CRAFT"
+    UPGRADE_SHELTER = "UPGRADE_SHELTER"
+
+
+class ClanRole(str, PyEnum):
+    LEADER = "رهبر"
+    OFFICER = "ارشد"
+    MEMBER = "عضو"
+
+
+# ------------------------------------------------------------------------------
+# 🗄️ مدل‌های دیتابیس (DATABASE MODELS)
+# ------------------------------------------------------------------------------
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    telegram_id = Column(BigInteger, unique=True, nullable=False, index=True)
+    username = Column(String(64), nullable=True)
+    display_name = Column(String(64), nullable=False)
+
+    # علائم حیاتی و سلامت
+    hp = Column(Integer, default=100)
+    max_hp = Column(Integer, default=100)
+    hunger = Column(Integer, default=100)
+    thirst = Column(Integer, default=100)
+    energy = Column(Integer, default=100)
+    sanity = Column(Integer, default=100)
+    infection = Column(Integer, default=0)
+    radiation = Column(Integer, default=0)
+
+    # اقتصاد، سطح و آمار
+    scrap = Column(Integer, default=250)
+    gold = Column(Integer, default=10)
+    level = Column(Integer, default=1)
+    xp = Column(Integer, default=0)
+    zombie_kills = Column(Integer, default=0)
+    boss_kills = Column(Integer, default=0)
+    deaths = Column(Integer, default=0)
+    successful_scavenges = Column(Integer, default=0)
+
+    # کلن و پناهگاه
+    clan_id = Column(Integer, ForeignKey("clans.id", ondelete="SET NULL"), nullable=True)
+    clan_role = Column(String(20), default=ClanRole.MEMBER.value)
+
+    # زمان‌بندی‌ها
+    last_active = Column(DateTime, default=datetime.utcnow)
+    last_scavenge = Column(DateTime, default=datetime.utcnow)
+    last_daily = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # روابط
+    inventory = relationship("Inventory", back_populates="user", cascade="all, delete-orphan")
+    shelter = relationship("Shelter", back_populates="user", uselist=False, cascade="all, delete-orphan")
+    user_quests = relationship("UserQuest", back_populates="user", cascade="all, delete-orphan")
+    clan = relationship("Clan", back_populates="members")
+
+
+class Item(Base):
+    __tablename__ = "items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(64), unique=True, nullable=False)
+    description = Column(Text, nullable=False)
+    item_type = Column(String(32), nullable=False)
+    rarity = Column(String(32), default=Rarity.COMMON.value)
+
+    # ویژگی‌های رزمی و مصرفی
+    attack_power = Column(Integer, default=0)
+    defense_power = Column(Integer, default=0)
+    heal_hp = Column(Integer, default=0)
+    restore_hunger = Column(Integer, default=0)
+    restore_thirst = Column(Integer, default=0)
+    restore_energy = Column(Integer, default=0)
+    reduce_infection = Column(Integer, default=0)
+
+    # ارزش مالی
+    buy_price = Column(Integer, default=10)
+    sell_price = Column(Integer, default=5)
+
+
+class Inventory(Base):
+    __tablename__ = "inventories"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    item_id = Column(Integer, ForeignKey("items.id", ondelete="CASCADE"), nullable=False)
+    quantity = Column(Integer, default=1)
+    is_equipped = Column(Boolean, default=False)
+
+    user = relationship("User", back_populates="inventory")
+    item = relationship("Item")
+
+
+class Location(Base):
+    __tablename__ = "locations"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(64), nullable=False)
+    description = Column(Text, nullable=False)
+    danger_level = Column(String(32), default=DangerLevel.LOW.value)
+    min_level = Column(Integer, default=1)
+    energy_cost = Column(Integer, default=15)
+    scrap_multiplier = Column(Float, default=1.0)
+
+
+class Zombie(Base):
+    __tablename__ = "zombies"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(64), nullable=False)
+    hp = Column(Integer, default=50)
+    max_hp = Column(Integer, default=50)
+    attack = Column(Integer, default=10)
+    defense = Column(Integer, default=2)
+    xp_reward = Column(Integer, default=20)
+    scrap_reward = Column(Integer, default=30)
+    is_boss = Column(Boolean, default=False)
+
+
+class Shelter(Base):
+    __tablename__ = "shelters"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, unique=True)
+    level = Column(Integer, default=1)
+    defense = Column(Integer, default=50)
+    water_collector_level = Column(Integer, default=0)
+    food_farm_level = Column(Integer, default=0)
+    medical_lab_level = Column(Integer, default=0)
+    last_harvest = Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User", back_populates="shelter")
+
+
+class Quest(Base):
+    __tablename__ = "quests"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    title = Column(String(128), nullable=False)
+    description = Column(Text, nullable=False)
+    quest_type = Column(String(32), nullable=False)
+    target_amount = Column(Integer, default=1)
+    reward_scrap = Column(Integer, default=100)
+    reward_xp = Column(Integer, default=50)
+
+
+class UserQuest(Base):
+    __tablename__ = "user_quests"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    quest_id = Column(Integer, ForeignKey("quests.id", ondelete="CASCADE"), nullable=False)
+    current_amount = Column(Integer, default=0)
+    completed = Column(Boolean, default=False)
+    reward_claimed = Column(Boolean, default=False)
+
+    user = relationship("User", back_populates="user_quests")
+    quest = relationship("Quest")
+
+
+class Clan(Base):
+    __tablename__ = "clans"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(64), unique=True, nullable=False)
+    tag = Column(String(10), unique=True, nullable=False)
+    description = Column(Text, nullable=True)
+    leader_id = Column(BigInteger, nullable=False)
+    level = Column(Integer, default=1)
+    treasury_scrap = Column(Integer, default=0)
+    max_members = Column(Integer, default=10)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    members = relationship("User", back_populates="clan")
+    # ==============================================================================
+# 📄 bot.py - PART 2/8: FSM STATES, KEYBOARDS & MIDDLEWARES
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 🌀 FSM STATES (حالت‌های گفتگو)
+# ------------------------------------------------------------------------------
+class AdminStates(StatesGroup):
+    waiting_for_broadcast_text = State()
+    waiting_for_user_id_reward = State()
+    waiting_for_reward_amount = State()
+
+class ClanStates(StatesGroup):
+    waiting_for_clan_name = State()
+    waiting_for_clan_tag = State()
+    waiting_for_clan_description = State()
+
+class TradeStates(StatesGroup):
+    waiting_for_trade_user = State()
+    waiting_for_trade_item = State()
+
+# ------------------------------------------------------------------------------
+# ⌨️ KEYBOARDS (کیبوردهای کامل ربات)
+# ------------------------------------------------------------------------------
+def get_main_menu_keyboard() -> ReplyKeyboardMarkup:
+    keyboard = [
+        [KeyboardButton(text="👤 پروفایل"), KeyboardButton(text="🗺️ کاوش و مناطق")],
+        [KeyboardButton(text="🎒 کوله‌پشتی"), KeyboardButton(text="⚔️ مبارزه و شکار")],
+        [KeyboardButton(text="🏠 پناهگاه"), KeyboardButton(text="🛠️ ساخت و ساز")],
+        [KeyboardButton(text="📜 مأموریت‌ها"), KeyboardButton(text="👥 کلن و اتحاد")],
+        [KeyboardButton(text="🛒 فروشگاه"), KeyboardButton(text="📖 راهنما و پشتیبانی")]
     ]
-    for j in jobs:
-        c.execute("INSERT OR IGNORE INTO jobs VALUES (?,?,?,?,?)", j)
+    return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
-    # خانه‌ها
-    houses = [
-        ("اتاق کوچک", 0, 0, "🏚"),
-        ("خانه معمولی", 18000, 6, "🏠"),
-        ("ویلای لوکس", 55000, 15, "🏡"),
-        ("عمارت", 160000, 30, "🏰"),
-        ("پنت‌هاوس", 420000, 50, "🏙"),
-    ]
-    for h in houses:
-        c.execute("INSERT OR IGNORE INTO houses VALUES (?,?,?,?)", h)
-
-    # ماشین‌ها
-    cars = [
-        ("دوچرخه", 2500, 3, "🚲"),
-        ("موتور", 9000, 6, "🛵"),
-        ("ماشین معمولی", 28000, 12, "🚗"),
-        ("ماشین اسپرت", 85000, 22, "🏎"),
-        ("ماشین لوکس", 210000, 35, "🚘"),
-        ("ماشین افسانه‌ای", 520000, 60, "🏆"),
-    ]
-    for car in cars:
-        c.execute("INSERT OR IGNORE INTO cars VALUES (?,?,?,?)", car)
-
-    conn.commit()
-    conn.close()
-
-init_db()
-
-def is_admin(uid):
-    return uid in ADMIN_IDS
-
-def ensure_user(user):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT user_id FROM users WHERE user_id=?", (user.id,))
-    if not c.fetchone():
-        c.execute("INSERT INTO users (user_id, username, full_name, money, bank, level, xp, house, energy, joined_at, last_active) VALUES (?,?,?,5000,0,1,0,'اتاق کوچک',100,?,?)",
-                  (user.id, user.username or "", user.full_name or "", datetime.now().strftime("%Y-%m-%d %H:%M"), datetime.now().strftime("%Y-%m-%d %H:%M")))
-    else:
-        c.execute("UPDATE users SET username=?, full_name=?, last_active=? WHERE user_id=?",
-                  (user.username or "", user.full_name or "", datetime.now().strftime("%Y-%m-%d %H:%M"), user.id))
-    conn.commit()
-    conn.close()
-
-def get_user(uid):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT * FROM users WHERE user_id=?", (uid,))
-    row = c.fetchone()
-    conn.close()
-    return row
-
-def find_user(text):
-    """پیدا کردن کاربر با آیدی یا یوزرنیم"""
-    text = text.strip().lstrip("@")
-    conn = get_db()
-    c = conn.cursor()
-    if text.isdigit():
-        c.execute("SELECT * FROM users WHERE user_id=?", (int(text),))
-    else:
-        c.execute("SELECT * FROM users WHERE username=?", (text,))
-    row = c.fetchone()
-    conn.close()
-    return row
-
-def add_money(uid, amount):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("UPDATE users SET money = money + ? WHERE user_id=?", (amount, uid))
-    conn.commit()
-    conn.close()
-
-def add_xp(uid, amount):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT level, xp FROM users WHERE user_id=?", (uid,))
-    level, xp = c.fetchone()
-    xp += amount
-    needed = level * 100
-    leveled = False
-    while xp >= needed:
-        xp -= needed
-        level += 1
-        needed = level * 100
-        leveled = True
-        c.execute("UPDATE users SET money = money + ? WHERE user_id=?", (level * 600, uid))
-    c.execute("UPDATE users SET level=?, xp=? WHERE user_id=?", (level, xp, uid))
-    conn.commit()
-    conn.close()
-    return leveled, level
-
-print("✅ بخش ۱ آماده شد")
-# ==================== بخش ۲ از ۶ ====================
-# منو + /start + پروفایل + کار + راهنما
-
-def main_menu(uid):
-    m = InlineKeyboardMarkup(row_width=2)
-    m.add(
-        InlineKeyboardButton("👤 پروفایل من", callback_data="profile"),
-        InlineKeyboardButton("💼 کار کردن", callback_data="work")
-    )
-    m.add(
-        InlineKeyboardButton("🛒 فروشگاه و املاک", callback_data="shop"),
-        InlineKeyboardButton("🦹 دزدی و جرم", callback_data="crime")
-    )
-    m.add(
-        InlineKeyboardButton("🎯 مأموریت‌ها", callback_data="missions"),
-        InlineKeyboardButton("💍 ازدواج", callback_data="marriage")
-    )
-    m.add(
-        InlineKeyboardButton("💰 کیف پول و انتقال", callback_data="wallet"),
-        InlineKeyboardButton("🏦 بانک", callback_data="bank")
-    )
-    m.add(
-        InlineKeyboardButton("🏆 رتبه‌بندی", callback_data="rank"),
-        InlineKeyboardButton("🎁 دعوت دوستان", callback_data="invite")
-    )
-    m.add(InlineKeyboardButton("📖 راهنما و دستورات", callback_data="help"))
-    if is_admin(uid):
-        m.add(InlineKeyboardButton("👑 پنل ادمین", callback_data="admin"))
-    return m
-
-def help_text():
-    return """
-📖 **راهنمای Virtual Life**
-
-🎮 **دستورات:**
-/start - شروع بازی
-/profile - پروفایل
-/work - کار کردن
-/help - راهنما
-
-📌 **بخش‌ها:**
-• 👤 پروفایل من
-• 💼 کار کردن (پول + XP)
-• 🛒 فروشگاه و املاک (خانه، ماشین، شغل)
-• 🦹 دزدی و جرم (چندمرحله‌ای)
-• 🎯 مأموریت‌های روزانه
-• 💍 ازدواج (با درخواست و قبول)
-• 💰 انتقال پول (با آیدی / یوزرنیم / ریپلای)
-• 🏦 بانک
-• 🏆 رتبه‌بندی
-• 🎁 دعوت دوستان
-
-⚠️ انرژی و کول‌داون داری. مراقب دزدی باش!
-"""
-
-@bot.message_handler(commands=['start'])
-def start(message):
-    ensure_user(message.from_user)
-    uid = message.from_user.id
-    u = get_user(uid)
-    if u and u[15] == 1:
-        bot.reply_to(message, "🚫 حساب شما مسدود است.")
-        return
-
-    # اگر با لینک دعوت اومده
-    args = message.text.split()
-    if len(args) > 1 and args[1].isdigit():
-        inviter = int(args[1])
-        if inviter != uid and get_user(inviter):
-            add_money(inviter, 2000)
-            add_money(uid, 1000)
-            try:
-                bot.send_message(inviter, "🎁 یک نفر با لینک تو وارد شد! +۲۰۰۰ تومان")
-            except:
-                pass
-
-    text = f"""
-🌟 به **Virtual Life** خوش اومدی!
-
-پول اولیه: **{u[3]:,}** تومان
-لول: **{u[5]}**
-خانه: **{u[8]}**
-
-زندگی مجازیت رو بساز 🚀
-"""
-    bot.reply_to(message, text, reply_markup=main_menu(uid), parse_mode="Markdown")
-
-@bot.message_handler(commands=['help', 'راهنما', 'دستورات'])
-def help_cmd(message):
-    ensure_user(message.from_user)
-    bot.reply_to(message, help_text(), parse_mode="Markdown", reply_markup=main_menu(message.from_user.id))
-
-@bot.message_handler(commands=['profile'])
-def profile_cmd(message):
-    ensure_user(message.from_user)
-    show_profile(message.from_user.id, message.chat.id)
-
-@bot.message_handler(commands=['work'])
-def work_cmd(message):
-    ensure_user(message.from_user)
-    do_work(message.from_user.id, message.chat.id)
-
-def show_profile(uid, chat_id):
-    u = get_user(uid)
-    if not u:
-        return
-    job = u[7] or "بیکار"
-    car = u[9] or "ندارد"
-    partner = "ندارد"
-    if u[13]:
-        p = get_user(u[13])
-        partner = (p[2] or p[1] or str(u[13])) if p else str(u[13])
-
-    text = f"""
-👤 **پروفایل شما**
-
-🆔 `{u[0]}`
-👤 {u[2]}
-💰 پول نقد: **{u[3]:,}** تومان
-🏦 بانک: **{u[4]:,}** تومان
-⭐ لول: **{u[5]}** | XP: {u[6]}/{u[5]*100}
-💼 شغل: {job}
-🏠 خانه: {u[8]}
-🚗 ماشین: {car}
-⚡ انرژی: {u[10]}/100
-💍 همسر: {partner}
-🎯 مأموریت‌های انجام‌شده: {u[14]}
-"""
-    bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=main_menu(uid))
-
-def do_work(uid, chat_id):
-    u = get_user(uid)
-    if not u:
-        return
-    if not u[7]:
-        bot.send_message(chat_id, "اول باید شغل انتخاب کنی! برو فروشگاه.", reply_markup=main_menu(uid))
-        return
-
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT income, cooldown, min_level FROM jobs WHERE name=?", (u[7],))
-    job = c.fetchone()
-    if not job:
-        bot.send_message(chat_id, "شغل نامعتبر.", reply_markup=main_menu(uid))
-        conn.close()
-        return
-
-    now = time.time()
-    if now - u[11] < job[1]:
-        remain = int(job[1] - (now - u[11]))
-        bot.send_message(chat_id, f"⏳ {remain} ثانیه تا کار بعدی باقی مونده.", reply_markup=main_menu(uid))
-        conn.close()
-        return
-
-    if u[10] < 10:
-        bot.send_message(chat_id, "⚡ انرژی کافی نداری!", reply_markup=main_menu(uid))
-        conn.close()
-        return
-
-    income = job[0] + (u[5] * 15)
-
-    c.execute("SELECT bonus FROM houses WHERE name=?", (u[8],))
-    h = c.fetchone()
-    c.execute("SELECT bonus FROM cars WHERE name=?", (u[9],))
-    car = c.fetchone()
-    bonus = (h[0] if h else 0) + (car[0] if car else 0)
-    income = int(income * (1 + bonus / 100))
-
-    c.execute("UPDATE users SET money = money + ?, last_work=?, energy=? WHERE user_id=?",
-              (income, now, max(0, u[10] - 8), uid))
-    conn.commit()
-    conn.close()
-
-    leveled, new_lvl = add_xp(uid, 15 + u[5])
-
-    text = f"💼 کار انجام شد!\n+**{income:,}** تومان\n⚡ انرژی: {max(0, u[10]-8)}/100"
-    if leveled:
-        text += f"\n\n🎉 **لول‌آپ!** حالا لول {new_lvl} هستی!"
-    bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=main_menu(uid))
-
-    if random.randint(1, 100) <= 12:
-        random_event(uid, chat_id)
-
-def random_event(uid, chat_id):
-    events = [
-        (-random.randint(1000, 5000), "🔫 دزدیدنت! پول از دست دادی."),
-        (random.randint(2000, 7000), "🎁 جایزه تصادفی گرفتی!"),
-        (random.randint(800, 3000), "💵 یه کیف پول پیدا کردی!"),
-        (-random.randint(800, 3500), "👮 جریمه شدی!"),
-    ]
-    change, msg = random.choice(events)
-    add_money(uid, change)
-    bot.send_message(chat_id, f"⚡ **اتفاق تصادفی**\n{msg}\nتغییر: {change:,} تومان")
-
-print("✅ بخش ۲ آماده شد")
-# ==================== بخش ۳ از ۶ ====================
-# کال‌بک‌های اصلی
-
-@bot.callback_query_handler(func=lambda call: True)
-def callbacks(call):
-    uid = call.from_user.id
-    ensure_user(call.from_user)
-    data = call.data
-
-    if data in ["back_main", "back"]:
-        bot.edit_message_text("منوی اصلی:", call.message.chat.id, call.message.message_id, reply_markup=main_menu(uid))
-
-    elif data == "profile":
-        show_profile(uid, call.message.chat.id)
-
-    elif data == "work":
-        do_work(uid, call.message.chat.id)
-
-    elif data == "help":
-        bot.edit_message_text(help_text(), call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=main_menu(uid))
-
-    # ---------- فروشگاه ----------
-    elif data == "shop":
-        mk = InlineKeyboardMarkup(row_width=1)
-        mk.add(
-            InlineKeyboardButton("🏠 خرید خانه", callback_data="buy_house"),
-            InlineKeyboardButton("🚗 خرید ماشین", callback_data="buy_car"),
-            InlineKeyboardButton("💼 انتخاب شغل", callback_data="choose_job"),
-            InlineKeyboardButton("🔙 بازگشت", callback_data="back_main")
-        )
-        bot.edit_message_text("🛒 فروشگاه و املاک:", call.message.chat.id, call.message.message_id, reply_markup=mk)
-
-    elif data == "buy_house":
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("SELECT name, price, emoji FROM houses ORDER BY price")
-        houses = c.fetchall()
-        conn.close()
-        mk = InlineKeyboardMarkup(row_width=1)
-        for h in houses:
-            mk.add(InlineKeyboardButton(f"{h[2]} {h[0]} — {h[1]:,} تومان", callback_data=f"h_{h[0]}"))
-        mk.add(InlineKeyboardButton("🔙", callback_data="shop"))
-        bot.edit_message_text("خانه‌ها:", call.message.chat.id, call.message.message_id, reply_markup=mk)
-
-    elif data.startswith("h_"):
-        name = data[2:]
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("SELECT price FROM houses WHERE name=?", (name,))
-        row = c.fetchone()
-        u = get_user(uid)
-        if row and u[3] >= row[0]:
-            c.execute("UPDATE users SET money = money - ?, house = ? WHERE user_id=?", (row[0], name, uid))
-            conn.commit()
-            bot.answer_callback_query(call.id, f"✅ {name} خریده شد!", show_alert=True)
-            show_profile(uid, call.message.chat.id)
-        else:
-            bot.answer_callback_query(call.id, "پول کافی نداری!", show_alert=True)
-        conn.close()
-
-    elif data == "buy_car":
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("SELECT name, price, emoji FROM cars ORDER BY price")
-        cars = c.fetchall()
-        conn.close()
-        mk = InlineKeyboardMarkup(row_width=1)
-        for car in cars:
-            mk.add(InlineKeyboardButton(f"{car[2]} {car[0]} — {car[1]:,} تومان", callback_data=f"c_{car[0]}"))
-        mk.add(InlineKeyboardButton("🔙", callback_data="shop"))
-        bot.edit_message_text("ماشین‌ها:", call.message.chat.id, call.message.message_id, reply_markup=mk)
-
-    elif data.startswith("c_"):
-        name = data[2:]
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("SELECT price FROM cars WHERE name=?", (name,))
-        row = c.fetchone()
-        u = get_user(uid)
-        if row and u[3] >= row[0]:
-            c.execute("UPDATE users SET money = money - ?, car = ? WHERE user_id=?", (row[0], name, uid))
-            conn.commit()
-            bot.answer_callback_query(call.id, f"✅ {name} خریده شد!", show_alert=True)
-            show_profile(uid, call.message.chat.id)
-        else:
-            bot.answer_callback_query(call.id, "پول کافی نداری!", show_alert=True)
-        conn.close()
-
-    elif data == "choose_job":
-        u = get_user(uid)
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("SELECT name, income, min_level, emoji FROM jobs ORDER BY min_level")
-        jobs = c.fetchall()
-        conn.close()
-        mk = InlineKeyboardMarkup(row_width=1)
-        for j in jobs:
-            lock = "" if u[5] >= j[2] else f" 🔒 لول {j[2]}"
-            mk.add(InlineKeyboardButton(f"{j[3]} {j[0]} ({j[1]}){lock}", callback_data=f"j_{j[0]}"))
-        mk.add(InlineKeyboardButton("🔙", callback_data="shop"))
-        bot.edit_message_text("شغل‌ها:", call.message.chat.id, call.message.message_id, reply_markup=mk)
-
-    elif data.startswith("j_"):
-        name = data[2:]
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("SELECT min_level FROM jobs WHERE name=?", (name,))
-        row = c.fetchone()
-        u = get_user(uid)
-        if row and u[5] >= row[0]:
-            c.execute("UPDATE users SET job=? WHERE user_id=?", (name, uid))
-            conn.commit()
-            bot.answer_callback_query(call.id, f"✅ شغل {name} انتخاب شد", show_alert=True)
-            show_profile(uid, call.message.chat.id)
-        else:
-            bot.answer_callback_query(call.id, "لولت کافی نیست!", show_alert=True)
-        conn.close()
-
-    # ---------- دزدی ----------
-    elif data == "crime":
-        mk = InlineKeyboardMarkup(row_width=1)
-        mk.add(
-            InlineKeyboardButton("🔫 شروع دزدی", callback_data="start_crime"),
-            InlineKeyboardButton("🔙 بازگشت", callback_data="back_main")
-        )
-        bot.edit_message_text("🦹 دزدی و جرم\nشانس و ریسک داره!", call.message.chat.id, call.message.message_id, reply_markup=mk)
-
-    elif data == "start_crime":
-        user_steps[uid] = {"step": "crime_plan"}
-        bot.edit_message_text("نقشه‌ت رو بنویس (مثلاً: بانک، خونه لوکس، ماشین گران...):", call.message.chat.id, call.message.message_id)
-
-    # ---------- بانک ----------
-    elif data == "bank":
-        u = get_user(uid)
-        mk = InlineKeyboardMarkup(row_width=1)
-        mk.add(
-            InlineKeyboardButton("📥 واریز به بانک", callback_data="bank_in"),
-            InlineKeyboardButton("📤 برداشت از بانک", callback_data="bank_out"),
-            InlineKeyboardButton("🔙", callback_data="back_main")
-        )
-        bot.edit_message_text(f"🏦 بانک\n\nپول نقد: {u[3]:,}\nموجودی بانک: {u[4]:,}", call.message.chat.id, call.message.message_id, reply_markup=mk)
-
-    elif data == "bank_in":
-        user_steps[uid] = {"step": "bank_in"}
-        bot.edit_message_text("مبلغ واریز را بفرست:", call.message.chat.id, call.message.message_id)
-
-    elif data == "bank_out":
-        user_steps[uid] = {"step": "bank_out"}
-        bot.edit_message_text("مبلغ برداشت را بفرست:", call.message.chat.id, call.message.message_id)
-
-    # ---------- رتبه‌بندی ----------
-    elif data == "rank":
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("SELECT full_name, username, money+bank FROM users ORDER BY money+bank DESC LIMIT 10")
-        rich = c.fetchall()
-        c.execute("SELECT full_name, username, level FROM users ORDER BY level DESC, xp DESC LIMIT 10")
-        top = c.fetchall()
-        conn.close()
-
-        text = "🏆 **ثروتمندترین‌ها**\n\n"
-        for i, r in enumerate(rich, 1):
-            name = r[0] or (f"@{r[1]}" if r[1] else "ناشناس")
-            text += f"{i}. {name} — {r[2]:,}\n"
-        text += "\n⭐ **بالاترین لول**\n\n"
-        for i, r in enumerate(top, 1):
-            name = r[0] or (f"@{r[1]}" if r[1] else "ناشناس")
-            text += f"{i}. {name} — لول {r[2]}\n"
-        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=main_menu(uid))
-
-    # ---------- دعوت ----------
-    elif data == "invite":
-        bot_username = bot.get_me().username
-        link = f"https://t.me/{bot_username}?start={uid}"
-        bot.edit_message_text(f"🎁 لینک دعوت شما:\n`{link}`\n\nبا دعوت هر نفر جایزه می‌گیری!", call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=main_menu(uid))
-
-    # ---------- ازدواج ----------
-    elif data == "marriage":
-        u = get_user(uid)
-        if u[13]:
-            bot.answer_callback_query(call.id, "قبلاً ازدواج کردی!", show_alert=True)
-            return
-        user_steps[uid] = {"step": "marry"}
-        bot.edit_message_text("آیدی عددی یا یوزرنیم طرف مقابل را بفرست\n(یا روی پیامش ریپلای کن و بنویس: ازدواج)", call.message.chat.id, call.message.message_id)
-
-    # ---------- کیف پول ----------
-    elif data == "wallet":
-        user_steps[uid] = {"step": "transfer"}
-        bot.edit_message_text("آیدی / یوزرنیم گیرنده را بفرست\n(یا روی پیامش ریپلای کن و بنویس: انتقال 5000)", call.message.chat.id, call.message.message_id)
-
-    # ---------- مأموریت ----------
-    elif data == "missions":
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("SELECT id, title, target, progress, reward_money, reward_xp, done FROM missions WHERE user_id=? AND done=0", (uid,))
-        missions = c.fetchall()
-        if not missions:
-            # ساخت مأموریت جدید
-            titles = [
-                ("۵ بار کار کن", 5, 3000, 40),
-                ("۲ بار دزدی موفق", 2, 5000, 60),
-                ("۱۰ بار کار کن", 10, 8000, 100),
+def get_combat_keyboard(zombie_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="⚔️ حمله مستقیم", callback_data=f"combat:attack:{zombie_id}"),
+                InlineKeyboardButton(text="🛡️ دفاع و سنگر", callback_data=f"combat:defend:{zombie_id}")
+            ],
+            [
+                InlineKeyboardButton(text="🧪 مصرف دارو", callback_data=f"combat:heal:{zombie_id}"),
+                InlineKeyboardButton(text="🏃 فرار تاکتیکی", callback_data=f"combat:flee:{zombie_id}")
             ]
-            t = random.choice(titles)
-            c.execute("INSERT INTO missions (user_id, title, target, progress, reward_money, reward_xp) VALUES (?,?,?,0,?,?)",
-                      (uid, t[0], t[1], t[2], t[3]))
-            conn.commit()
-            missions = c.execute("SELECT id, title, target, progress, reward_money, reward_xp, done FROM missions WHERE user_id=? AND done=0", (uid,)).fetchall()
-        conn.close()
+        ]
+    )
 
-        text = "🎯 **مأموریت‌های فعال:**\n\n"
-        for m in missions:
-            text += f"• {m[1]}\nپیشرفت: {m[3]}/{m[2]}\nجایزه: {m[4]:,} تومان + {m[5]} XP\n\n"
-        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=main_menu(uid))
-
-    # ---------- پنل ادمین ----------
-    elif data == "admin" and is_admin(uid):
-        mk = InlineKeyboardMarkup(row_width=2)
-        mk.add(
-            InlineKeyboardButton("👥 لیست کاربران", callback_data="adm_users"),
-            InlineKeyboardButton("💰 تغییر پول", callback_data="adm_money")
-        )
-        mk.add(
-            InlineKeyboardButton("🏠 ساخت خانه", callback_data="adm_house"),
-            InlineKeyboardButton("🚗 ساخت ماشین", callback_data="adm_car")
-        )
-        mk.add(
-            InlineKeyboardButton("💼 ساخت شغل", callback_data="adm_job"),
-            InlineKeyboardButton("📢 همگانی", callback_data="adm_broad")
-        )
-        mk.add(
-            InlineKeyboardButton("🔍 جستجوی کاربر", callback_data="adm_search"),
-            InlineKeyboardButton("🔙", callback_data="back_main")
-        )
-        bot.edit_message_text("👑 پنل ادمین:", call.message.chat.id, call.message.message_id, reply_markup=mk)
-
-    elif data == "adm_users" and is_admin(uid):
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("SELECT user_id, username, full_name, money, bank, level FROM users ORDER BY money+bank DESC LIMIT 15")
-        rows = c.fetchall()
-        conn.close()
-        text = "👥 کاربران (یوزرنیم + پول + بانک):\n\n"
-        for r in rows:
-            text += f"`{r[0]}` @{r[1] or '-'}\n{r[2] or '-'}\nپول: {r[3]:,} | بانک: {r[4]:,} | لول: {r[5]}\n──────\n"
-        bot.send_message(call.message.chat.id, text, parse_mode="Markdown")
-
-    elif data == "adm_money" and is_admin(uid):
-        user_steps[uid] = {"step": "adm_money"}
-        bot.edit_message_text("آیدی یا یوزرنیم کاربر را بفرست:", call.message.chat.id, call.message.message_id)
-
-    elif data == "adm_house" and is_admin(uid):
-        user_steps[uid] = {"step": "adm_house_name"}
-        bot.edit_message_text("نام خانه جدید:", call.message.chat.id, call.message.message_id)
-
-    elif data == "adm_car" and is_admin(uid):
-        user_steps[uid] = {"step": "adm_car_name"}
-        bot.edit_message_text("نام ماشین جدید:", call.message.chat.id, call.message.message_id)
-
-    elif data == "adm_job" and is_admin(uid):
-        user_steps[uid] = {"step": "adm_job_name"}
-        bot.edit_message_text("نام شغل جدید:", call.message.chat.id, call.message.message_id)
-
-    elif data == "adm_broad" and is_admin(uid):
-        user_steps[uid] = {"step": "broadcast"}
-        bot.edit_message_text("پیام همگانی را بفرست:", call.message.chat.id, call.message.message_id)
-
-    elif data == "adm_search" and is_admin(uid):
-        user_steps[uid] = {"step": "adm_search"}
-        bot.edit_message_text("آیدی یا یوزرنیم کاربر را بفرست:", call.message.chat.id, call.message.message_id)
-
-    # قبول / رد ازدواج
-    elif data.startswith("accept_marry_"):
-        from_id = int(data.split("_")[2])
-        to_id = uid
-        u1 = get_user(from_id)
-        u2 = get_user(to_id)
-        if not u1 or not u2 or u1[13] or u2[13]:
-            bot.answer_callback_query(call.id, "دیگه امکان نداره", show_alert=True)
-            return
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("UPDATE users SET partner_id=? WHERE user_id=?", (to_id, from_id))
-        c.execute("UPDATE users SET partner_id=? WHERE user_id=?", (from_id, to_id))
-        conn.commit()
-        conn.close()
-        bot.edit_message_text("💍 ازدواج انجام شد! مبارکه 🎉", call.message.chat.id, call.message.message_id)
-        try:
-            bot.send_message(from_id, f"💍 {call.from_user.first_name} پیشنهادت رو قبول کرد!")
-        except:
-            pass
-        bot.answer_callback_query(call.id)
-
-    elif data.startswith("reject_marry_"):
-        from_id = int(data.split("_")[2])
-        bot.edit_message_text("درخواست رد شد.", call.message.chat.id, call.message.message_id)
-        try:
-            bot.send_message(from_id, "پیشنهاد ازدواجت رد شد.")
-        except:
-            pass
-        bot.answer_callback_query(call.id)
-
-    bot.answer_callback_query(call.id)
-
-print("✅ بخش ۳ آماده شد")
-# ==================== بخش ۴ از ۶ ====================
-# هندلر پیام‌ها (بانک، انتقال، ازدواج، دزدی، ادمین)
-
-@bot.message_handler(content_types=['text'])
-def handle_text(message):
-    uid = message.from_user.id
-    ensure_user(message.from_user)
-    step_data = user_steps.get(uid, {})
-    step = step_data.get("step")
-    text = message.text.strip() if message.text else ""
-
-    # ----- بانک -----
-    if step == "bank_in":
-        try:
-            amount = int(text)
-            u = get_user(uid)
-            if amount <= 0 or u[3] < amount:
-                bot.reply_to(message, "مبلغ نامعتبر یا پول کافی نداری.")
-                return
-            conn = get_db()
-            c = conn.cursor()
-            c.execute("UPDATE users SET money = money - ?, bank = bank + ? WHERE user_id=?", (amount, amount, uid))
-            conn.commit()
-            conn.close()
-            bot.reply_to(message, f"✅ {amount:,} تومان به بانک واریز شد.", reply_markup=main_menu(uid))
-        except:
-            bot.reply_to(message, "فقط عدد بفرست.")
-        user_steps[uid] = {}
-        return
-
-    if step == "bank_out":
-        try:
-            amount = int(text)
-            u = get_user(uid)
-            if amount <= 0 or u[4] < amount:
-                bot.reply_to(message, "مبلغ نامعتبر یا موجودی بانک کم است.")
-                return
-            conn = get_db()
-            c = conn.cursor()
-            c.execute("UPDATE users SET money = money + ?, bank = bank - ? WHERE user_id=?", (amount, amount, uid))
-            conn.commit()
-            conn.close()
-            bot.reply_to(message, f"✅ {amount:,} تومان از بانک برداشت شد.", reply_markup=main_menu(uid))
-        except:
-            bot.reply_to(message, "فقط عدد بفرست.")
-        user_steps[uid] = {}
-        return
-
-    # ----- انتقال پول (آیدی / یوزرنیم / ریپلای) -----
-    if step == "transfer" or (message.reply_to_message and text.lower().startswith(("انتقال", "پرداخت", "transfer"))):
-        target_user = None
-        amount = None
-
-        if message.reply_to_message:
-            target_user = get_user(message.reply_to_message.from_user.id)
-            parts = text.split()
-            if len(parts) >= 2 and parts[-1].isdigit():
-                amount = int(parts[-1])
+def get_inventory_keyboard(item_id: int, is_equipped: bool, item_type: str) -> InlineKeyboardMarkup:
+    buttons = []
+    if item_type in ["WEAPON", "ARMOR"]:
+        if is_equipped:
+            buttons.append([InlineKeyboardButton(text="🔻 خارج کردن تجهیزات", callback_data=f"inv:unequip:{item_id}")])
         else:
-            # اول سعی می‌کنیم یوزرنیم یا آیدی پیدا کنیم
-            parts = text.split()
-            if len(parts) >= 1:
-                target_user = find_user(parts[0])
-            if len(parts) >= 2 and parts[1].isdigit():
-                amount = int(parts[1])
+            buttons.append([InlineKeyboardButton(text="🛡️ تجهیز کردن", callback_data=f"inv:equip:{item_id}")])
+    elif item_type in ["FOOD", "DRINK", "MEDICINE"]:
+        buttons.append([InlineKeyboardButton(text="🧪 مصرف / استفاده", callback_data=f"inv:use:{item_id}")])
+    
+    buttons.append([
+        InlineKeyboardButton(text="💰 فروش", callback_data=f"inv:sell:{item_id}"),
+        InlineKeyboardButton(text="🗑️ دور انداختن", callback_data=f"inv:drop:{item_id}")
+    ])
+    buttons.append([InlineKeyboardButton(text="🔙 بازگشت به کوله", callback_data="inv:main")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-        if not target_user:
-            bot.reply_to(message, "کاربر پیدا نشد. آیدی عددی یا یوزرنیم درست بفرست.")
-            user_steps[uid] = {}
-            return
+def get_locations_keyboard(locations: list) -> InlineKeyboardMarkup:
+    buttons = []
+    for loc in locations:
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"{loc.name} ({loc.danger_level}) - مصرف انرژی: {loc.energy_cost}",
+                callback_data=f"loc:select:{loc.id}"
+            )
+        ])
+    buttons.append([InlineKeyboardButton(text="🔙 بازگشت به منو", callback_data="menu:main")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-        if target_user[0] == uid:
-            bot.reply_to(message, "نمی‌تونی به خودت پول بدی!")
-            user_steps[uid] = {}
-            return
+def get_shelter_keyboard(shelter) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⬆️ ارتقای کلی پناهگاه", callback_data="shelter:upgrade_main")],
+            [
+                InlineKeyboardButton(text="💧 تصفیه آب", callback_data="shelter:upgrade_water"),
+                InlineKeyboardButton(text="🌾 مزرعه غذا", callback_data="shelter:upgrade_food")
+            ],
+            [
+                InlineKeyboardButton(text="🏥 آزمایشگاه پزشکی", callback_data="shelter:upgrade_med"),
+                InlineKeyboardButton(text="🌾/💧 برداشت محصولات", callback_data="shelter:harvest")
+            ],
+            [InlineKeyboardButton(text="🔙 بازگشت", callback_data="menu:main")]
+        ]
+    )
 
-        if amount is None:
-            user_steps[uid] = {"step": "transfer_amount", "target": target_user[0]}
-            bot.reply_to(message, "مبلغ را بفرست:")
-            return
-
-        u = get_user(uid)
-        if amount <= 0 or u[3] < amount:
-            bot.reply_to(message, "پول کافی نداری.")
-            user_steps[uid] = {}
-            return
-
-        add_money(uid, -amount)
-        add_money(target_user[0], amount)
-        bot.reply_to(message, f"✅ {amount:,} تومان به {target_user[2] or target_user[1] or target_user[0]} ارسال شد.", reply_markup=main_menu(uid))
-        try:
-            bot.send_message(target_user[0], f"💰 {amount:,} تومان از طرف {message.from_user.first_name} دریافت کردی!")
-        except:
-            pass
-        user_steps[uid] = {}
-        return
-
-    if step == "transfer_amount":
-        try:
-            amount = int(text)
-            target = step_data["target"]
-            u = get_user(uid)
-            if amount <= 0 or u[3] < amount:
-                bot.reply_to(message, "پول کافی نداری.")
-                return
-            add_money(uid, -amount)
-            add_money(target, amount)
-            bot.reply_to(message, f"✅ {amount:,} تومان ارسال شد.", reply_markup=main_menu(uid))
-            try:
-                bot.send_message(target, f"💰 {amount:,} تومان دریافت کردی!")
-            except:
-                pass
-        except:
-            bot.reply_to(message, "عدد معتبر بفرست.")
-        user_steps[uid] = {}
-        return
-
-    # ----- ازدواج (با درخواست) -----
-    if step == "marry" or (message.reply_to_message and text in ["ازدواج", "ازدواج کن", "marriage"]):
-        target_user = None
-        if message.reply_to_message:
-            target_user = get_user(message.reply_to_message.from_user.id)
-        else:
-            target_user = find_user(text)
-
-        if not target_user:
-            bot.reply_to(message, "کاربر پیدا نشد.")
-            user_steps[uid] = {}
-            return
-        if target_user[0] == uid:
-            bot.reply_to(message, "با خودت نمی‌تونی ازدواج کنی!")
-            user_steps[uid] = {}
-            return
-        if target_user[13]:
-            bot.reply_to(message, "این کاربر قبلاً ازدواج کرده!")
-            user_steps[uid] = {}
-            return
-
-        mk = InlineKeyboardMarkup()
-        mk.add(
-            InlineKeyboardButton("✅ قبول می‌کنم", callback_data=f"accept_marry_{uid}"),
-            InlineKeyboardButton("❌ رد می‌کنم", callback_data=f"reject_marry_{uid}")
+def get_clan_keyboard(in_clan: bool, is_leader: bool = False) -> InlineKeyboardMarkup:
+    if not in_clan:
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="➕ ساخت کلن جدید", callback_data="clan:create")],
+                [InlineKeyboardButton(text="📜 لیست کلن‌ها", callback_data="clan:list")]
+            ]
         )
-        try:
-            bot.send_message(target_user[0],
-                f"💍 **درخواست ازدواج**\n\n{message.from_user.first_name} (`{uid}`) به تو پیشنهاد ازدواج داده!",
-                parse_mode="Markdown", reply_markup=mk)
-            bot.reply_to(message, "✅ درخواست ازدواج ارسال شد. منتظر جواب باش.")
-        except:
-            bot.reply_to(message, "نتونستم پیام بدم. طرف باید ربات رو استارت کرده باشه.")
-        user_steps[uid] = {}
-        return
+    buttons = [
+        [
+            InlineKeyboardButton(text="👥 اعضای کلن", callback_data="clan:members"),
+            InlineKeyboardButton(text="💰 خزانه کلن", callback_data="clan:treasury")
+        ]
+    ]
+    if is_leader:
+        buttons.append([InlineKeyboardButton(text="⚙️ مدیریت و ارتقا کلن", callback_data="clan:manage")])
+    buttons.append([InlineKeyboardButton(text="🚪 خروج از کلن", callback_data="clan:leave")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-    # ----- دزدی (مرحله نقشه) -----
-    if step == "crime_plan":
-        user_steps[uid] = {"step": "crime_method", "plan": text}
-        mk = InlineKeyboardMarkup(row_width=1)
-        mk.add(
-            InlineKeyboardButton("🔪 حمله مستقیم (شانس کمتر - غنیمت بیشتر)", callback_data="crime_attack"),
-            InlineKeyboardButton("🕵️ دزدی مخفیانه (شانس متوسط)", callback_data="crime_sneak"),
-            InlineKeyboardButton("🧠 نقشه پیچیده (شانس بالاتر)", callback_data="crime_smart"),
-            InlineKeyboardButton("❌ انصراف", callback_data="back_main")
-        )
-        bot.reply_to(message, f"نقشه: {text}\n\nروش دزدی رو انتخاب کن:", reply_markup=mk)
-        return
+def get_admin_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📊 آمار سرور", callback_data="admin:stats"),
+                InlineKeyboardButton(text="📢 پیام همگانی", callback_data="admin:broadcast")
+            ],
+            [
+                InlineKeyboardButton(text="🎁 اعطای پاداش به کاربر", callback_data="admin:reward"),
+                InlineKeyboardButton(text="🔄 بازنشانی دیتابیس", callback_data="admin:reset_db")
+            ]
+        ]
+    )
 
-    # ----- ادمین -----
-    if is_admin(uid):
-        if step == "adm_money":
-            target = find_user(text)
-            if not target:
-                bot.reply_to(message, "کاربر پیدا نشد.")
-                user_steps[uid] = {}
-                return
-            user_steps[uid] = {"step": "adm_money_amount", "target": target[0]}
-            bot.reply_to(message, "مبلغ را بفرست (مثبت = اضافه، منفی = کم کردن):")
-            return
-
-        if step == "adm_money_amount":
+# ------------------------------------------------------------------------------
+# ⚙️ MIDDLEWARES (میدل‌ورهای خط لوله)
+# ------------------------------------------------------------------------------
+class DbSessionMiddleware(BaseMiddleware):
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
+        data: Dict[str, Any]
+    ) -> Any:
+        async with AsyncSessionLocal() as session:
+            data["db"] = session
             try:
-                amount = int(text)
-                target = step_data["target"]
-                add_money(target, amount)
-                bot.reply_to(message, f"✅ پول کاربر تغییر کرد.", reply_markup=main_menu(uid))
-                try:
-                    bot.send_message(target, f"💰 موجودی شما توسط ادمین تغییر کرد: {amount:,}")
-                except:
-                    pass
-            except:
-                bot.reply_to(message, "عدد معتبر بفرست.")
-            user_steps[uid] = {}
-            return
+                result = await handler(event, data)
+                await session.commit()
+                return result
+            except Exception:
+                await session.rollback()
+                raise
 
-        if step == "adm_house_name":
-            user_steps[uid] = {"step": "adm_house_price", "name": text}
-            bot.reply_to(message, "قیمت خانه را بفرست:")
-            return
+class UserTrackerMiddleware(BaseMiddleware):
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
+        data: Dict[str, Any]
+    ) -> Any:
+        event_user: Optional[TgUser] = data.get("event_from_user")
+        db: Optional[AsyncSession] = data.get("db")
 
-        if step == "adm_house_price":
-            try:
-                price = int(text)
-                name = step_data["name"]
-                conn = get_db()
-                c = conn.cursor()
-                c.execute("INSERT OR REPLACE INTO houses (name, price, bonus, emoji) VALUES (?, ?, 10, '🏠')", (name, price))
-                conn.commit()
-                conn.close()
-                bot.reply_to(message, f"✅ خانه «{name}» اضافه شد.", reply_markup=main_menu(uid))
-            except:
-                bot.reply_to(message, "قیمت عدد باشد.")
-            user_steps[uid] = {}
-            return
+        if event_user and db and not event_user.is_bot:
+            stmt = select(User).where(User.telegram_id == event_user.id)
+            res = await db.execute(stmt)
+            user = res.scalar_one_or_none()
 
-        if step == "adm_car_name":
-            user_steps[uid] = {"step": "adm_car_price", "name": text}
-            bot.reply_to(message, "قیمت ماشین را بفرست:")
-            return
-
-        if step == "adm_car_price":
-            try:
-                price = int(text)
-                name = step_data["name"]
-                conn = get_db()
-                c = conn.cursor()
-                c.execute("INSERT OR REPLACE INTO cars (name, price, bonus, emoji) VALUES (?, ?, 10, '🚗')", (name, price))
-                conn.commit()
-                conn.close()
-                bot.reply_to(message, f"✅ ماشین «{name}» اضافه شد.", reply_markup=main_menu(uid))
-            except:
-                bot.reply_to(message, "قیمت عدد باشد.")
-            user_steps[uid] = {}
-            return
-
-        if step == "adm_job_name":
-            user_steps[uid] = {"step": "adm_job_income", "name": text}
-            bot.reply_to(message, "درآمد هر بار کار:")
-            return
-
-        if step == "adm_job_income":
-            user_steps[uid] = {"step": "adm_job_level", "name": step_data["name"], "income": text}
-            bot.reply_to(message, "حداقل لول:")
-            return
-
-        if step == "adm_job_level":
-            try:
-                name = step_data["name"]
-                income = int(step_data["income"])
-                min_level = int(text)
-                conn = get_db()
-                c = conn.cursor()
-                c.execute("INSERT OR REPLACE INTO jobs (name, income, cooldown, min_level, emoji) VALUES (?, ?, 90, ?, '💼')",
-                          (name, income, min_level))
-                conn.commit()
-                conn.close()
-                bot.reply_to(message, f"✅ شغل «{name}» اضافه شد.", reply_markup=main_menu(uid))
-            except:
-                bot.reply_to(message, "مقادیر عددی باشند.")
-            user_steps[uid] = {}
-            return
-
-        if step == "broadcast":
-            conn = get_db()
-            c = conn.cursor()
-            c.execute("SELECT user_id FROM users")
-            users = c.fetchall()
-            conn.close()
-            ok = 0
-            for u in users:
-                try:
-                    bot.send_message(u[0], text)
-                    ok += 1
-                except:
-                    pass
-            bot.reply_to(message, f"✅ به {ok} نفر ارسال شد.", reply_markup=main_menu(uid))
-            user_steps[uid] = {}
-            return
-
-        if step == "adm_search":
-            u = find_user(text)
-            if u:
-                msg = f"""🔍 کاربر پیدا شد:
-آیدی: `{u[0]}`
-یوزرنیم: @{u[1] or '-'}
-نام: {u[2]}
-پول: {u[3]:,}
-بانک: {u[4]:,}
-لول: {u[5]}
-شغل: {u[7] or 'بیکار'}
-خانه: {u[8]}
-ماشین: {u[9] or 'ندارد'}"""
-                bot.reply_to(message, msg, parse_mode="Markdown", reply_markup=main_menu(uid))
+            if user:
+                user.last_active = datetime.utcnow()
+                if event_user.username != user.username:
+                    user.username = event_user.username
+                data["db_user"] = user
             else:
-                bot.reply_to(message, "پیدا نشد.")
-            user_steps[uid] = {}
-            return
+                data["db_user"] = None
 
-    # پیش‌فرض
-    if not text.startswith("/"):
-        bot.reply_to(message, "از منو استفاده کن یا /help بزن.", reply_markup=main_menu(uid))
+        return await handler(event, data)
 
-print("✅ بخش ۴ آماده شد")
-# ==================== بخش ۵ از ۶ ====================
-# دزدی چندمرحله‌ای (انتخاب روش)
-
-@bot.callback_query_handler(func=lambda call: call.data in ["crime_attack", "crime_sneak", "crime_smart"])
-def crime_method(call):
-    uid = call.from_user.id
-    ensure_user(call.from_user)
-    data = call.data
-
-    u = get_user(uid)
-    now = time.time()
-
-    if now - u[12] < 180:
-        bot.answer_callback_query(call.id, "۳ دقیقه کول‌داون داری!", show_alert=True)
-        return
-    if u[10] < 20:
-        bot.answer_callback_query(call.id, "انرژی کافی نداری (حداقل ۲۰)", show_alert=True)
-        return
-
-    plan = user_steps.get(uid, {}).get("plan", "هدف ناشناس")
-
-    methods = {
-        "crime_attack": ("حمله مستقیم", 38, 1.5),
-        "crime_sneak": ("دزدی مخفیانه", 55, 1.1),
-        "crime_smart": ("نقشه پیچیده", 72, 1.7)
-    }
-    method_name, base_chance, multiplier = methods[data]
-    chance = min(base_chance + (u[5] * 2), 90)
-    success = random.randint(1, 100) <= chance
-
-    conn = get_db()
-    c = conn.cursor()
-
-    if success:
-        c.execute("SELECT user_id, money FROM users WHERE user_id != ? AND money > 3000 ORDER BY RANDOM() LIMIT 1", (uid,))
-        target = c.fetchone()
-
-        if target:
-            stolen = int(min(target[1] // 3, random.randint(2500, 15000)) * multiplier)
-            c.execute("UPDATE users SET money = money - ? WHERE user_id=?", (stolen, target[0]))
-            c.execute("UPDATE users SET money = money + ?, last_steal=?, energy = energy - 20 WHERE user_id=?",
-                      (stolen, now, uid))
-            conn.commit()
-
-            text = f"""
-✅ **دزدی موفق!**
-
-🎯 هدف: {plan}
-🗡️ روش: {method_name}
-💰 غنیمت: **+{stolen:,}** تومان
-
-فرار کردی!
-"""
-            bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=main_menu(uid))
-            try:
-                bot.send_message(target[0], f"🔫 از تو دزدی شد!\n-{stolen:,} تومان از دست دادی.")
-            except:
-                pass
+class AdminMiddleware(BaseMiddleware):
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
+        data: Dict[str, Any]
+    ) -> Any:
+        event_user: Optional[TgUser] = data.get("event_from_user")
+        if event_user and event_user.id in ADMIN_IDS:
+            data["is_admin"] = True
         else:
-            reward = int(random.randint(4000, 11000) * multiplier)
-            c.execute("UPDATE users SET money = money + ?, last_steal=?, energy = energy - 20 WHERE user_id=?",
-                      (reward, now, uid))
-            conn.commit()
-            bot.edit_message_text(f"✅ دزدی از سیستم موفق!\n+{reward:,} تومان", call.message.chat.id, call.message.message_id, reply_markup=main_menu(uid))
+            data["is_admin"] = False
+        return await handler(event, data)
+    # ==============================================================================
+# 📄 bot.py - PART 3/8: SEED DATA & ENGINE HELPERS
+# ==============================================================================
+
+async def seed_initial_game_data(db: AsyncSession):
+    """ثبت اولیه تمامی آیتم‌ها، مناطق و زامبی‌ها در صورت خالی بودن دیتابیس"""
+    loc_check = await db.execute(select(func.count(Location.id)))
+    if loc_check.scalar() == 0:
+        locations = [
+            Location(name="🏙️ خیابان‌های متروکه", description="منطقه‌ای خلوت اما دارای اسکرپ معمولی.", danger_level=DangerLevel.LOW.value, min_level=1, energy_cost=10, scrap_multiplier=1.0),
+            Location(name="🏬 مرکز خرید ویران‌شده", description="دارای کنسرو و تجهیزات اولیه.", danger_level=DangerLevel.MEDIUM.value, min_level=2, energy_cost=15, scrap_multiplier=1.5),
+            Location(name="🏥 بیمارستان آلوده", description="محل کپسول‌های دارویی و زامبی‌های جهش‌یافته.", danger_level=DangerLevel.HIGH.value, min_level=4, energy_cost=20, scrap_multiplier=2.2),
+            Location(name="☣️ نیروگاه هسته‌ای خاموش", description="خطر پرتو زایی و زامبی‌های غول‌پیکر با غنایم افسانه‌ای.", danger_level=DangerLevel.DEADLY.value, min_level=7, energy_cost=30, scrap_multiplier=4.0),
+        ]
+        db.add_all(locations)
+
+    items_check = await db.execute(select(func.count(Item.id)))
+    if items_check.scalar() == 0:
+        items = [
+            Item(name="🔪 چاقوی شکاری", description="سلاح سرد ساده اما کارآمد.", item_type=ItemType.WEAPON.value, rarity=Rarity.COMMON.value, attack_power=15, buy_price=50, sell_price=20),
+            Item(name="🪓 تبر آتش‌نشانی", description="سلاحی قدرتمند برای شکستن استخوان زامبی.", item_type=ItemType.WEAPON.value, rarity=Rarity.UNCOMMON.value, attack_power=35, buy_price=150, sell_price=70),
+            Item(name="🔫 کلت ۹ میلی‌متری", description="سلاح گرم با قدرت تخریب بالا.", item_type=ItemType.WEAPON.value, rarity=Rarity.RARE.value, attack_power=60, buy_price=400, sell_price=200),
+            Item(name="🥫 کنسرو لوبیا", description="غذا برای رفع گرسنگی.", item_type=ItemType.FOOD.value, restore_hunger=35, restore_hp=10, buy_price=30, sell_price=10),
+            Item(name="🧃 بطری آب معدنی", description="رفع کامل تشنگی.", item_type=ItemType.DRINK.value, restore_thirst=40, buy_price=20, sell_price=5),
+            Item(name="🧪 باند و پنس ضدعفونی", description="کاهش عفونت و ترمیم جان.", item_type=ItemType.MEDICINE.value, heal_hp=45, reduce_infection=25, buy_price=80, sell_price=35),
+            Item(name="🛡️ جلیقه ضدگلوله", description="کاهش آسیب دریافتی.", item_type=ItemType.ARMOR.value, rarity=Rarity.UNCOMMON.value, defense_power=20, buy_price=200, sell_price=90)
+        ]
+        db.add_all(items)
+
+    zombie_check = await db.execute(select(func.count(Zombie.id)))
+    if zombie_check.scalar() == 0:
+        zombies = [
+            Zombie(name="🧟 زامبی کندرو", hp=40, max_hp=40, attack=8, defense=2, xp_reward=15, scrap_reward=25, is_boss=False),
+            Zombie(name="🏃 زامبی سریع (Runner)", hp=60, max_hp=60, attack=18, defense=5, xp_reward=35, scrap_reward=50, is_boss=False),
+            Zombie(name="🤮 زامبی اسیدی (Spitter)", hp=85, max_hp=85, attack=28, defense=8, xp_reward=60, scrap_reward=90, is_boss=False),
+            Zombie(name="🧌 زامبی غول‌پیکر (Tank Boss)", hp=300, max_hp=300, attack=55, defense=20, xp_reward=250, scrap_reward=500, is_boss=True)
+        ]
+        db.add_all(zombies)
+
+    await db.commit()
+
+def check_level_up(user: User) -> bool:
+    """بررسی و اعمال ارتقای سطح کاربر"""
+    required_xp = user.level * 100
+    if user.xp >= required_xp:
+        user.level += 1
+        user.xp -= required_xp
+        user.max_hp += 15
+        user.hp = user.max_hp
+        return True
+    return False
+
+async def get_user_total_stats(db: AsyncSession, user_id: int) -> dict:
+    """محاسبه مجموع قدرت حمله و دفاع تجهیزات کاربر"""
+    stmt = select(Inventory).options(selectinload(Inventory.item)).where(
+        Inventory.user_id == user_id,
+        Inventory.is_equipped == True
+    )
+    res = await db.execute(stmt)
+    equipped_items = res.scalars().all()
+
+    total_attack = 10  # قدرت پایه
+    total_defense = 0  # دفاع پایه
+
+    for inv in equipped_items:
+        if inv.item:
+            total_attack += inv.item.attack_power
+            total_defense += inv.item.defense_power
+
+    return {"attack": total_attack, "defense": total_defense}
+        # ==============================================================================
+# 📄 bot.py - PART 4/8: BASE COMMANDS, PROFILE SYSTEM & DAILY REWARDS
+# ==============================================================================
+
+main_router = Router()
+
+# ------------------------------------------------------------------------------
+# 🚀 دستور START و ثبت‌نام اولیه
+# ------------------------------------------------------------------------------
+@main_router.message(CommandStart())
+async def cmd_start(message: Message, db: AsyncSession, db_user: Optional[User]):
+    tg_user = message.from_user
+    
+    if not db_user:
+        # ایجاد کاربر جدید
+        display_name = tg_user.full_name or tg_user.username or f"بازمانده_{tg_user.id % 10000}"
+        db_user = User(
+            telegram_id=tg_user.id,
+            username=tg_user.username,
+            display_name=display_name
+        )
+        db.add(db_user)
+        await db.flush()
+
+        # ایجاد پناهگاه اولیه برای کاربر
+        shelter = Shelter(user_id=db_user.id)
+        db.add(shelter)
+        await db.commit()
+
+        welcome_text = (
+            f"🧟 **به دنیای پسارستاخیزی زامبی خوش آمدی، {display_name}!**\n\n"
+            "شهر به ویرانه تبدیل شده و زامبی‌ها همه‌جا را گرفته‌اند.\n"
+            "برای زنده ماندن باید منابع جمع کنی، پناهگاهت را ارتقا دهی و با تهدیدات مبارزه کنی.\n\n"
+            "🎮 **از منوی زیر برای شروع استفاده کن:**"
+        )
     else:
-        fine = random.randint(2000, 7000)
-        c.execute("UPDATE users SET money = money - ?, last_steal=?, energy = energy - 25 WHERE user_id=?",
-                  (fine, now, uid))
-        conn.commit()
+        welcome_text = f"سلام مجدد {db_user.display_name}! آماده‌ای برای ادامه نبرد با زامبی‌ها؟"
 
-        text = f"""
-❌ **دزدی شکست خورد!**
+    await message.answer(welcome_text, reply_markup=get_main_menu_keyboard(), parse_mode="Markdown")
 
-پلیس گرفتت!
-💸 جریمه: -{fine:,} تومان
-⚡ انرژی کم شد
 
-دفعه بعد محتاط‌تر باش...
-"""
-        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=main_menu(uid))
+# ------------------------------------------------------------------------------
+# 👤 نمایش پروفایل و آمار بازمانده
+# ------------------------------------------------------------------------------
+@main_router.message(F.text == "👤 پروفایل")
+async def show_profile(message: Message, db: AsyncSession, db_user: User):
+    if not db_user:
+        await message.answer("لطفاً ابتدا /start را بزنید.")
+        return
 
-    conn.close()
-    user_steps[uid] = {}
-    bot.answer_callback_query(call.id)
+    # دریافت قدرت تجهیزات
+    stats = await get_user_total_stats(db, db_user.id)
+    
+    # دریافت نام کلن در صورت عضویت
+    clan_name = "بدون کلن"
+    if db_user.clan_id:
+        stmt = select(Clan.name).where(Clan.id == db_user.clan_id)
+        res = await db.execute(stmt)
+        clan_name = res.scalar() or "بدون کلن"
 
-print("✅ بخش ۵ آماده شد")
-# ==================== بخش ۶ از ۶ ====================
-# اجرا
+    profile_text = (
+        f"📊 **پروفایل بازمانده:** `{db_user.display_name}`\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🎖️ **سطح:** `{db_user.level}` | **XP:** `{db_user.xp}/{db_user.level * 100}`\n"
+        f"❤️ **سلامتی (HP):** `{db_user.hp}/{db_user.max_hp}`\n"
+        f"🍖 **گرسنگی:** `{db_user.hunger}/100` | 💧 **تشنگی:** `{db_user.thirst}/100`\n"
+        f"⚡ **انرژی:** `{db_user.energy}/100` | ☣️ **عفونت:** `{db_user.infection}%`\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"⚔️ **قدرت حمله کل:** `{stats['attack']}`\n"
+        f"🛡️ **قدرت دفاع کل:** `{stats['defense']}`\n"
+        f"⚙️ **قطعات فلزی (Scrap):** `{db_user.scrap}` | 🪙 **طلا:** `{db_user.gold}`\n"
+        f"👥 **کلن:** `{clan_name}` | **نقش:** `{db_user.clan_role}`\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"💀 **زامبی‌های کشته‌شده:** `{db_user.zombie_kills}`\n"
+        f"🏰 **رؤسای نابودشده:** `{db_user.boss_kills}`\n"
+        f"🗺️ **کاوش‌های موفق:** `{db_user.successful_scavenges}`\n"
+    )
 
-print("🤖 ربات Virtual Life با موفقیت روشن شد")
-print("=" * 45)
-print("توکن:", BOT_TOKEN[:20] + "...")
-print("ادمین:", ADMIN_IDS)
-print()
-print("قابلیت‌های فعال:")
-print("• پروفایل کامل (پول + بانک + انرژی + همسر)")
-print("• کار کردن با کول‌داون و بونوس خانه/ماشین")
-print("• فروشگاه (خانه + ماشین + شغل)")
-print("• دزدی چندمرحله‌ای خفن")
-print("• مأموریت روزانه")
-print("• ازدواج دو طرفه (درخواست + قبول/رد)")
-print("• انتقال پول (آیدی / یوزرنیم / ریپلای)")
-print("• بانک (واریز و برداشت)")
-print("• رتبه‌بندی ثروت و لول")
-print("• دعوت دوستان")
-print("• اتفاقات تصادفی")
-print("• پنل ادمین کامل:")
-print("  - لیست کاربران با یوزرنیم و پول و بانک")
-print("  - تغییر پول")
-print("  - ساخت خانه / ماشین / شغل جدید")
-print("  - جستجوی کاربر")
-print("  - پیام همگانی")
-print("=" * 45)
+    await message.answer(profile_text, parse_mode="Markdown")
 
-bot.infinity_polling()
+
+# ------------------------------------------------------------------------------
+# 🎁 پاداش روزانه (DAILY REWARD)
+# ------------------------------------------------------------------------------
+@main_router.message(Command("daily"))
+@main_router.message(F.text == "🎁 پاداش روزانه")
+async def claim_daily_reward(message: Message, db: AsyncSession, db_user: User):
+    if not db_user:
+        return
+
+    now = datetime.utcnow()
+    if db_user.last_daily and (now - db_user.last_daily) < timedelta(hours=24):
+        remaining = timedelta(hours=24) - (now - db_user.last_daily)
+        hours, remainder = divmod(remaining.seconds, 3600)
+        minutes, _ = divmod(remainder, 60)
+        await message.answer(
+            f"⏳ شما قبلاً پاداش روزانه را دریافت کرده‌اید!\n"
+            f"زمان باقی‌مانده تا دریافت بعدی: **{hours} ساعت و {minutes} دقیقه**",
+            parse_mode="Markdown"
+        )
+        return
+
+    scrap_reward = random.randint(100, 250) * db_user.level
+    xp_reward = 50 * db_user.level
+
+    db_user.scrap += scrap_reward
+    db_user.xp += xp_reward
+    db_user.last_daily = now
+
+    leveled_up = check_level_up(db_user)
+    
+    msg = (
+        f"🎉 **پاداش روزانه دریافت شد!**\n\n"
+        f"⚙️ **+{scrap_reward}** قطعه فلزی\n"
+        f"⭐ **+{xp_reward}** امتیاز XP\n"
+    )
+    if leveled_up:
+        msg += f"\n🎊 **تبریک! شما به سطح {db_user.level} ارتقا یافتید!**"
+
+    await message.answer(msg, parse_mode="Markdown")
+    # ==============================================================================
+# 📄 bot.py - PART 5/8: INVENTORY SYSTEM & SCAVENGING LOCATIONS
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 🎒 نمایش و مدیریت کوله‌پشتی
+# ------------------------------------------------------------------------------
+@main_router.message(F.text == "🎒 کوله‌پشتی")
+async def show_inventory(message: Message, db: AsyncSession, db_user: User):
+    if not db_user:
+        return
+
+    stmt = select(Inventory).options(selectinload(Inventory.item)).where(
+        Inventory.user_id == db_user.id,
+        Inventory.quantity > 0
+    )
+    res = await db.execute(stmt)
+    inv_items = res.scalars().all()
+
+    if not inv_items:
+        await message.answer("🎒 **کوله‌پشتی شما خالی است!**\nبه کاوش بروید تا منابع و سلاح پیدا کنید.", parse_mode="Markdown")
+        return
+
+    text = "🎒 **محتویات کوله‌پشتی شما:**\n━━━━━━━━━━━━━━━━━━━━\n"
+    buttons = []
+
+    for inv in inv_items:
+        item = inv.item
+        equipped_status = " [equipped]" if inv.is_equipped else ""
+        text += f"🔹 **{item.name}** ×{inv.quantity}{equipped_status}\n"
+        text += f"   └ نوع: {item.item_type} | نادری: {item.rarity}\n"
+        
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"{'🔻' if inv.is_equipped else '⚔️'} {item.name} ({inv.quantity})",
+                callback_data=f"inv:detail:{inv.id}"
+            )
+        ])
+
+    await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="Markdown")
+
+
+@main_router.callback_query(F.data.startswith("inv:detail:"))
+async def inventory_item_detail(callback: CallbackQuery, db: AsyncSession, db_user: User):
+    inv_id = int(callback.data.split(":")[2])
+    stmt = select(Inventory).options(selectinload(Inventory.item)).where(Inventory.id == inv_id)
+    res = await db.execute(stmt)
+    inv = res.scalar_one_or_none()
+
+    if not inv or inv.user_id != db_user.id:
+        await callback.answer("آیتم یافت نشد یا متعلق به شما نیست.", show_alert=True)
+        return
+
+    item = inv.item
+    text = (
+        f"📦 **توضیحات آیتم:** `{item.name}`\n"
+        f"📝 {item.description}\n\n"
+        f"⚔️ **قدرت حمله:** +{item.attack_power}\n"
+        f"🛡️ **قدرت دفاع:** +{item.defense_power}\n"
+        f"❤️ **ترمیم جان:** +{item.heal_hp}\n"
+        f"🍖 **رفع گرسنگی:** +{item.restore_hunger}\n"
+        f"💧 **رفع تشنگی:** +{item.restore_thirst}\n"
+        f"💰 **ارزش فروش:** {item.sell_price} اسکرپ\n"
+    )
+
+    kb = get_inventory_keyboard(inv.id, inv.is_equipped, item.item_type)
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+
+
+@main_router.callback_query(F.data.startswith("inv:equip:"))
+async def equip_item_handler(callback: CallbackQuery, db: AsyncSession, db_user: User):
+    inv_id = int(callback.data.split(":")[2])
+    stmt = select(Inventory).options(selectinload(Inventory.item)).where(Inventory.id == inv_id)
+    res = await db.execute(stmt)
+    inv = res.scalar_one_or_none()
+
+    if inv and inv.user_id == db_user.id:
+        # خارج کردن تجهیزات قبلی از همان نوع
+        stmt_other = select(Inventory).options(selectinload(Inventory.item)).where(
+            Inventory.user_id == db_user.id,
+            Inventory.is_equipped == True
+        )
+        res_other = await db.execute(stmt_other)
+        for other_inv in res_other.scalars().all():
+            if other_inv.item.item_type == inv.item.item_type:
+                other_inv.is_equipped = False
+
+        inv.is_equipped = True
+        await db.commit()
+        await callback.answer(f"🛡️ {inv.item.name} با موفقیت تجهیز شد!", show_alert=True)
+        await show_inventory(callback.message, db, db_user)
+
+
+# ------------------------------------------------------------------------------
+# 🗺️ سیستم کاوش و پیدا کردن منابع
+# ------------------------------------------------------------------------------
+@main_router.message(F.text == "🗺️ کاوش و مناطق")
+async def list_locations(message: Message, db: AsyncSession, db_user: User):
+    if not db_user:
+        return
+
+    stmt = select(Location)
+    res = await db.execute(stmt)
+    locations = res.scalars().all()
+
+    text = (
+        "🗺️ **مناطق قابل کاوش:**\n"
+        "منطقه‌ای را برای جستجوی اسکرپ و غنایم انتخاب کنید.\n"
+        "⚠️ *توجّه:* کاوش باعث مصرف انرژی، گرسنگی و تشنگی می‌شود.\n"
+    )
+    await message.answer(text, reply_markup=get_locations_keyboard(locations), parse_mode="Markdown")
+
+
+@main_router.callback_query(F.data.startswith("loc:select:"))
+async def process_scavenge(callback: CallbackQuery, db: AsyncSession, db_user: User):
+    loc_id = int(callback.data.split(":")[2])
+    stmt = select(Location).where(Location.id == loc_id)
+    res = await db.execute(stmt)
+    location = res.scalar_one_or_none()
+
+    if not location:
+        await callback.answer("منطقه نامعتبر است.", show_alert=True)
+        return
+
+    if db_user.level < location.min_level:
+        await callback.answer(f"🔒 برای کاوش در این منطقه باید حداقل سطح {location.min_level} باشید!", show_alert=True)
+        return
+
+    if db_user.energy < location.energy_cost:
+        await callback.answer("⚡ انرژی کافی برای کاوش ندارید! استراحت کنید.", show_alert=True)
+        return
+
+    # کاهش منابع حیاتی
+    db_user.energy -= location.energy_cost
+    db_user.hunger = max(0, db_user.hunger - random.randint(5, 12))
+    db_user.thirst = max(0, db_user.thirst - random.randint(8, 15))
+
+    # شانس مبارزه با زامبی یا پیدا کردن غنیمت
+    encounter_chance = random.random()
+
+    if encounter_chance < 0.4:
+        # رویارویی با زامبی
+        z_stmt = select(Zombie).where(Zombie.is_boss == False).order_by(func.random())
+        z_res = await db.execute(z_stmt)
+        zombie = z_res.scalars().first()
+
+        text = (
+            f"🚨 **کمین زامبی!**\n\n"
+            f"در حال کاوش در **{location.name}** بودید که ناگهان یک **{zombie.name}** جلوی شما سبز شد!\n"
+            f"❤️ جان زامبی: `{zombie.hp}` | ⚔️ قدرت حمله: `{zombie.attack}`"
+        )
+        await callback.message.edit_text(text, reply_markup=get_combat_keyboard(zombie.id), parse_mode="Markdown")
+    else:
+        # غنیمت‌گیری موفق
+        scrap_found = int(random.randint(20, 60) * location.scrap_multiplier)
+        xp_gained = int(15 * location.scrap_multiplier)
+        
+        db_user.scrap += scrap_found
+        db_user.xp += xp_gained
+        db_user.successful_scavenges += 1
+        
+        leveled = check_level_up(db_user)
+
+        text = (
+            f"✅ **کاوش با موفقیت انجام شد!**\n\n"
+            f"📍 **منطقه:** {location.name}\n"
+            f"⚙️ **قطعات پیدا شده:** +{scrap_found}\n"
+            f"⭐ **امتیاز XP:** +{xp_gained}\n"
+        )
+        if leveled:
+            text += f"\n🎊 **تبریک! به سطح {db_user.level} ارتقا پیدا کردید!**"
+
+        await callback.message.edit_text(text, reply_markup=get_main_menu_keyboard(), parse_mode="Markdown")
+        # ==============================================================================
+# 📄 bot.py - PART 6/8: ADVANCED COMBAT ENGINE & SHELTER SYSTEM
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# ⚔️ سیستم مبارزه (COMBAT ENGINE)
+# ------------------------------------------------------------------------------
+@main_router.message(F.text == "⚔️ مبارزه و شکار")
+async def start_random_combat(message: Message, db: AsyncSession, db_user: User):
+    if not db_user:
+        return
+
+    if db_user.hp <= 15:
+        await message.answer("⚠️ وضعیت سلامتی شما بسیار بحرانی است! ابتدا خود را درمان کنید.", parse_mode="Markdown")
+        return
+
+    if db_user.energy < 10:
+        await message.answer("⚡ برای مبارزه انرژی کافی ندارید!", parse_mode="Markdown")
+        return
+
+    db_user.energy -= 10
+
+    # انتخاب زامبی تصادفی براساس سطح کاربر
+    stmt = select(Zombie).order_by(func.random())
+    res = await db.execute(stmt)
+    zombie = res.scalars().first()
+
+    if not zombie:
+        await message.answer("هیچ زامبی در اطراف یافت نشد.")
+        return
+
+    text = (
+        f"🚨 **زامبی شناسایی شد!**\n\n"
+        f"👾 **نام:** `{zombie.name}`\n"
+        f"❤️ **جان زامبی:** `{zombie.hp}/{zombie.max_hp}`\n"
+        f"⚔️ **قدرت حمله زامبی:** `{zombie.attack}`\n"
+        f"🛡️ **دفاع زامبی:** `{zombie.defense}`\n\n"
+        f"چگونه پاسخ می‌دهید؟"
+    )
+    await message.answer(text, reply_markup=get_combat_keyboard(zombie.id), parse_mode="Markdown")
+
+
+@main_router.callback_query(F.data.startswith("combat:attack:"))
+async def combat_attack_handler(callback: CallbackQuery, db: AsyncSession, db_user: User):
+    zombie_id = int(callback.data.split(":")[2])
+    stmt = select(Zombie).where(Zombie.id == zombie_id)
+    res = await db.execute(stmt)
+    zombie = res.scalar_one_or_none()
+
+    if not zombie:
+        await callback.answer("اطلاعات زامبی یافت نشد.", show_alert=True)
+        return
+
+    user_stats = await get_user_total_stats(db, db_user.id)
+    
+    # محاسبه آسیب بازیکن به زامبی
+    user_damage = max(1, user_stats["attack"] - zombie.defense + random.randint(-3, 5))
+    zombie_remaining_hp = zombie.hp - user_damage
+
+    if zombie_remaining_hp <= 0:
+        # پیروزی بازیکن
+        db_user.zombie_kills += 1
+        db_user.scrap += zombie.scrap_reward
+        db_user.xp += zombie.xp_reward
+        if zombie.is_boss:
+            db_user.boss_kills += 1
+
+        leveled = check_level_up(db_user)
+
+        text = (
+            f"💥 **پیروزی در مبارزه!**\n\n"
+            f"شما **{zombie.name}** را نابود کردید!\n"
+            f"⚔️ آسیب وارده: `{user_damage}`\n"
+            f"⚙️ **غنایم:** +{zombie.scrap_reward} اسکرپ\n"
+            f"⭐ **تجربه:** +{zombie.xp_reward} XP\n"
+        )
+        if leveled:
+            text += f"\n🎊 **ارتقای سطح! شما به سطح {db_user.level} رسیدید.**"
+
+        await callback.message.edit_text(text, reply_markup=get_main_menu_keyboard(), parse_mode="Markdown")
+        return
+
+    # آسیب زامبی به بازیکن در صورت زنده ماندن
+    zombie_damage = max(1, zombie.attack - user_stats["defense"] + random.randint(-2, 3))
+    db_user.hp -= zombie_damage
+
+    if db_user.hp <= 0:
+        # شکست و مرگ بازیکن
+        db_user.hp = 20
+        db_user.deaths += 1
+        db_user.scrap = int(db_user.scrap * 0.8)  # از دست دادن ۲۰ درصد اسکرپ
+        
+        text = (
+            f"💀 **شما در مبارزه شکست خوردید!**\n\n"
+            f"زامبی **{zombie.name}** شما را از پا درآورد.\n"
+            f"با سخته‌کوشی به پناهگاه عقب‌نشینی کردید اما ۲۰٪ اسکرپ‌های خود را از دست دادید."
+        )
+        await callback.message.edit_text(text, reply_markup=get_main_menu_keyboard(), parse_mode="Markdown")
+        return
+
+    # ادامه نبرد
+    text = (
+        f"⚔️ **مبارزه ادامه دارد!**\n\n"
+        f"شما `{user_damage}` آسیب زدید. (جان زامبی: `{zombie_remaining_hp}`)\n"
+        f"زامبی `{zombie_damage}` به شما آسیب زد. (جان شما: `{db_user.hp}/{db_user.max_hp}`)"
+    )
+    await callback.message.edit_text(text, reply_markup=get_combat_keyboard(zombie.id), parse_mode="Markdown")
+
+
+@main_router.callback_query(F.data.startswith("combat:defend:"))
+async def combat_defend_handler(callback: CallbackQuery, db: AsyncSession, db_user: User):
+    zombie_id = int(callback.data.split(":")[2])
+    stmt = select(Zombie).where(Zombie.id == zombie_id)
+    res = await db.execute(stmt)
+    zombie = res.scalar_one_or_none()
+
+    if not zombie:
+        return
+
+    user_stats = await get_user_total_stats(db, db_user.id)
+    reduced_damage = max(1, (zombie.attack // 2) - user_stats["defense"])
+    db_user.hp = max(1, db_user.hp - reduced_damage)
+    db_user.energy = min(100, db_user.energy + 10)
+
+    text = (
+        f"🛡️ **سنگر گرفتید!**\n\n"
+        f"آسیب دریافتی کاهش یافت: `{reduced_damage}`\n"
+        f"⚡ بازیابی انرژی: `+10`\n"
+        f"❤️ جان شما: `{db_user.hp}/{db_user.max_hp}`"
+    )
+    await callback.message.edit_text(text, reply_markup=get_combat_keyboard(zombie.id), parse_mode="Markdown")
+
+
+@main_router.callback_query(F.data.startswith("combat:flee:"))
+async def combat_flee_handler(callback: CallbackQuery, db: AsyncSession, db_user: User):
+    if random.random() < 0.6:
+        await callback.message.edit_text("🏃 **با موفقیت از میدان نبرد فرار کردید!**", reply_markup=get_main_menu_keyboard(), parse_mode="Markdown")
+    else:
+        db_user.hp = max(1, db_user.hp - 15)
+        await callback.message.edit_text(
+            f"❌ **فرار ناموفق بود!**\nدر هنگام فرار ۱۵ واحد آسیب دیدید.\n❤️ جان باقی‌مانده: `{db_user.hp}`",
+            reply_markup=get_main_menu_keyboard(),
+            parse_mode="Markdown"
+        )
+
+
+# ------------------------------------------------------------------------------
+# 🏠 مدیریت پناهگاه (SHELTER MANAGEMENT)
+# ------------------------------------------------------------------------------
+@main_router.message(F.text == "🏠 پناهگاه")
+async def show_shelter(message: Message, db: AsyncSession, db_user: User):
+    if not db_user:
+        return
+
+    stmt = select(Shelter).where(Shelter.user_id == db_user.id)
+    res = await db.execute(stmt)
+    shelter = res.scalar_one_or_none()
+
+    if not shelter:
+        shelter = Shelter(user_id=db_user.id)
+        db.add(shelter)
+        await db.commit()
+
+    text = (
+        f"🏠 **پناهگاه اختصاصی شما:**\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🏰 **سطح پناهگاه:** `{shelter.level}`\n"
+        f"🛡️ **استحکام و دفاع:** `{shelter.defense}`\n"
+        f"💧 **تصفیه‌خانه آب:** سطح `{shelter.water_collector_level}`\n"
+        f"🌾 **مزرعه غذا:** سطح `{shelter.food_farm_level}`\n"
+        f"🏥 **آزمایشگاه پزشکی:** سطح `{shelter.medical_lab_level}`\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"💡 *امکانات پناهگاه به شما منابع رایگان در فواصل زمانی می‌دهند.*"
+    )
+    await message.answer(text, reply_markup=get_shelter_keyboard(shelter), parse_mode="Markdown")
+
+
+@main_router.callback_query(F.data == "shelter:upgrade_main")
+async def upgrade_shelter_main(callback: CallbackQuery, db: AsyncSession, db_user: User):
+    stmt = select(Shelter).where(Shelter.user_id == db_user.id)
+    res = await db.execute(stmt)
+    shelter = res.scalar_one_or_none()
+
+    cost = shelter.level * 200
+    if db_user.scrap < cost:
+        await callback.answer(f"❌ قطعات کافی ندارید! قیمت ارتقا: {cost} اسکرپ", show_alert=True)
+        return
+
+    db_user.scrap -= cost
+    shelter.level += 1
+    shelter.defense += 30
+    await db.commit()
+
+    await callback.answer("✅ پناهگاه با موفقیت ارتقا یافت!", show_alert=True)
+    await show_shelter(callback.message, db, db_user)
+
+
+@main_router.callback_query(F.data == "shelter:harvest")
+async def harvest_shelter_resources(callback: CallbackQuery, db: AsyncSession, db_user: User):
+    stmt = select(Shelter).where(Shelter.user_id == db_user.id)
+    res = await db.execute(stmt)
+    shelter = res.scalar_one_or_none()
+
+    now = datetime.utcnow()
+    time_diff = (now - shelter.last_harvest).total_seconds() / 3600.0  # برحسب ساعت
+
+    if time_diff < 1.0:
+        await callback.answer("⏳ هنوز محصولی برای برداشت آماده نشده است (حداقل هر ۱ ساعت).", show_alert=True)
+        return
+
+    water_gained = int(time_diff * shelter.water_collector_level * 10)
+    food_gained = int(time_diff * shelter.food_farm_level * 10)
+
+    db_user.thirst = min(100, db_user.thirst + water_gained)
+    db_user.hunger = min(100, db_user.hunger + food_gained)
+    shelter.last_harvest = now
+
+    await db.commit()
+
+    await callback.message.edit_text(
+        f"🌾 **برداشت محصول انجام شد!**\n\n"
+        f"💧 **آب به دست آمده:** +{water_gained}\n"
+        f"🍖 **غذای به دست آمده:** +{food_gained}\n"
+        f"علائم حیاتی شما بروزرسانی شدند.",
+        reply_markup=get_main_menu_keyboard(),
+        parse_mode="Markdown"
+    )
+    # ==============================================================================
+# 📄 bot.py - PART 7/8: SHOP SYSTEM & CLAN SYSTEM WITH FSM
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 🛒 سیستم فروشگاه (SHOP SYSTEM)
+# ------------------------------------------------------------------------------
+@main_router.message(F.text == "🛒 فروشگاه")
+async def show_shop(message: Message, db: AsyncSession, db_user: User):
+    stmt = select(Item)
+    res = await db.execute(stmt)
+    items = res.scalars().all()
+
+    text = "🛒 **فروشگاه پسارستاخیزی:**\nخرید تجهیزات، دارو و منابع برای بقا\n━━━━━━━━━━━━━━━━━━━━\n"
+    buttons = []
+
+    for item in items:
+        text += f"📦 **{item.name}** - قیمت: `{item.buy_price}` اسکرپ\n"
+        buttons.append([InlineKeyboardButton(text=f"🛒 خرید {item.name} ({item.buy_price} ⚙️)", callback_data=f"shop:buy:{item.id}")])
+
+    await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="Markdown")
+
+
+@main_router.callback_query(F.data.startswith("shop:buy:"))
+async def buy_item_handler(callback: CallbackQuery, db: AsyncSession, db_user: User):
+    item_id = int(callback.data.split(":")[2])
+    stmt = select(Item).where(Item.id == item_id)
+    res = await db.execute(stmt)
+    item = res.scalar_one_or_none()
+
+    if not item:
+        await callback.answer("آیتم یافت نشد.", show_alert=True)
+        return
+
+    if db_user.scrap < item.buy_price:
+        await callback.answer("❌ اسکرپ کافی برای خرید این آیتم ندارید!", show_alert=True)
+        return
+
+    db_user.scrap -= item.buy_price
+
+    # افزودن به کوله‌پشتی
+    inv_stmt = select(Inventory).where(Inventory.user_id == db_user.id, Inventory.item_id == item.id)
+    inv_res = await db.execute(inv_stmt)
+    inventory_item = inv_res.scalar_one_or_none()
+
+    if inventory_item:
+        inventory_item.quantity += 1
+    else:
+        new_inv = Inventory(user_id=db_user.id, item_id=item.id, quantity=1)
+        db.add(new_inv)
+
+    await db.commit()
+    await callback.answer(f"✅ {item.name} با موفقیت خریداری شد و به کوله‌پشتی اضافه گردید!", show_alert=True)
+
+
+# ------------------------------------------------------------------------------
+# 👥 سیستم کلن و اتحاد (CLAN SYSTEM)
+# ------------------------------------------------------------------------------
+@main_router.message(F.text == "👥 کلن و اتحاد")
+async def show_clan_menu(message: Message, db: AsyncSession, db_user: User):
+    if not db_user:
+        return
+
+    in_clan = db_user.clan_id is not None
+    is_leader = db_user.clan_role == ClanRole.LEADER.value
+
+    if not in_clan:
+        text = "👥 **سیستم کلن و اتحاد:**\n\nشما هنوز عضو هیچ کلنی نیستید. می‌توانید یک کلن جدید بسازید یا به کلن‌های موجود بپیوندید."
+    else:
+        stmt = select(Clan).where(Clan.id == db_user.clan_id)
+        res = await db.execute(stmt)
+        clan = res.scalar_one_or_none()
+
+        text = (
+            f"🏰 **کلن [{clan.tag}] {clan.name}**\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"📝 **توضیحات:** {clan.description or 'بدون توضیح'}\n"
+            f"⭐ **سطح کلن:** `{clan.level}`\n"
+            f"💰 **خزانه:** `{clan.treasury_scrap}` اسکرپ\n"
+            f"🎖️ **نقش شما:** `{db_user.clan_role}`\n"
+        )
+
+    await message.answer(text, reply_markup=get_clan_keyboard(in_clan, is_leader), parse_mode="Markdown")
+
+
+@main_router.callback_query(F.data == "clan:create")
+async def start_clan_creation(callback: CallbackQuery, state: FSMContext, db_user: User):
+    if db_user.clan_id:
+        await callback.answer("شما قبلاً عضو یک کلن هستید!", show_alert=True)
+        return
+
+    if db_user.scrap < 500:
+        await callback.answer("❌ ساخت کلن نیازمند ۵۰۰ اسکرپ است!", show_alert=True)
+        return
+
+    await state.set_state(ClanStates.waiting_for_clan_name)
+    await callback.message.edit_text("📛 **لطفاً نام کلن خود را وارد کنید:**\n(حداکثر ۶۴ کاراکتر)", parse_mode="Markdown")
+
+
+@main_router.message(ClanStates.waiting_for_clan_name)
+async def process_clan_name(message: Message, state: FSMContext):
+    await state.update_data(clan_name=message.text.strip())
+    await state.set_state(ClanStates.waiting_for_clan_tag)
+    await message.answer("🏷️ **لطفاً تگ کوتاه کلن را وارد کنید (بین ۲ تا ۵ کاراکتر):**")
+
+
+@main_router.message(ClanStates.waiting_for_clan_tag)
+async def process_clan_tag(message: Message, state: FSMContext, db: AsyncSession, db_user: User):
+    tag = message.text.strip().upper()
+    if len(tag) < 2 or len(tag) > 5:
+        await message.answer("تگ باید بین ۲ تا ۵ حرف باشد.")
+        return
+
+    data = await state.get_data()
+    clan_name = data["clan_name"]
+
+    # ایجاد کلن در دیتابیس
+    db_user.scrap -= 500
+    new_clan = Clan(
+        name=clan_name,
+        tag=tag,
+        leader_id=db_user.telegram_id,
+        treasury_scrap=0
+    )
+    db.add(new_clan)
+    await db.flush()
+
+    db_user.clan_id = new_clan.id
+    db_user.clan_role = ClanRole.LEADER.value
+
+    await db.commit()
+    await state.clear()
+
+    await message.answer(f"🎉 **کلن [{tag}] {clan_name} با موفقیت ساخته شد!**", reply_markup=get_main_menu_keyboard(), parse_mode="Markdown")
+
+
+@main_router.callback_query(F.data == "clan:leave")
+async def leave_clan_handler(callback: CallbackQuery, db: AsyncSession, db_user: User):
+    if not db_user.clan_id:
+        return
+
+    if db_user.clan_role == ClanRole.LEADER.value:
+        await callback.answer("رهبر کلن نمی‌تواند کلن را ترک کند! باید ابتدا کلن را حذف یا منتقل کنید.", show_alert=True)
+        return
+
+    db_user.clan_id = None
+    db_user.clan_role = ClanRole.MEMBER.value
+    await db.commit()
+
+    await callback.message.edit_text("🚪 **شما از کلن خارج شدید.**", reply_markup=get_main_menu_keyboard(), parse_mode="Markdown")
+        # ==============================================================================
+# 📄 bot.py - PART 8/8: ADMIN PANEL & MAIN BOT ENTRYPOINT
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 👑 پنل ادمین و مدیریت (ADMIN HANDLERS)
+# ------------------------------------------------------------------------------
+@main_router.message(Command("admin"))
+async def cmd_admin_panel(message: Message, is_admin: bool):
+    if not is_admin:
+        await message.answer("⛔ شما دسترسی ادمین ندارید.")
+        return
+
+    text = "👑 **پنل مدیریت ربات پسارستاخیزی:**\nاز دکمه‌های زیر استفاده کنید."
+    await message.answer(text, reply_markup=get_admin_keyboard(), parse_mode="Markdown")
+
+
+@main_router.callback_query(F.data == "admin:stats")
+async def admin_stats_handler(callback: CallbackQuery, db: AsyncSession, is_admin: bool):
+    if not is_admin:
+        return
+
+    total_users = (await db.execute(select(func.count(User.id)))).scalar()
+    total_clans = (await db.execute(select(func.count(Clan.id)))).scalar()
+    total_kills = (await db.execute(select(func.sum(User.zombie_kills)))).scalar() or 0
+
+    text = (
+        f"📊 **آمار کامل سرور:**\n\n"
+        f"👥 **تعداد کل بازماندگان:** `{total_users}`\n"
+        f"🏰 **تعداد کلن‌های فعال:** `{total_clans}`\n"
+        f"💀 **مجموع زامبی‌های کشته‌شده:** `{total_kills}`"
+    )
+    await callback.message.edit_text(text, reply_markup=get_admin_keyboard(), parse_mode="Markdown")
+
+
+@main_router.callback_query(F.data == "admin:broadcast")
+async def admin_broadcast_start(callback: CallbackQuery, state: FSMContext, is_admin: bool):
+    if not is_admin:
+        return
+
+    await state.set_state(AdminStates.waiting_for_broadcast_text)
+    await callback.message.edit_text("📢 **متن پیام همگانی را ارسال کنید:**", parse_mode="Markdown")
+
+
+@main_router.message(AdminStates.waiting_for_broadcast_text)
+async def admin_broadcast_process(message: Message, state: FSMContext, db: AsyncSession, bot: Bot):
+    broadcast_text = message.text
+    stmt = select(User.telegram_id)
+    res = await db.execute(stmt)
+    users = res.scalars().all()
+
+    success_count = 0
+    for tid in users:
+        try:
+            await bot.send_message(tid, f"📢 **پیام مدیریت:**\n\n{broadcast_text}", parse_mode="Markdown")
+            success_count += 1
+            await asyncio.sleep(0.05)
+        except Exception:
+            continue
+
+    await state.clear()
+    await message.answer(f"✅ پیام همگانی با موفقیت به {success_count} کاربر ارسال شد.")
+
+
+# ------------------------------------------------------------------------------
+# 📖 راهنما و پشتیبانی
+# ------------------------------------------------------------------------------
+@main_router.message(F.text == "📖 راهنما و پشتیبانی")
+async def show_help(message: Message):
+    help_text = (
+        "📖 **راهنمای بازی بقا در دنیای زامبی‌ها:**\n\n"
+        "1️⃣ **کاوش:** با رفتن به بخش کاوش، اسکرپ (قطعات) و غنیمت به دست می‌آورید.\n"
+        "2️⃣ **مبارزه:** زامبی‌ها را شکست دهید تا XP و اسکرپ بگیرید و سطح خود را بالا ببرید.\n"
+        "3️⃣ **پناهگاه:** پناهگاه خود را ارتقا دهید تا به صورت خودکار آب و غذا تولید کند.\n"
+        "4️⃣ **کلن:** با دیگران متحد شوید و کلن تشکیل دهید.\n"
+        "5️⃣ **علائم حیاتی:** حواستان به HP، گرسنگی و تشنگی باشد!"
+    )
+    await message.answer(help_text, parse_mode="Markdown")
+
+
+# ------------------------------------------------------------------------------
+# 🚀 نقطه ورود اصلی و اجرای ربات (MAIN ASYNC ENGINE)
+# ------------------------------------------------------------------------------
+async def main():
+    logger.info("در حال آماده‌سازی دیتابیس و راه‌اندازی ربات...")
+
+    # ساخت جدول‌ها در صورت عدم وجود
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    # ثبت داده‌های اولیه دیتابیس
+    async with AsyncSessionLocal() as session:
+        await seed_initial_game_data(session)
+
+    bot = Bot(token=BOT_TOKEN)
+    dp = Dispatcher(storage=MemoryStorage())
+
+    # ثبت میدل‌ورها (Middlewares)
+    dp.message.middleware(DbSessionMiddleware())
+    dp.callback_query.middleware(DbSessionMiddleware())
+
+    dp.message.middleware(UserTrackerMiddleware())
+    dp.callback_query.middleware(UserTrackerMiddleware())
+
+    dp.message.middleware(AdminMiddleware())
+    dp.callback_query.middleware(AdminMiddleware())
+
+    # ثبت روتور اصلی
+    dp.include_router(main_router)
+
+    logger.info("🤖 ربات با موفقیت فعال شد و آماده دریافت دستورات است!")
+    
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await bot.session.close()
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("ربات متوقف شد.")
+    
+    
