@@ -9,17 +9,20 @@ TOKEN = "8875102057:AAE5JvIk9HhGoeizZhYUjyRvSdCRIsEzoxU"
 
 bot = telebot.TeleBot(TOKEN)
 
-# اطلاعات کانال‌ها
-channels = {}
+# اطلاعات کاربران
+users = {}
 
-# منتظر دریافت آیدی کانال
 waiting_for_channel = set()
+waiting_for_text = set()
 
 
 def iran_time():
-    return datetime.now(
-        ZoneInfo("Asia/Tehran")
-    ).strftime("%H:%M")
+    now = datetime.now(ZoneInfo("Asia/Tehran"))
+
+    hour_12 = now.strftime("%I:%M").lstrip("0")
+    hour_24 = now.strftime("%H:%M")
+
+    return hour_12, hour_24
 
 
 # =========================
@@ -29,30 +32,60 @@ def iran_time():
 @bot.message_handler(commands=["start"])
 def start(message):
 
+    user_id = message.from_user.id
+
+    if user_id not in users:
+        users[user_id] = {
+            "channel": None,
+            "message_id": None,
+            "running": False,
+            "extra_text": ""
+        }
+
     keyboard = types.InlineKeyboardMarkup()
 
-    add_button = types.InlineKeyboardButton(
-        "➕ افزودن کانال",
-        callback_data="add_channel"
+    keyboard.add(
+        types.InlineKeyboardButton(
+            "📢 تعیین کانال",
+            callback_data="set_channel"
+        )
     )
 
-    keyboard.add(add_button)
+    keyboard.add(
+        types.InlineKeyboardButton(
+            "📝 تعیین متن اضافه",
+            callback_data="set_text"
+        )
+    )
+
+    keyboard.add(
+        types.InlineKeyboardButton(
+            "🕐 شروع ساعت",
+            callback_data="start_clock"
+        )
+    )
+
+    keyboard.add(
+        types.InlineKeyboardButton(
+            "⛔ توقف ساعت",
+            callback_data="stop_clock"
+        )
+    )
 
     bot.send_message(
         message.chat.id,
         "سلام 👋\n\n"
-        "برای شروع، کانال خودت رو اضافه کن.\n"
-        "⚠️ ربات باید ادمین کانال باشد.",
+        "از دکمه‌های زیر تنظیمات ساعت رو انجام بده.",
         reply_markup=keyboard
     )
 
 
 # =========================
-# دکمه افزودن کانال
+# تعیین کانال
 # =========================
 
-@bot.callback_query_handler(func=lambda call: call.data == "add_channel")
-def add_channel(call):
+@bot.callback_query_handler(func=lambda call: call.data == "set_channel")
+def set_channel(call):
 
     waiting_for_channel.add(call.from_user.id)
 
@@ -60,15 +93,12 @@ def add_channel(call):
 
     bot.send_message(
         call.message.chat.id,
-        "آیدی کانال رو بفرست.\n\n"
+        "📢 آیدی کانال رو بفرست:\n\n"
         "مثال:\n"
-        "@MyChannel"
+        "@MyChannel\n\n"
+        "⚠️ ربات باید داخل کانال ادمین باشد."
     )
 
-
-# =========================
-# دریافت آیدی کانال
-# =========================
 
 @bot.message_handler(
     func=lambda message:
@@ -77,46 +107,76 @@ def add_channel(call):
 def receive_channel(message):
 
     user_id = message.from_user.id
-
     channel = message.text.strip()
 
     if not channel.startswith("@"):
         bot.send_message(
             message.chat.id,
-            "❌ آیدی کانال باید با @ شروع بشه.\n\n"
-            "مثال:\n"
-            "@MyChannel"
+            "❌ آیدی کانال باید با @ شروع بشه."
         )
         return
 
     waiting_for_channel.discard(user_id)
 
-    channels[user_id] = {
-        "channel": channel,
-        "message_id": None,
-        "running": False
-    }
+    if user_id not in users:
+        users[user_id] = {
+            "channel": None,
+            "message_id": None,
+            "running": False,
+            "extra_text": ""
+        }
 
-    keyboard = types.InlineKeyboardMarkup()
-
-    start_button = types.InlineKeyboardButton(
-        "🕐 شروع ساعت",
-        callback_data="start_clock"
-    )
-
-    stop_button = types.InlineKeyboardButton(
-        "⛔ توقف ساعت",
-        callback_data="stop_clock"
-    )
-
-    keyboard.add(start_button)
-    keyboard.add(stop_button)
+    users[user_id]["channel"] = channel
 
     bot.send_message(
         message.chat.id,
         f"✅ کانال ثبت شد:\n{channel}\n\n"
-        "حالا روی «🕐 شروع ساعت» بزن.",
-        reply_markup=keyboard
+        "حالا می‌تونی ساعت رو شروع کنی."
+    )
+
+
+# =========================
+# تعیین متن اضافه
+# =========================
+
+@bot.callback_query_handler(func=lambda call: call.data == "set_text")
+def set_text(call):
+
+    waiting_for_text.add(call.from_user.id)
+
+    bot.answer_callback_query(call.id)
+
+    bot.send_message(
+        call.message.chat.id,
+        "📝 متنی که می‌خوای زیر ساعت نمایش داده بشه رو بفرست.\n\n"
+        "مثال:\n"
+        "KIAN 🐺"
+    )
+
+
+@bot.message_handler(
+    func=lambda message:
+    message.from_user.id in waiting_for_text
+)
+def receive_text(message):
+
+    user_id = message.from_user.id
+
+    waiting_for_text.discard(user_id)
+
+    if user_id not in users:
+        users[user_id] = {
+            "channel": None,
+            "message_id": None,
+            "running": False,
+            "extra_text": ""
+        }
+
+    users[user_id]["extra_text"] = message.text
+
+    bot.send_message(
+        message.chat.id,
+        "✅ متن اضافه ذخیره شد."
     )
 
 
@@ -129,14 +189,14 @@ def start_clock(call):
 
     user_id = call.from_user.id
 
-    if user_id not in channels:
+    if user_id not in users or not users[user_id]["channel"]:
         bot.answer_callback_query(
             call.id,
-            "❌ اول کانال رو اضافه کن."
+            "❌ اول کانال رو تعیین کن."
         )
         return
 
-    data = channels[user_id]
+    data = users[user_id]
 
     if data["running"]:
         bot.answer_callback_query(
@@ -147,12 +207,18 @@ def start_clock(call):
 
     channel = data["channel"]
 
+    hour_12, hour_24 = iran_time()
+
+    text = f"🕐 ساعت ایران\n\n{hour_12}\n{hour_24}"
+
+    if data["extra_text"]:
+        text += f"\n\n{data['extra_text']}"
+
     try:
 
-        # ارسال پیام اولیه
         msg = bot.send_message(
             channel,
-            f"🕐 ساعت ایران\n\n{iran_time()}"
+            text
         )
 
         data["message_id"] = msg.message_id
@@ -192,14 +258,10 @@ def stop_clock(call):
 
     user_id = call.from_user.id
 
-    if user_id not in channels:
-        bot.answer_callback_query(
-            call.id,
-            "❌ کانالی ثبت نشده."
-        )
+    if user_id not in users:
         return
 
-    channels[user_id]["running"] = False
+    users[user_id]["running"] = False
 
     bot.answer_callback_query(
         call.id,
@@ -213,7 +275,7 @@ def stop_clock(call):
 
 
 # =========================
-# بروزرسانی ساعت‌ها
+# بروزرسانی ساعت
 # =========================
 
 def clock_worker():
@@ -224,12 +286,11 @@ def clock_worker():
 
         current_minute = iran_time()
 
-        # فقط وقتی دقیقه تغییر کرد
         if current_minute != last_minute:
 
             last_minute = current_minute
 
-            for user_id, data in list(channels.items()):
+            for user_id, data in list(users.items()):
 
                 if not data["running"]:
                     continue
@@ -237,10 +298,21 @@ def clock_worker():
                 channel = data["channel"]
                 message_id = data["message_id"]
 
+                hour_12, hour_24 = iran_time()
+
+                text = (
+                    f"🕐 ساعت ایران\n\n"
+                    f"{hour_12}\n"
+                    f"{hour_24}"
+                )
+
+                if data["extra_text"]:
+                    text += f"\n\n{data['extra_text']}"
+
                 try:
 
                     bot.edit_message_text(
-                        f"🕐 ساعت ایران\n\n{current_minute}",
+                        text,
                         channel,
                         message_id
                     )
@@ -262,7 +334,6 @@ threading.Thread(
     target=clock_worker,
     daemon=True
 ).start()
-
 
 print("Bot started...")
 
