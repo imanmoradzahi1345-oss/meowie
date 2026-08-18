@@ -3,12 +3,77 @@ from telebot import types
 import threading
 import time
 
+# =========================
+# TOKEN
+# =========================
+
 TOKEN = "8875102057:AAE5JvIk9HhGoeizZhYUjyRvSdCRIsEzoxU"
 
 bot = telebot.TeleBot(TOKEN)
 
+# =========================
+# DATABASE
+# =========================
+
 users = {}
+
 waiting_channel = set()
+
+# برای جلوگیری از اجرای چند شمارش همزمان
+worker_locks = {}
+
+
+# =========================
+# ساخت کاربر
+# =========================
+
+def create_user(user_id):
+
+    if user_id not in users:
+
+        users[user_id] = {
+            "channel": None,
+            "counting": False
+        }
+
+
+# =========================
+# پنل اصلی
+# =========================
+
+def show_panel(chat_id):
+
+    keyboard = types.InlineKeyboardMarkup(row_width=2)
+
+    channel_button = types.InlineKeyboardButton(
+        "📢 تعیین کانال",
+        callback_data="set_channel"
+    )
+
+    start_button = types.InlineKeyboardButton(
+        "🐺 شروع شمارش",
+        callback_data="start_count"
+    )
+
+    stop_button = types.InlineKeyboardButton(
+        "⛔ توقف",
+        callback_data="stop_count"
+    )
+
+    keyboard.add(channel_button)
+
+    keyboard.add(
+        start_button,
+        stop_button
+    )
+
+    bot.send_message(
+        chat_id,
+        "🐺 پنل گرگینه\n\n"
+        "📢 اول کانال را تعیین کن.\n"
+        "بعد روی «🐺 شروع شمارش» بزن.",
+        reply_markup=keyboard
+    )
 
 
 # =========================
@@ -20,43 +85,9 @@ def start(message):
 
     user_id = message.from_user.id
 
-    if user_id not in users:
-        users[user_id] = {
-            "channel": None,
-            "counting": False
-        }
+    create_user(user_id)
 
     show_panel(message.chat.id)
-
-
-def show_panel(chat_id):
-
-    keyboard = types.InlineKeyboardMarkup(row_width=2)
-
-    channel_btn = types.InlineKeyboardButton(
-        "📢 تعیین کانال",
-        callback_data="set_channel"
-    )
-
-    start_btn = types.InlineKeyboardButton(
-        "🐺 شروع شمارش",
-        callback_data="start_count"
-    )
-
-    stop_btn = types.InlineKeyboardButton(
-        "⛔ خاموش",
-        callback_data="stop_count"
-    )
-
-    keyboard.add(channel_btn)
-    keyboard.add(start_btn, stop_btn)
-
-    bot.send_message(
-        chat_id,
-        "🐺 پنل گرگینه\n\n"
-        "از دکمه‌های زیر استفاده کن:",
-        reply_markup=keyboard
-    )
 
 
 # =========================
@@ -68,13 +99,21 @@ def show_panel(chat_id):
 )
 def set_channel(call):
 
-    waiting_channel.add(call.from_user.id)
+    user_id = call.from_user.id
 
-    bot.answer_callback_query(call.id)
+    create_user(user_id)
+
+    waiting_channel.add(user_id)
+
+    bot.answer_callback_query(
+        call.id,
+        "📢 منتظر آیدی کانال هستم"
+    )
 
     bot.send_message(
         call.message.chat.id,
         "📢 آیدی کانال را بفرست:\n\n"
+        "مثال:\n"
         "@MyChannel\n\n"
         "⚠️ ربات باید ادمین کانال باشد."
     )
@@ -92,6 +131,10 @@ def receive_channel(message):
 
     user_id = message.from_user.id
 
+    if not message.text:
+
+        return
+
     channel = message.text.strip()
 
     if not channel.startswith("@"):
@@ -107,88 +150,111 @@ def receive_channel(message):
 
     waiting_channel.discard(user_id)
 
-    if user_id not in users:
-        users[user_id] = {
-            "channel": None,
-            "counting": False
-        }
+    create_user(user_id)
 
     users[user_id]["channel"] = channel
 
     bot.send_message(
         message.chat.id,
-        f"✅ کانال ثبت شد:\n\n{channel}"
+        f"✅ کانال ثبت شد.\n\n"
+        f"📢 {channel}\n\n"
+        "حالا می‌توانی شمارش را شروع کنی."
     )
 
     show_panel(message.chat.id)
 
 
 # =========================
-# دکمه شروع
+# شروع از دکمه
 # =========================
 
 @bot.callback_query_handler(
     func=lambda call: call.data == "start_count"
 )
-def start_count(call):
+def start_count_button(call):
 
     user_id = call.from_user.id
 
-    if user_id not in users:
-        bot.answer_callback_query(
-            call.id,
-            "❌ اول /start را بزن."
-        )
-        return
+    create_user(user_id)
 
-    channel = users[user_id]["channel"]
+    data = users[user_id]
 
-    if not channel:
+    if not data["channel"]:
+
         bot.answer_callback_query(
             call.id,
             "❌ اول کانال را تعیین کن."
         )
+
         return
 
-    if users[user_id]["counting"]:
+    if data["counting"]:
+
         bot.answer_callback_query(
             call.id,
             "⚠️ شمارش از قبل فعال است."
         )
+
         return
 
-    users[user_id]["counting"] = True
+    # تست دسترسی به کانال
+    try:
+
+        bot.get_chat(data["channel"])
+
+    except Exception as e:
+
+        bot.answer_callback_query(
+            call.id,
+            "❌ کانال پیدا نشد."
+        )
+
+        bot.send_message(
+            call.message.chat.id,
+            "❌ ربات نتوانست کانال را پیدا کند.\n\n"
+            "مطمئن شو:\n"
+            "1. آیدی کانال درست است.\n"
+            "2. ربات داخل کانال است.\n"
+            "3. ربات ادمین کانال است."
+        )
+
+        print("CHANNEL ERROR:", e)
+
+        return
+
+    data["counting"] = True
 
     bot.answer_callback_query(
         call.id,
-        "🐺 شروع شد!"
+        "🐺 شمارش شروع شد!"
     )
 
     bot.send_message(
         call.message.chat.id,
-        f"🐺 شمارش در {channel} شروع شد."
+        f"🐺 شمارش شروع شد.\n\n"
+        f"📢 کانال: {data['channel']}"
     )
 
-    threading.Thread(
-        target=count_worker,
-        args=(channel, user_id),
-        daemon=True
-    ).start()
+    start_worker(
+        user_id,
+        data["channel"]
+    )
 
 
 # =========================
-# دکمه توقف
+# توقف از دکمه
 # =========================
 
 @bot.callback_query_handler(
     func=lambda call: call.data == "stop_count"
 )
-def stop_count(call):
+def stop_count_button(call):
 
     user_id = call.from_user.id
 
-    if user_id in users:
-        users[user_id]["counting"] = False
+    create_user(user_id)
+
+    users[user_id]["counting"] = False
 
     bot.answer_callback_query(
         call.id,
@@ -202,56 +268,79 @@ def stop_count(call):
 
 
 # =========================
-# دستور متنی بشمار
+# دستور بشمار
 # =========================
 
 @bot.message_handler(
     func=lambda message:
-    message.text and message.text.strip() == "بشمار"
+    message.text
+    and message.text.strip() == "بشمار"
 )
-def text_start(message):
+def start_count_text(message):
 
     user_id = message.from_user.id
 
-    if user_id not in users:
-        users[user_id] = {
-            "channel": None,
-            "counting": False
-        }
+    create_user(user_id)
 
-    if not users[user_id]["channel"]:
+    data = users[user_id]
+
+    if not data["channel"]:
+
         bot.send_message(
             message.chat.id,
-            "❌ اول کانال را تعیین کن."
+            "❌ اول کانال را تعیین کن.\n\n"
+            "روی «📢 تعیین کانال» بزن."
         )
+
         return
 
-    if users[user_id]["counting"]:
+    if data["counting"]:
+
+        bot.send_message(
+            message.chat.id,
+            "⚠️ شمارش از قبل در حال اجراست."
+        )
+
         return
 
-    users[user_id]["counting"] = True
+    data["counting"] = True
 
-    threading.Thread(
-        target=count_worker,
-        args=(users[user_id]["channel"], user_id),
-        daemon=True
-    ).start()
+    bot.send_message(
+        message.chat.id,
+        "🐺 شروع شد!"
+    )
+
+    start_worker(
+        user_id,
+        data["channel"]
+    )
 
 
 # =========================
-# دستور متنی خاموش
+# دستور خاموش
 # =========================
 
 @bot.message_handler(
     func=lambda message:
-    message.text and message.text.strip() == "خاموش"
+    message.text
+    and message.text.strip() == "خاموش"
 )
-def text_stop(message):
+def stop_count_text(message):
 
     user_id = message.from_user.id
 
-    if user_id in users:
-        users[user_id]["counting"] = False
+    create_user(user_id)
+
+    if not users[user_id]["counting"]:
+
+        bot.send_message(
+            message.chat.id,
+            "❌ شمارشی در حال اجرا نیست."
+        )
+
+        return
+
+    users[user_id]["counting"] = False
 
     bot.send_message(
         message.chat.id,
@@ -260,41 +349,148 @@ def text_stop(message):
 
 
 # =========================
+# اجرای Worker
+# =========================
+
+def start_worker(user_id, channel):
+
+    if worker_locks.get(user_id):
+
+        return
+
+    worker_locks[user_id] = True
+
+    thread = threading.Thread(
+        target=count_worker,
+        args=(user_id, channel),
+        daemon=True
+    )
+
+    thread.start()
+
+
+# =========================
 # شمارش
 # =========================
 
-def count_worker(channel, user_id):
+def count_worker(user_id, channel):
 
     number = 1
 
-    while users.get(user_id, {}).get("counting", False):
+    print(
+        f"🐺 Counter started: {channel}"
+    )
+
+    try:
+
+        while users.get(
+            user_id,
+            {}
+        ).get(
+            "counting",
+            False
+        ):
+
+            try:
+
+                bot.send_message(
+                    channel,
+                    f"{number} (به عنوان گرگینه)"
+                )
+
+                number += 1
+
+                # سرعت بالا
+                time.sleep(0.1)
+
+            except Exception as e:
+
+                error_text = str(e)
+
+                print(
+                    f"COUNT ERROR: {error_text}"
+                )
+
+                # اگر تلگرام FloodWait داد
+                if "Flood control exceeded" in error_text:
+
+                    print(
+                        "⚠️ Telegram flood limit!"
+                    )
+
+                    time.sleep(5)
+
+                    continue
+
+                # خطای موقت اتصال
+                if (
+                    "502" in error_text
+                    or "503" in error_text
+                    or "504" in error_text
+                    or "Bad Gateway" in error_text
+                ):
+
+                    print(
+                        "🔄 Temporary Telegram error..."
+                    )
+
+                    time.sleep(3)
+
+                    continue
+
+                # خطای جدی
+                users[user_id]["counting"] = False
+
+                break
+
+    finally:
+
+        worker_locks[user_id] = False
+
+        print(
+            f"⛔ Counter stopped: {channel}"
+        )
+
+
+# =========================
+# مدیریت خطاهای Polling
+# =========================
+
+def run_bot():
+
+    while True:
 
         try:
 
-            bot.send_message(
-                channel,
-                f"{number} (به عنوان گرگینه)"
+            print(
+                "🐺 Werewolf Bot Started..."
             )
 
-            number += 1
-
-            time.sleep(0.05)
+            bot.infinity_polling(
+                skip_pending=True,
+                timeout=30,
+                long_polling_timeout=30
+            )
 
         except Exception as e:
 
-            print("ERROR:", e)
+            print(
+                "⚠️ Telegram connection error:"
+            )
 
-            users[user_id]["counting"] = False
+            print(e)
 
-            break
+            print(
+                "🔄 Reconnecting in 5 seconds..."
+            )
+
+            time.sleep(3)
 
 
 # =========================
 # اجرا
 # =========================
 
-print("🐺 Werewolf Bot Started...")
+if __name__ == "__main__":
 
-bot.infinity_polling(
-    skip_pending=True
-            )
+    run_bot()
