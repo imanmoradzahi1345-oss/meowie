@@ -1,207 +1,220 @@
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
-import threading
-import time
 import sqlite3
+from datetime import datetime
 
-# ========== تنظیمات ==========
-BOT_TOKEN = "8875102057:AAE5JvIk9HhGoeizZhYUjyRvSdCRIsEzoxU"
+BOT_TOKEN = "8597049833:AAFnEjGLcOz09Duy6MIvOoMD9TA1-fiRhPE"
 ADMIN_ID = 7530457395
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-counter_state = {
-    "running": False,
-    "channel": None,
-    "interval": 6,
-    "current": 0,
-    "thread": None
-}
+waiting = set()
 
 def get_db():
-    return sqlite3.connect("counter_bot.db", check_same_thread=False)
+    return sqlite3.connect("inbox_bot.db", check_same_thread=False)
 
 def init_db():
     conn = get_db()
     c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS settings (
-        key TEXT PRIMARY KEY,
-        value TEXT
+    c.execute('''CREATE TABLE IF NOT EXISTS links (
+        admin_msg_id INTEGER PRIMARY KEY,
+        user_id INTEGER
     )''')
-    c.execute("SELECT value FROM settings WHERE key='channel'")
-    row = c.fetchone()
-    if row:
-        counter_state["channel"] = row[0]
-    c.execute("SELECT value FROM settings WHERE key='interval'")
-    row = c.fetchone()
-    if row:
-        counter_state["interval"] = int(row[0])
-    c.execute("SELECT value FROM settings WHERE key='current'")
-    row = c.fetchone()
-    if row:
-        counter_state["current"] = int(row[0])
+    c.execute('''CREATE TABLE IF NOT EXISTS replies (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        reply_text TEXT,
+        reply_type TEXT DEFAULT 'text',
+        file_id TEXT,
+        created_at TEXT,
+        seen INTEGER DEFAULT 0
+    )''')
     conn.commit()
     conn.close()
 
 init_db()
 
-def save_setting(key, value):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
-    conn.commit()
-    conn.close()
-
-def is_admin(uid):
-    return uid == ADMIN_ID
-
-def main_menu():
-    m = InlineKeyboardMarkup(row_width=1)
-    status = "🟢 روشن" if counter_state["running"] else "🔴 خاموش"
-    ch = counter_state["channel"] or "تنظیم نشده"
-    m.add(InlineKeyboardButton(f"وضعیت: {status}", callback_data="status"))
-    m.add(InlineKeyboardButton(f"📢 کانال: {ch}", callback_data="set_channel"))
-    m.add(InlineKeyboardButton(f"⏱ سرعت: هر {counter_state['interval']} ثانیه", callback_data="set_speed"))
-    m.add(InlineKeyboardButton(f"🔢 عدد فعلی: {counter_state['current']}", callback_data="noop"))
-    if counter_state["running"]:
-        m.add(InlineKeyboardButton("⏹ توقف", callback_data="stop"))
-    else:
-        m.add(InlineKeyboardButton("▶️ شروع شمارش", callback_data="start"))
-    m.add(InlineKeyboardButton("🔄 ریست عدد به ۰", callback_data="reset"))
+def new_msg_button():
+    m = InlineKeyboardMarkup()
+    m.add(InlineKeyboardButton("✉️ ارسال پیام جدید", callback_data="new_message"))
     return m
 
-def counter_worker():
-    while counter_state["running"]:
-        try:
-            if not counter_state["channel"]:
-                break
-            counter_state["current"] += 1
-            save_setting("current", counter_state["current"])
-            bot.send_message(counter_state["channel"], str(counter_state["current"]))
-        except Exception as e:
-            try:
-                bot.send_message(ADMIN_ID, f"❌ خطا در ارسال:\n{e}")
-            except:
-                pass
-            time.sleep(3)
-        time.sleep(counter_state["interval"])
+def view_reply_button(reply_id):
+    m = InlineKeyboardMarkup()
+    m.add(InlineKeyboardButton("👁 مشاهده پاسخ", callback_data=f"view_{reply_id}"))
+    m.add(InlineKeyboardButton("✉️ ارسال پیام جدید", callback_data="new_message"))
+    return m
 
 @bot.message_handler(commands=['start'])
 def start(message):
-    if not is_admin(message.from_user.id):
-        bot.reply_to(message, "فقط ادمین می‌تونه از این ربات استفاده کنه.")
+    uid = message.from_user.id
+
+    if uid == ADMIN_ID:
+        bot.reply_to(message, "👋 سلام کیان\nپیام کاربران اینجا برات فوروارد می‌شه.\nروی پیام ریپلای کن تا جوابشون بدی.")
         return
-    if message.chat.type != "private":
-        bot.reply_to(message, "فقط در پیوی ربات کار می‌کنه.")
-        return
 
-    text = """
-🔢 **ربات شمارنده کانال**
-
-۱. ربات رو تو کانال ادمین کن
-۲. کانال رو تنظیم کن
-۳. سرعت رو مشخص کن
-۴. شروع شمارش رو بزن
-
-ربات بدون توقف عدد می‌فرسته.
-"""
-    bot.reply_to(message, text, parse_mode="Markdown", reply_markup=main_menu())
+    waiting.add(uid)
+    bot.reply_to(
+        message,
+        "سلام 👋\n\n"
+        "تو در حال ارسال پیام برای **کیان** هستی (به صورت ناشناس).\n\n"
+        "پیامت رو بنویس و بفرست:",
+        parse_mode="Markdown"
+    )
 
 @bot.callback_query_handler(func=lambda call: True)
 def callbacks(call):
-    if not is_admin(call.from_user.id):
-        bot.answer_callback_query(call.id, "دسترسی نداری", show_alert=True)
-        return
-    if call.message.chat.type != "private":
-        bot.answer_callback_query(call.id, "فقط پیوی", show_alert=True)
-        return
-
+    uid = call.from_user.id
     data = call.data
 
-    if data == "status":
+    if data == "new_message":
+        waiting.add(uid)
         bot.answer_callback_query(call.id)
-
-    elif data == "set_channel":
-        bot.edit_message_text(
-            "📢 آیدی یا یوزرنیم کانال را بفرست:\n\n"
-            "مثال:\n"
-            "`@mychannel`\n"
-            "یا\n"
-            "`-1001234567890`\n\n"
-            "نکته: ربات باید ادمین کانال باشد.",
-            call.message.chat.id, call.message.message_id, parse_mode="Markdown"
+        bot.send_message(
+            call.message.chat.id,
+            "✉️ پیام جدیدت رو برای **کیان** بنویس:",
+            parse_mode="Markdown"
         )
-        bot.register_next_step_handler(call.message, save_channel)
-
-    elif data == "set_speed":
-        bot.edit_message_text(
-            "⏱ سرعت را به ثانیه بفرست:\n\n"
-            "مثال: `6` یعنی هر ۶ ثانیه یک عدد\n"
-            "حداقل: ۱ ثانیه",
-            call.message.chat.id, call.message.message_id, parse_mode="Markdown"
-        )
-        bot.register_next_step_handler(call.message, save_speed)
-
-    elif data == "start":
-        if not counter_state["channel"]:
-            bot.answer_callback_query(call.id, "اول کانال را تنظیم کن!", show_alert=True)
-            return
-        if counter_state["running"]:
-            bot.answer_callback_query(call.id, "قبلاً روشنه!", show_alert=True)
-            return
-
-        counter_state["running"] = True
-        t = threading.Thread(target=counter_worker, daemon=True)
-        counter_state["thread"] = t
-        t.start()
-        bot.answer_callback_query(call.id, "شمارش شروع شد ✅", show_alert=True)
-        bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=main_menu())
-
-    elif data == "stop":
-        counter_state["running"] = False
-        bot.answer_callback_query(call.id, "متوقف شد ⏹", show_alert=True)
-        bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=main_menu())
-
-    elif data == "reset":
-        counter_state["current"] = 0
-        save_setting("current", 0)
-        bot.answer_callback_query(call.id, "عدد ریست شد به ۰", show_alert=True)
-        bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=main_menu())
-
-    elif data == "noop":
-        bot.answer_callback_query(call.id)
-
-def save_channel(message):
-    if not is_admin(message.from_user.id):
         return
-    ch = message.text.strip()
-    try:
-        chat = bot.get_chat(ch)
-        test_msg = bot.send_message(ch, "✅ ربات متصل شد و آماده شمارش است.")
+
+    if data.startswith("view_"):
+        reply_id = int(data.split("_")[1])
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("SELECT user_id, reply_text, reply_type, file_id FROM replies WHERE id=?", (reply_id,))
+        row = c.fetchone()
+        if not row or row[0] != uid:
+            bot.answer_callback_query(call.id, "پیامی پیدا نشد", show_alert=True)
+            conn.close()
+            return
+
+        c.execute("UPDATE replies SET seen=1 WHERE id=?", (reply_id,))
+        conn.commit()
+        conn.close()
+
+        bot.answer_callback_query(call.id)
+
+        # نمایش پاسخ
+        if row[2] == "text":
+            bot.send_message(uid, f"💬 **پاسخ کیان:**\n\n{row[1]}", parse_mode="Markdown", reply_markup=new_msg_button())
+        elif row[2] == "photo":
+            bot.send_photo(uid, row[3], caption=f"💬 پاسخ کیان:\n{row[1] or ''}", reply_markup=new_msg_button())
+        elif row[2] == "voice":
+            bot.send_voice(uid, row[3], caption="💬 پاسخ کیان", reply_markup=new_msg_button())
+        elif row[2] == "video":
+            bot.send_video(uid, row[3], caption=f"💬 پاسخ کیان:\n{row[1] or ''}", reply_markup=new_msg_button())
+        elif row[2] == "sticker":
+            bot.send_sticker(uid, row[3])
+            bot.send_message(uid, "💬 پاسخ کیان (استیکر بالا)", reply_markup=new_msg_button())
+        else:
+            bot.send_message(uid, f"💬 پاسخ کیان:\n{row[1] or ''}", reply_markup=new_msg_button())
+
+@bot.message_handler(func=lambda m: m.chat.type == "private", content_types=['text', 'photo', 'video', 'voice', 'document', 'sticker', 'animation'])
+def handle_message(message):
+    uid = message.from_user.id
+
+    # ----- جواب ادمین (ریپلای روی پیام فوروارد شده) -----
+    if uid == ADMIN_ID:
+        if not message.reply_to_message:
+            bot.reply_to(message, "برای جواب دادن، روی پیام کاربر ریپلای کن.")
+            return
+
+        # پیدا کردن کاربر از روی پیام فوروارد/لینک
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("SELECT user_id FROM links WHERE admin_msg_id=?", (message.reply_to_message.message_id,))
+        row = c.fetchone()
+
+        # اگر روی پیام اطلاعات هم ریپلای کرده بود
+        if not row:
+            # گاهی ادمین روی پیام دوم (اطلاعات) ریپلای می‌کنه
+            c.execute("SELECT user_id FROM links WHERE admin_msg_id=?", (message.reply_to_message.message_id - 1,))
+            row = c.fetchone()
+
+        if not row:
+            bot.reply_to(message, "نتونستم کاربر رو پیدا کنم. روی پیام فوروارد شده ریپلای کن.")
+            conn.close()
+            return
+
+        target = row[0]
+
+        # ذخیره پاسخ
+        reply_type = "text"
+        file_id = None
+        reply_text = message.text or message.caption or ""
+
+        if message.photo:
+            reply_type = "photo"
+            file_id = message.photo[-1].file_id
+        elif message.voice:
+            reply_type = "voice"
+            file_id = message.voice.file_id
+        elif message.video:
+            reply_type = "video"
+            file_id = message.video.file_id
+        elif message.sticker:
+            reply_type = "sticker"
+            file_id = message.sticker.file_id
+        elif message.document:
+            reply_type = "document"
+            file_id = message.document.file_id
+
+        c.execute(
+            "INSERT INTO replies (user_id, reply_text, reply_type, file_id, created_at) VALUES (?, ?, ?, ?, ?)",
+            (target, reply_text, reply_type, file_id, datetime.now().strftime("%Y-%m-%d %H:%M"))
+        )
+        reply_id = c.lastrowid
+        conn.commit()
+        conn.close()
+
+        # اطلاع به کاربر
         try:
-            bot.delete_message(ch, test_msg.message_id)
-        except:
-            pass
-
-        counter_state["channel"] = ch
-        save_setting("channel", ch)
-        bot.reply_to(message, f"✅ کانال تنظیم شد:\n{chat.title}\n`{ch}`", parse_mode="Markdown", reply_markup=main_menu())
-    except Exception as e:
-        bot.reply_to(message, f"❌ خطا:\n{e}\n\nمطمئن شو ربات ادمین کانال است و آیدی درست است.", reply_markup=main_menu())
-
-def save_speed(message):
-    if not is_admin(message.from_user.id):
+            bot.send_message(
+                target,
+                "💬 **کیان جوابت رو داد**\n\nبرای دیدن پاسخ، روی دکمه زیر بزن:",
+                parse_mode="Markdown",
+                reply_markup=view_reply_button(reply_id)
+            )
+            bot.reply_to(message, "✅ جوابت برای کاربر ارسال شد.")
+        except Exception as e:
+            bot.reply_to(message, f"خطا در ارسال به کاربر:\n{e}")
         return
-    try:
-        sec = int(message.text.strip())
-        if sec < 1:
-            bot.reply_to(message, "حداقل ۱ ثانیه باید باشد.")
-            return
-        counter_state["interval"] = sec
-        save_setting("interval", sec)
-        bot.reply_to(message, f"✅ سرعت تنظیم شد: هر {sec} ثانیه", reply_markup=main_menu())
-    except:
-        bot.reply_to(message, "فقط عدد بفرست (مثال: 6)")
 
-print("🔢 ربات شمارنده روشن شد")
+    # ----- پیام کاربر -----
+    if uid not in waiting:
+        bot.reply_to(message, "برای ارسال پیام روی دکمه زیر بزن:", reply_markup=new_msg_button())
+        return
+
+    try:
+        # فوروارد اصل پیام
+        fwd = bot.forward_message(ADMIN_ID, message.chat.id, message.message_id)
+
+        name = message.from_user.first_name or ""
+        uname = f"@{message.from_user.username}" if message.from_user.username else "ندارد"
+        info = bot.send_message(
+            ADMIN_ID,
+            f"📥 پیام جدید\n"
+            f"👤 {name}\n"
+            f"🆔 `{uid}`\n"
+            f"یوزرنیم: {uname}\n\n"
+            f"برای جواب، روی پیام بالا ریپلای کن.",
+            parse_mode="Markdown"
+        )
+
+        # ذخیره لینک هر دو پیام به کاربر
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("INSERT OR REPLACE INTO links (admin_msg_id, user_id) VALUES (?, ?)", (fwd.message_id, uid))
+        c.execute("INSERT OR REPLACE INTO links (admin_msg_id, user_id) VALUES (?, ?)", (info.message_id, uid))
+        conn.commit()
+        conn.close()
+
+    except Exception as e:
+        bot.reply_to(message, "خطا در ارسال. دوباره تلاش کن.")
+        return
+
+    waiting.discard(uid)
+    bot.reply_to(message, "✅ پیامت برای کیان ارسال شد.", reply_markup=new_msg_button())
+
+print("ربات پیام‌رسان + پاسخ روشن شد")
 bot.infinity_polling()
