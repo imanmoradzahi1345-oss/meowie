@@ -1,13 +1,13 @@
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 import sqlite3
+import re
 from datetime import datetime
 
 BOT_TOKEN = "8597049833:AAFnEjGLcOz09Duy6MIvOoMD9TA1-fiRhPE"
 ADMIN_ID = 7530457395
 
 bot = telebot.TeleBot(BOT_TOKEN)
-
 waiting = set()
 
 def get_db():
@@ -45,12 +45,49 @@ def view_reply_button(reply_id):
     m.add(InlineKeyboardButton("✉️ ارسال پیام جدید", callback_data="new_message"))
     return m
 
+def save_link(admin_msg_id, user_id):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO links (admin_msg_id, user_id) VALUES (?, ?)", (admin_msg_id, user_id))
+    conn.commit()
+    conn.close()
+
+def find_user_from_reply(reply_msg):
+    """پیدا کردن کاربر از ریپلای ادمین - چند روش"""
+    if not reply_msg:
+        return None
+
+    # روش ۱: از دیتابیس با message_id
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT user_id FROM links WHERE admin_msg_id=?", (reply_msg.message_id,))
+    row = c.fetchone()
+    conn.close()
+    if row:
+        return row[0]
+
+    # روش ۲: اگر پیام فوروارد باشه، از forward_from
+    if reply_msg.forward_from:
+        return reply_msg.forward_from.id
+
+    # روش ۳: استخراج آیدی از متن پیام اطلاعات
+    text = reply_msg.text or reply_msg.caption or ""
+    match = re.search(r"🆔\s*`?(\d+)`?", text)
+    if match:
+        return int(match.group(1))
+
+    match2 = re.search(r"ID:\s*(\d+)", text)
+    if match2:
+        return int(match2.group(1))
+
+    return None
+
 @bot.message_handler(commands=['start'])
 def start(message):
     uid = message.from_user.id
 
     if uid == ADMIN_ID:
-        bot.reply_to(message, "👋 سلام کیان\nپیام کاربران اینجا برات فوروارد می‌شه.\nروی پیام ریپلای کن تا جوابشون بدی.")
+        bot.reply_to(message, "👋 سلام کیان\nپیام کاربران اینجا میاد.\nروی پیام کاربر یا پیام اطلاعات ریپلای کن تا جواب بدی.")
         return
 
     waiting.add(uid)
@@ -70,11 +107,7 @@ def callbacks(call):
     if data == "new_message":
         waiting.add(uid)
         bot.answer_callback_query(call.id)
-        bot.send_message(
-            call.message.chat.id,
-            "✉️ پیام جدیدت رو برای **کیان** بنویس:",
-            parse_mode="Markdown"
-        )
+        bot.send_message(call.message.chat.id, "✉️ پیام جدیدت رو برای **کیان** بنویس:", parse_mode="Markdown")
         return
 
     if data.startswith("view_"):
@@ -91,10 +124,8 @@ def callbacks(call):
         c.execute("UPDATE replies SET seen=1 WHERE id=?", (reply_id,))
         conn.commit()
         conn.close()
-
         bot.answer_callback_query(call.id)
 
-        # نمایش پاسخ
         if row[2] == "text":
             bot.send_message(uid, f"💬 **پاسخ کیان:**\n\n{row[1]}", parse_mode="Markdown", reply_markup=new_msg_button())
         elif row[2] == "photo":
@@ -105,7 +136,7 @@ def callbacks(call):
             bot.send_video(uid, row[3], caption=f"💬 پاسخ کیان:\n{row[1] or ''}", reply_markup=new_msg_button())
         elif row[2] == "sticker":
             bot.send_sticker(uid, row[3])
-            bot.send_message(uid, "💬 پاسخ کیان (استیکر بالا)", reply_markup=new_msg_button())
+            bot.send_message(uid, "💬 پاسخ کیان", reply_markup=new_msg_button())
         else:
             bot.send_message(uid, f"💬 پاسخ کیان:\n{row[1] or ''}", reply_markup=new_msg_button())
 
@@ -113,32 +144,17 @@ def callbacks(call):
 def handle_message(message):
     uid = message.from_user.id
 
-    # ----- جواب ادمین (ریپلای روی پیام فوروارد شده) -----
+    # ========== جواب ادمین ==========
     if uid == ADMIN_ID:
         if not message.reply_to_message:
             bot.reply_to(message, "برای جواب دادن، روی پیام کاربر ریپلای کن.")
             return
 
-        # پیدا کردن کاربر از روی پیام فوروارد/لینک
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("SELECT user_id FROM links WHERE admin_msg_id=?", (message.reply_to_message.message_id,))
-        row = c.fetchone()
-
-        # اگر روی پیام اطلاعات هم ریپلای کرده بود
-        if not row:
-            # گاهی ادمین روی پیام دوم (اطلاعات) ریپلای می‌کنه
-            c.execute("SELECT user_id FROM links WHERE admin_msg_id=?", (message.reply_to_message.message_id - 1,))
-            row = c.fetchone()
-
-        if not row:
-            bot.reply_to(message, "نتونستم کاربر رو پیدا کنم. روی پیام فوروارد شده ریپلای کن.")
-            conn.close()
+        target = find_user_from_reply(message.reply_to_message)
+        if not target:
+            bot.reply_to(message, "نتونستم کاربر رو پیدا کنم.\nروی پیام فوروارد شده یا پیام اطلاعات (که آیدی داره) ریپلای کن.")
             return
 
-        target = row[0]
-
-        # ذخیره پاسخ
         reply_type = "text"
         file_id = None
         reply_text = message.text or message.caption or ""
@@ -159,6 +175,8 @@ def handle_message(message):
             reply_type = "document"
             file_id = message.document.file_id
 
+        conn = get_db()
+        c = conn.cursor()
         c.execute(
             "INSERT INTO replies (user_id, reply_text, reply_type, file_id, created_at) VALUES (?, ?, ?, ?, ?)",
             (target, reply_text, reply_type, file_id, datetime.now().strftime("%Y-%m-%d %H:%M"))
@@ -167,7 +185,6 @@ def handle_message(message):
         conn.commit()
         conn.close()
 
-        # اطلاع به کاربر
         try:
             bot.send_message(
                 target,
@@ -175,46 +192,72 @@ def handle_message(message):
                 parse_mode="Markdown",
                 reply_markup=view_reply_button(reply_id)
             )
-            bot.reply_to(message, "✅ جوابت برای کاربر ارسال شد.")
+            bot.reply_to(message, f"✅ جواب برای کاربر `{target}` ارسال شد.", parse_mode="Markdown")
         except Exception as e:
-            bot.reply_to(message, f"خطا در ارسال به کاربر:\n{e}")
+            bot.reply_to(message, f"کاربر پیدا شد ولی ارسال نشد:\n{e}")
         return
 
-    # ----- پیام کاربر -----
+    # ========== پیام کاربر ==========
     if uid not in waiting:
         bot.reply_to(message, "برای ارسال پیام روی دکمه زیر بزن:", reply_markup=new_msg_button())
         return
 
-    try:
-        # فوروارد اصل پیام
-        fwd = bot.forward_message(ADMIN_ID, message.chat.id, message.message_id)
+    name = message.from_user.first_name or ""
+    uname = f"@{message.from_user.username}" if message.from_user.username else "ندارد"
+    sent_ok = False
 
-        name = message.from_user.first_name or ""
-        uname = f"@{message.from_user.username}" if message.from_user.username else "ندارد"
+    # اول سعی کن فوروارد کنه
+    try:
+        fwd = bot.forward_message(ADMIN_ID, message.chat.id, message.message_id)
+        save_link(fwd.message_id, uid)
+        sent_ok = True
+    except Exception:
+        # اگر فوروارد نشد، محتوا رو کپی کن
+        try:
+            if message.text:
+                m = bot.send_message(ADMIN_ID, f"📩 پیام کاربر:\n\n{message.text}")
+                save_link(m.message_id, uid)
+            elif message.photo:
+                m = bot.send_photo(ADMIN_ID, message.photo[-1].file_id, caption=message.caption or "📩 عکس کاربر")
+                save_link(m.message_id, uid)
+            elif message.voice:
+                m = bot.send_voice(ADMIN_ID, message.voice.file_id, caption="📩 ویس کاربر")
+                save_link(m.message_id, uid)
+            elif message.video:
+                m = bot.send_video(ADMIN_ID, message.video.file_id, caption=message.caption or "📩 ویدیو کاربر")
+                save_link(m.message_id, uid)
+            elif message.sticker:
+                m = bot.send_sticker(ADMIN_ID, message.sticker.file_id)
+                save_link(m.message_id, uid)
+            else:
+                m = bot.send_message(ADMIN_ID, "📩 یک پیام دریافت شد (نوع پشتیبانی‌نشده)")
+                save_link(m.message_id, uid)
+            sent_ok = True
+        except Exception as e:
+            bot.reply_to(message, "❌ خطا در ارسال. دوباره تلاش کن.")
+            return
+
+    # پیام اطلاعات + آیدی (مهم برای ریپلای)
+    try:
         info = bot.send_message(
             ADMIN_ID,
             f"📥 پیام جدید\n"
             f"👤 {name}\n"
             f"🆔 `{uid}`\n"
             f"یوزرنیم: {uname}\n\n"
-            f"برای جواب، روی پیام بالا ریپلای کن.",
+            f"برای جواب، روی این پیام یا پیام بالا ریپلای کن.",
             parse_mode="Markdown"
         )
-
-        # ذخیره لینک هر دو پیام به کاربر
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("INSERT OR REPLACE INTO links (admin_msg_id, user_id) VALUES (?, ?)", (fwd.message_id, uid))
-        c.execute("INSERT OR REPLACE INTO links (admin_msg_id, user_id) VALUES (?, ?)", (info.message_id, uid))
-        conn.commit()
-        conn.close()
-
-    except Exception as e:
-        bot.reply_to(message, "خطا در ارسال. دوباره تلاش کن.")
-        return
+        save_link(info.message_id, uid)
+    except Exception:
+        pass
 
     waiting.discard(uid)
-    bot.reply_to(message, "✅ پیامت برای کیان ارسال شد.", reply_markup=new_msg_button())
 
-print("ربات پیام‌رسان + پاسخ روشن شد")
+    if sent_ok:
+        bot.reply_to(message, "✅ پیامت برای کیان ارسال شد.", reply_markup=new_msg_button())
+    else:
+        bot.reply_to(message, "❌ خطا در ارسال.", reply_markup=new_msg_button())
+
+print("ربات پیام‌رسان اصلاح‌شده روشن شد")
 bot.infinity_polling()
