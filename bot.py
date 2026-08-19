@@ -1,4 +1,3 @@
-# ==================== بخش ۱ از ۲ ====================
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 import sqlite3
@@ -10,7 +9,7 @@ from datetime import datetime, timedelta
 try:
     from zoneinfo import ZoneInfo
     TEHRAN = ZoneInfo("Asia/Tehran")
-except:
+except Exception:
     TEHRAN = None
 
 BOT_TOKEN = "8597049833:AAFnEjGLcOz09Duy6MIvOoMD9TA1-fiRhPE"
@@ -85,6 +84,37 @@ def now_tehran():
         return datetime.now(TEHRAN)
     return datetime.now()
 
+def gregorian_to_jalali(gy, gm, gd):
+    g_d_m = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334]
+    if gy > 1600:
+        jy = 979
+        gy -= 1600
+    else:
+        jy = 0
+        gy -= 621
+    gy2 = gy + 1 if gm > 2 else gy
+    days = (365 * gy) + (gy2 + 3) // 4 - (gy2 + 99) // 100 + (gy2 + 399) // 400 - 80 + gd + g_d_m[gm - 1]
+    jy += 33 * (days // 12053)
+    days %= 12053
+    jy += 4 * (days // 1461)
+    days %= 1461
+    if days > 365:
+        jy += (days - 1) // 365
+        days = (days - 1) % 365
+    if days < 186:
+        jm = 1 + days // 31
+        jd = 1 + days % 31
+    else:
+        jm = 7 + (days - 186) // 30
+        jd = 1 + (days - 186) % 30
+    return jy, jm, jd
+
+JALALI_MONTHS = {
+    1: "فروردین", 2: "اردیبهشت", 3: "خرداد", 4: "تیر",
+    5: "مرداد", 6: "شهریور", 7: "مهر", 8: "آبان",
+    9: "آذر", 10: "دی", 11: "بهمن", 12: "اسفند"
+}
+
 def save_link(admin_msg_id, user_id):
     conn = get_db()
     c = conn.cursor()
@@ -144,7 +174,18 @@ def build_channel_text():
     t12 = now.strftime("%I:%M %p").lstrip("0")
     t24 = now.strftime("%H:%M")
 
-    text = f"🕒 ساعت ایران\n\n۱۲ ساعته: {t12}\n۲۴ ساعته: {t24}\n"
+    jy, jm, jd = gregorian_to_jalali(now.year, now.month, now.day)
+    month_name = JALALI_MONTHS.get(jm, "")
+    jalali_date = f"{jy}/{jm}/{jd}"
+
+    text = (
+        f"📅 تاریخ ایران\n"
+        f"{jalali_date}\n"
+        f"{month_name}\n\n"
+        f"🕒 ساعت ایران\n\n"
+        f"۱۲ ساعته: {t12}\n"
+        f"۲۴ ساعته: {t24}\n"
+    )
 
     if get_setting("timer_active") == "1" and get_setting("timer_end"):
         try:
@@ -170,51 +211,42 @@ def build_channel_text():
             if title:
                 text += f"{title}\n"
             text += remain
-        except:
+        except Exception:
             pass
 
     return text
 
 def seconds_until_next_minute():
-    """چقدر تا شروع دقیقه بعد به وقت ایران مونده"""
     now = now_tehran()
     next_minute = (now + timedelta(minutes=1)).replace(second=0, microsecond=0)
     return max(0.2, (next_minute - now).total_seconds())
-
-print("✅ بخش ۱ آماده شد")
-# ==================== بخش ۲ از ۲ ====================
-
-def update_channel_message():
+    def update_channel_message():
     channel = get_setting("channel")
     msg_id = get_setting("timer_msg_id")
     if not channel or not msg_id:
         return
+
     text = build_channel_text()
     try:
         bot.edit_message_text(text, channel, int(msg_id))
     except Exception as e:
         err = str(e).lower()
-        # اگر پیام پاک شده، یکی جدید بفرست
         if "message to edit not found" in err or "message can't be edited" in err:
             try:
                 m = bot.send_message(channel, text)
                 set_setting("timer_msg_id", m.message_id)
-            except:
+            except Exception:
                 pass
-        # اگر متن یکی باشد تلگرام خطا میده؛ مهم نیست
         elif "message is not modified" in err:
             pass
 
 def timer_worker():
-    """دقیقاً سر هر دقیقه ایران پیام را ادیت می‌کند"""
     while True:
         try:
-            # صبر تا دقیقاً دقیقه بعد (مثلاً 4:05:00)
             time.sleep(seconds_until_next_minute())
-
             if get_setting("timer_active") == "1":
                 update_channel_message()
-        except:
+        except Exception:
             time.sleep(2)
 
 def start_timer_thread():
@@ -231,9 +263,7 @@ def start(message):
     if is_admin(uid) and message.chat.type == "private":
         bot.reply_to(
             message,
-            "👋 سلام کیان\n\n"
-            "از این منو کانال و تایمر را مدیریت کن.\n"
-            "پیام کاربران هم اینجا می‌آید.",
+            "👋 سلام کیان\n\nاز این منو کانال و تایمر را مدیریت کن.\nپیام کاربران هم اینجا می‌آید.",
             reply_markup=admin_menu()
         )
         return
@@ -244,9 +274,7 @@ def start(message):
     waiting.add(uid)
     bot.reply_to(
         message,
-        "سلام 👋\n\n"
-        "تو در حال ارسال پیام برای **کیان** هستی (به صورت ناشناس).\n\n"
-        "پیامت را بنویس و بفرست:",
+        "سلام 👋\n\nتو در حال ارسال پیام برای **کیان** هستی (به صورت ناشناس).\n\nپیامت را بنویس و بفرست:",
         parse_mode="Markdown"
     )
 
@@ -355,7 +383,7 @@ def admin_save_channel(message):
         test = bot.send_message(ch, "✅ ربات به کانال متصل شد.")
         try:
             bot.delete_message(ch, test.message_id)
-        except:
+        except Exception:
             pass
         set_setting("channel", ch)
         bot.reply_to(message, f"✅ کانال تنظیم شد:\n{chat.title}", reply_markup=admin_menu())
@@ -373,7 +401,7 @@ def admin_save_timer(message):
         end = now_tehran() + timedelta(days=days)
         set_setting("timer_end", end.isoformat())
         bot.reply_to(message, f"✅ تایمر برای {days} روز تنظیم شد.", reply_markup=admin_menu())
-    except:
+    except Exception:
         bot.reply_to(message, "فقط عدد بفرست (مثال: 380)", reply_markup=admin_menu())
 
 def admin_save_title(message):
@@ -391,7 +419,6 @@ def admin_save_title(message):
 def handle_private(message):
     uid = message.from_user.id
 
-    # جواب ادمین
     if is_admin(uid):
         if not message.reply_to_message:
             return
@@ -443,7 +470,6 @@ def handle_private(message):
             bot.reply_to(message, f"ارسال نشد:\n{e}")
         return
 
-    # پیام کاربر
     if uid not in waiting:
         bot.reply_to(message, "برای ارسال پیام روی دکمه زیر بزن:", reply_markup=new_msg_button())
         return
@@ -490,9 +516,8 @@ def handle_private(message):
     if sent_ok:
         bot.reply_to(message, "✅ پیامت برای کیان ارسال شد.", reply_markup=new_msg_button())
 
-# اگر از قبل فعال بوده
 if get_setting("timer_active") == "1":
     start_timer_thread()
 
-print("🤖 KiAN Secret + ساعت دقیق ایران روشن شد")
+print("KiAN Secret bot started")
 bot.infinity_polling()
