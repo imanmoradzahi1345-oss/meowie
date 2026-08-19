@@ -25,12 +25,10 @@ def get_db():
 def init_db():
     conn = get_db()
     c = conn.cursor()
-
     c.execute('''CREATE TABLE IF NOT EXISTS links (
         admin_msg_id INTEGER PRIMARY KEY,
         user_id INTEGER
     )''')
-
     c.execute('''CREATE TABLE IF NOT EXISTS replies (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER,
@@ -40,12 +38,10 @@ def init_db():
         created_at TEXT,
         seen INTEGER DEFAULT 0
     )''')
-
     c.execute('''CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY,
         value TEXT
     )''')
-
     defaults = {
         "channel": "",
         "timer_end": "",
@@ -55,7 +51,6 @@ def init_db():
     }
     for k, v in defaults.items():
         c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
-
     conn.commit()
     conn.close()
 
@@ -125,7 +120,6 @@ def save_link(admin_msg_id, user_id):
 def find_user_from_reply(reply_msg):
     if not reply_msg:
         return None
-
     conn = get_db()
     c = conn.cursor()
     c.execute("SELECT user_id FROM links WHERE admin_msg_id=?", (reply_msg.message_id,))
@@ -133,10 +127,8 @@ def find_user_from_reply(reply_msg):
     conn.close()
     if row:
         return row[0]
-
     if reply_msg.forward_from:
         return reply_msg.forward_from.id
-
     text = reply_msg.text or reply_msg.caption or ""
     match = re.search(r"🆔\s*`?(\d+)`?", text)
     if match:
@@ -173,11 +165,9 @@ def build_channel_text():
     now = now_tehran()
     t12 = now.strftime("%I:%M %p").lstrip("0")
     t24 = now.strftime("%H:%M")
-
     jy, jm, jd = gregorian_to_jalali(now.year, now.month, now.day)
     month_name = JALALI_MONTHS.get(jm, "")
     jalali_date = f"{jy}/{jm}/{jd}"
-
     text = (
         f"📅 تاریخ ایران\n"
         f"{jalali_date}\n"
@@ -186,7 +176,6 @@ def build_channel_text():
         f"۱۲ ساعته: {t12}\n"
         f"۲۴ ساعته: {t24}\n"
     )
-
     if get_setting("timer_active") == "1" and get_setting("timer_end"):
         try:
             end = datetime.fromisoformat(get_setting("timer_end"))
@@ -195,10 +184,8 @@ def build_channel_text():
                     end = end.replace(tzinfo=TEHRAN)
                 else:
                     end = end.astimezone(TEHRAN)
-
             diff = end - now_tehran()
             title = get_setting("timer_title")
-
             if diff.total_seconds() <= 0:
                 remain = "۰ روز و ۰ ساعت و ۰ دقیقه"
             else:
@@ -206,26 +193,24 @@ def build_channel_text():
                 hours = diff.seconds // 3600
                 minutes = (diff.seconds % 3600) // 60
                 remain = f"{days} روز و {hours} ساعت و {minutes} دقیقه"
-
             text += "\n⏳ "
             if title:
                 text += f"{title}\n"
             text += remain
         except Exception:
             pass
-
     return text
 
 def seconds_until_next_minute():
     now = now_tehran()
     next_minute = (now + timedelta(minutes=1)).replace(second=0, microsecond=0)
     return max(0.2, (next_minute - now).total_seconds())
-    def update_channel_message():
+
+def update_channel_message():
     channel = get_setting("channel")
     msg_id = get_setting("timer_msg_id")
     if not channel or not msg_id:
         return
-
     text = build_channel_text()
     try:
         bot.edit_message_text(text, channel, int(msg_id))
@@ -259,7 +244,6 @@ def start_timer_thread():
 @bot.message_handler(commands=['start'])
 def start(message):
     uid = message.from_user.id
-
     if is_admin(uid) and message.chat.type == "private":
         bot.reply_to(
             message,
@@ -267,10 +251,8 @@ def start(message):
             reply_markup=admin_menu()
         )
         return
-
     if message.chat.type != "private":
         return
-
     waiting.add(uid)
     bot.reply_to(
         message,
@@ -303,7 +285,6 @@ def callbacks(call):
         conn.commit()
         conn.close()
         bot.answer_callback_query(call.id)
-
         if row[2] == "text":
             bot.send_message(uid, f"💬 **پاسخ کیان:**\n\n{row[1]}", parse_mode="Markdown", reply_markup=new_msg_button())
         elif row[2] == "photo":
@@ -333,21 +314,18 @@ def callbacks(call):
             call.message.chat.id, call.message.message_id, parse_mode="Markdown"
         )
         bot.register_next_step_handler(call.message, admin_save_channel)
-
     elif data == "adm_set_timer":
         bot.edit_message_text(
             "⏱ تعداد روز تایمر را بفرست:\nمثال: `380`",
             call.message.chat.id, call.message.message_id, parse_mode="Markdown"
         )
         bot.register_next_step_handler(call.message, admin_save_timer)
-
     elif data == "adm_set_title":
         bot.edit_message_text(
             "🏷 عنوان تایمر را بفرست (اختیاری):\nبرای حذف عنوان بنویس: `-`",
             call.message.chat.id, call.message.message_id
         )
         bot.register_next_step_handler(call.message, admin_save_title)
-
     elif data == "adm_start_timer":
         channel = get_setting("channel")
         if not channel:
@@ -366,7 +344,6 @@ def callbacks(call):
             bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=admin_menu())
         except Exception as e:
             bot.answer_callback_query(call.id, f"خطا: {e}", show_alert=True)
-
     elif data == "adm_stop_timer":
         set_setting("timer_active", "0")
         bot.answer_callback_query(call.id, "متوقف شد", show_alert=True)
@@ -422,16 +399,13 @@ def handle_private(message):
     if is_admin(uid):
         if not message.reply_to_message:
             return
-
         target = find_user_from_reply(message.reply_to_message)
         if not target:
             bot.reply_to(message, "نتونستم کاربر را پیدا کنم. روی پیام کاربر یا پیام اطلاعات ریپلای کن.")
             return
-
         reply_type = "text"
         file_id = None
         reply_text = message.text or message.caption or ""
-
         if message.photo:
             reply_type = "photo"
             file_id = message.photo[-1].file_id
@@ -447,7 +421,6 @@ def handle_private(message):
         elif message.document:
             reply_type = "document"
             file_id = message.document.file_id
-
         conn = get_db()
         c = conn.cursor()
         c.execute(
@@ -457,7 +430,6 @@ def handle_private(message):
         reply_id = c.lastrowid
         conn.commit()
         conn.close()
-
         try:
             bot.send_message(
                 target,
