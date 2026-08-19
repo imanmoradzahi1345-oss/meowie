@@ -206,6 +206,14 @@ def seconds_until_next_minute():
     next_minute = (now + timedelta(minutes=1)).replace(second=0, microsecond=0)
     return max(0.2, (next_minute - now).total_seconds())
 
+def update_bot_name():
+    try:
+        now = now_tehran()
+        name = now.strftime("%I:%M %p").lstrip("0")
+        bot.set_my_name(name)
+    except Exception:
+        pass
+
 def update_channel_message():
     channel = get_setting("channel")
     msg_id = get_setting("timer_msg_id")
@@ -229,6 +237,7 @@ def timer_worker():
     while True:
         try:
             time.sleep(seconds_until_next_minute())
+            update_bot_name()
             if get_setting("timer_active") == "1":
                 update_channel_message()
         except Exception:
@@ -488,8 +497,8 @@ def handle_private(message):
     if sent_ok:
         bot.reply_to(message, "✅ پیامت برای کیان ارسال شد.", reply_markup=new_msg_button())
 
-if get_setting("timer_active") == "1":
-    start_timer_thread()
+update_bot_name()
+start_timer_thread()
 
 print("KiAN Secret bot started")
 bot.infinity_polling()
