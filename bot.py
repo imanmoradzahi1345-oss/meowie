@@ -1,6 +1,5 @@
 import telebot
 from telebot import types
-from telebot.types import ChatPermissions
 import sqlite3
 import time
 import re
@@ -17,24 +16,24 @@ bot = telebot.TeleBot(
 )
 
 DB_NAME = "group_manager.db"
+DB_LOCK = threading.Lock()
 
-db_lock = threading.Lock()
 flood_data = defaultdict(lambda: defaultdict(deque))
-last_messages = defaultdict(dict)
-temporary_actions = {}
-temporary_lock = threading.Lock()
+repeat_data = {}
+mute_data = {}
+mute_lock = threading.Lock()
 
-LOCK_TYPES = {
+LOCK_NAMES = {
     "link": "🔗 لینک",
     "photo": "🖼 عکس",
     "video": "🎬 فیلم",
-    "animation": "🎞 GIF",
+    "animation": "🎞 گیف",
     "sticker": "🎭 استیکر",
     "voice": "🎤 ویس",
     "audio": "🎵 آهنگ",
     "document": "📄 فایل",
     "forward": "↪️ فوروارد",
-    "all_media": "📦 رسانه"
+    "all_media": "📦 همه رسانه‌ها"
 }
 
 LOCK_ALIASES = {
@@ -45,25 +44,20 @@ LOCK_ALIASES = {
     "گیف": "animation",
     "استیکر": "sticker",
     "ویس": "voice",
-    "صوت": "voice",
     "آهنگ": "audio",
+    "صوت": "audio",
     "فایل": "document",
     "فوروارد": "forward",
     "رسانه": "all_media"
 }
 
-BAD_WORDS = {
-    "spamword",
-    "badword"
-}
-
-LINK_PATTERN = re.compile(
+LINK_RE = re.compile(
     r"(https?://|www\.|t\.me/|telegram\.me/)",
     re.IGNORECASE
 )
 
 
-def db():
+def connect_db():
     con = sqlite3.connect(
         DB_NAME,
         timeout=30,
@@ -74,16 +68,13 @@ def db():
 
 
 def init_db():
-
-    with db_lock:
-
-        con = db()
+    with DB_LOCK:
+        con = connect_db()
 
         con.execute("""
             CREATE TABLE IF NOT EXISTS groups (
                 chat_id INTEGER PRIMARY KEY,
-                title TEXT,
-                welcome TEXT DEFAULT '',
+                title TEXT DEFAULT '',
                 warn_limit INTEGER DEFAULT 3,
                 flood_limit INTEGER DEFAULT 6,
                 flood_seconds INTEGER DEFAULT 5,
@@ -92,8 +83,7 @@ def init_db():
                 anti_repeat INTEGER DEFAULT 0,
                 badword_filter INTEGER DEFAULT 0,
                 welcome_enabled INTEGER DEFAULT 1,
-                log_chat_id INTEGER DEFAULT 0,
-                created_at INTEGER
+                welcome TEXT DEFAULT ''
             )
         """)
 
@@ -131,26 +121,22 @@ def init_db():
         con.close()
 
 
-init_db()
-
-
 def ensure_group(chat):
-
     if chat.type not in ("group", "supergroup"):
         return
 
-    with db_lock:
-
-        con = db()
+    with DB_LOCK:
+        con = connect_db()
 
         con.execute("""
             INSERT OR IGNORE INTO groups
-            (chat_id, title, created_at)
+            (chat_id, title, welcome)
             VALUES (?, ?, ?)
         """, (
             chat.id,
             chat.title or "Group",
-            int(time.time())
+            "👋 سلام {name}!\n\n"
+            "به <b>{group}</b> خوش اومدی ❤️"
         ))
 
         con.execute("""
@@ -167,8 +153,7 @@ def ensure_group(chat):
 
 
 def get_settings(chat_id):
-
-    con = db()
+    con = connect_db()
 
     row = con.execute("""
         SELECT *
@@ -181,8 +166,7 @@ def get_settings(chat_id):
     return row
 
 
-def set_setting(chat_id, column, value):
-
+def set_setting(chat_id, field, value):
     allowed = {
         "warn_limit",
         "flood_limit",
@@ -192,23 +176,17 @@ def set_setting(chat_id, column, value):
         "anti_repeat",
         "badword_filter",
         "welcome_enabled",
-        "log_chat_id",
         "welcome"
     }
 
-    if column not in allowed:
+    if field not in allowed:
         return
 
-    with db_lock:
-
-        con = db()
+    with DB_LOCK:
+        con = connect_db()
 
         con.execute(
-            f"""
-            UPDATE groups
-            SET {column}=?
-            WHERE chat_id=?
-            """,
+            f"UPDATE groups SET {field}=? WHERE chat_id=?",
             (value, chat_id)
         )
 
@@ -217,8 +195,7 @@ def set_setting(chat_id, column, value):
 
 
 def get_lock(chat_id, name):
-
-    con = db()
+    con = connect_db()
 
     row = con.execute("""
         SELECT enabled
@@ -235,10 +212,8 @@ def get_lock(chat_id, name):
 
 
 def set_lock(chat_id, name, enabled):
-
-    with db_lock:
-
-        con = db()
+    with DB_LOCK:
+        con = connect_db()
 
         con.execute("""
             INSERT INTO locks
@@ -257,17 +232,14 @@ def set_lock(chat_id, name, enabled):
 
 
 def is_group(message):
-
     return message.chat.type in (
         "group",
         "supergroup"
     )
 
 
-def is_admin_user(chat_id, user_id):
-
+def is_admin(chat_id, user_id):
     try:
-
         member = bot.get_chat_member(
             chat_id,
             user_id
@@ -279,38 +251,28 @@ def is_admin_user(chat_id, user_id):
         )
 
     except Exception:
-
         return False
 
 
-def admin_only(message):
-
-    return (
-        is_group(message)
-        and
-        is_admin_user(
-            message.chat.id,
-            message.from_user.id
-        )
-    )
-
-
-def protected_user(chat_id, user_id):
-
-    return is_admin_user(
-        chat_id,
-        user_id
-    )
-
-
-def user_mention(user):
-
+def mention(user):
     name = user.first_name or "User"
-
     return (
         f'<a href="tg://user?id={user.id}">'
         f'{name}</a>'
     )
+
+
+init_db()
+def delete_msg(message):
+    try:
+        bot.delete_message(
+            message.chat.id,
+            message.message_id
+        )
+        return True
+    except Exception as e:
+        print("DELETE:", e)
+        return False
 
 
 def save_action(
@@ -320,10 +282,8 @@ def save_action(
     action,
     reason=""
 ):
-
-    with db_lock:
-
-        con = db()
+    with DB_LOCK:
+        con = connect_db()
 
         con.execute("""
             INSERT INTO actions
@@ -341,30 +301,10 @@ def save_action(
 
         con.commit()
         con.close()
-        def send_log(chat_id, text):
-
-    settings = get_settings(chat_id)
-
-    if not settings:
-        return
-
-    log_chat_id = settings["log_chat_id"]
-
-    if not log_chat_id:
-        return
-
-    try:
-        bot.send_message(
-            log_chat_id,
-            text
-        )
-    except Exception as e:
-        print("LOG ERROR:", e)
 
 
-def get_warns(chat_id, user_id):
-
-    con = db()
+def get_warn(chat_id, user_id):
+    con = connect_db()
 
     row = con.execute("""
         SELECT count
@@ -380,16 +320,9 @@ def get_warns(chat_id, user_id):
     return row["count"] if row else 0
 
 
-def add_warn(chat_id, user_id):
-
-    new_count = get_warns(
-        chat_id,
-        user_id
-    ) + 1
-
-    with db_lock:
-
-        con = db()
+def set_warn(chat_id, user_id, count):
+    with DB_LOCK:
+        con = connect_db()
 
         con.execute("""
             INSERT INTO warnings
@@ -400,52 +333,16 @@ def add_warn(chat_id, user_id):
         """, (
             chat_id,
             user_id,
-            new_count
+            max(0, count)
         ))
 
         con.commit()
         con.close()
 
-    return new_count
 
-
-def remove_warn(chat_id, user_id):
-
-    new_count = max(
-        0,
-        get_warns(
-            chat_id,
-            user_id
-        ) - 1
-    )
-
-    with db_lock:
-
-        con = db()
-
-        con.execute("""
-            INSERT INTO warnings
-            (chat_id, user_id, count)
-            VALUES (?, ?, ?)
-            ON CONFLICT(chat_id, user_id)
-            DO UPDATE SET count=excluded.count
-        """, (
-            chat_id,
-            user_id,
-            new_count
-        ))
-
-        con.commit()
-        con.close()
-
-    return new_count
-
-
-def reset_warns(chat_id, user_id):
-
-    with db_lock:
-
-        con = db()
+def reset_warn(chat_id, user_id):
+    with DB_LOCK:
+        con = connect_db()
 
         con.execute("""
             DELETE FROM warnings
@@ -460,37 +357,29 @@ def reset_warns(chat_id, user_id):
 
 
 def get_target(message):
-
     if message.reply_to_message:
-
         return message.reply_to_message.from_user
 
-    parts = message.text.split()
+    parts = (message.text or "").split()
 
     if len(parts) >= 2:
-
         value = parts[1]
 
         if value.lstrip("-").isdigit():
-
             try:
-
                 member = bot.get_chat_member(
                     message.chat.id,
                     int(value)
                 )
-
                 return member.user
-
             except Exception:
-                pass
+                return None
 
     return None
 
 
-def parse_duration(text):
-
-    parts = text.split()
+def duration_from_message(message):
+    parts = (message.text or "").split()
 
     if len(parts) < 2:
         return 600
@@ -506,7 +395,7 @@ def parse_duration(text):
     number = int(match.group(1))
     unit = match.group(2) or "m"
 
-    multipliers = {
+    multiplier = {
         "s": 1,
         "m": 60,
         "h": 3600,
@@ -514,48 +403,221 @@ def parse_duration(text):
     }
 
     return min(
-        number * multipliers[unit],
+        number * multiplier[unit],
         30 * 86400
     )
 
 
-@bot.message_handler(commands=["panel", "پنل"])
-def panel_command(message):
+def get_media_type(message):
+    return {
+        "photo": "photo",
+        "video": "video",
+        "animation": "animation",
+        "sticker": "sticker",
+        "voice": "voice",
+        "audio": "audio",
+        "document": "document"
+    }.get(message.content_type)
 
-    if not is_group(message):
+
+def is_forwarded(message):
+    if getattr(message, "forward_origin", None):
+        return True
+
+    if getattr(message, "forward_from", None):
+        return True
+
+    if getattr(message, "forward_from_chat", None):
+        return True
+
+    return False
+
+
+def has_link(message):
+    text = (
+        message.text
+        or message.caption
+        or ""
+    )
+
+    return bool(
+        LINK_RE.search(text)
+    )
+
+
+def flood_check(message):
+    settings = get_settings(
+        message.chat.id
+    )
+
+    if not settings:
+        return False
+
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    now = time.time()
+
+    queue = flood_data[
+        chat_id
+    ][user_id]
+
+    queue.append(now)
+
+    while queue and (
+        now - queue[0]
+        > settings["flood_seconds"]
+    ):
+        queue.popleft()
+
+    return len(queue) > settings["flood_limit"]
+
+
+def repeat_check(message):
+    text = (
+        message.text
+        or message.caption
+        or ""
+    ).strip()
+
+    if not text:
+        return False
+
+    key = (
+        message.chat.id,
+        message.from_user.id
+    )
+
+    old = repeat_data.get(key)
+
+    repeat_data[key] = text
+
+    return old == text
+    def restrict_user(chat_id, user_id, seconds=600):
+    try:
+        until = int(
+            time.time() + seconds
+        )
+
+        bot.restrict_chat_member(
+            chat_id,
+            user_id,
+            permissions=types.ChatPermissions(
+                can_send_messages=False
+            ),
+            until_date=until
+        )
+
+        return True
+
+    except Exception as e:
+        print("RESTRICT:", e)
+        return False
+
+
+def unrestrict_user(chat_id, user_id):
+    try:
+        bot.restrict_chat_member(
+            chat_id,
+            user_id,
+            permissions=types.ChatPermissions(
+                can_send_messages=True
+            )
+        )
+
+        return True
+
+    except Exception as e:
+        print("UNRESTRICT:", e)
+        return False
+
+
+def ban_user(chat_id, user_id):
+    try:
+        bot.ban_chat_member(
+            chat_id,
+            user_id
+        )
+        return True
+
+    except Exception as e:
+        print("BAN:", e)
+        return False
+
+
+def kick_user(chat_id, user_id):
+    try:
+        bot.ban_chat_member(
+            chat_id,
+            user_id
+        )
+
+        bot.unban_chat_member(
+            chat_id,
+            user_id,
+            only_if_banned=True
+        )
+
+        return True
+
+    except Exception as e:
+        print("KICK:", e)
+        return False
+
+
+@bot.message_handler(commands=["start"])
+def start(message):
+    if message.chat.type != "private":
         return
 
-    ensure_group(message.chat)
+    kb = types.InlineKeyboardMarkup(
+        row_width=2
+    )
 
-    if not admin_only(message):
-        return
+    kb.add(
+        types.InlineKeyboardButton(
+            "🛡 امکانات",
+            callback_data="p_features"
+        ),
+        types.InlineKeyboardButton(
+            "📖 راهنما",
+            callback_data="p_help"
+        )
+    )
+
+    kb.add(
+        types.InlineKeyboardButton(
+            "⚙️ وضعیت",
+            callback_data="p_status"
+        )
+    )
 
     bot.send_message(
         message.chat.id,
-        "⚙️ <b>پنل مدیریت گروه</b>\n\n"
-        "بخش موردنظر را انتخاب کنید:",
-        reply_markup=admin_panel()
+        "🤖 <b>GROUP MANAGER</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "🛡 ربات حرفه‌ای مدیریت گروه\n\n"
+        "ربات را به گروه اضافه کن و "
+        "ادمینش کن.\n\n"
+        "بعد داخل گروه بزن:\n"
+        "<code>/panel</code>",
+        reply_markup=kb
     )
 
 
 @bot.message_handler(commands=["help"])
-def group_help(message):
-
-    if not is_group(message):
-        return
-
+def help_command(message):
     bot.send_message(
         message.chat.id,
         "📖 <b>راهنمای ربات</b>\n\n"
         "⚙️ /panel — پنل مدیریت\n\n"
-        "👤 مدیریت کاربران:\n"
+        "👤 مدیریت:\n"
         "• بن\n"
         "• کیک\n"
         "• سکوت 10m\n"
         "• رفع سکوت\n"
         "• اخطار\n"
-        "• برداشتن اخطار\n\n"
-        "🔒 قفل‌ها:\n"
+        "• رفع اخطار\n\n"
+        "🔒 قفل:\n"
         "قفل لینک\n"
         "قفل عکس\n"
         "قفل فیلم\n"
@@ -563,8 +625,387 @@ def group_help(message):
         "قفل استیکر\n"
         "قفل ویس\n"
         "قفل فایل\n"
-        "قفل فوروارد"
+        "قفل فوروارد\n\n"
+        "مثال:\n"
+        "<code>قفل لینک</code>\n"
+        "<code>باز لینک</code>"
     )
+
+
+@bot.message_handler(commands=["panel"])
+def panel_command(message):
+    if not is_group(message):
+        return
+
+    ensure_group(message.chat)
+
+    if not is_admin(
+        message.chat.id,
+        message.from_user.id
+    ):
+        bot.reply_to(
+            message,
+            "⛔ فقط ادمین‌ها می‌توانند پنل را باز کنند."
+        )
+        return
+
+    bot.send_message(
+        message.chat.id,
+        "⚙️ <b>پنل مدیریت گروه</b>\n\n"
+        "بخش موردنظر را انتخاب کن:",
+        reply_markup=main_panel()
+    )
+
+
+def main_panel():
+    kb = types.InlineKeyboardMarkup(
+        row_width=2
+    )
+
+    kb.add(
+        types.InlineKeyboardButton(
+            "🛡 مدیریت کاربران",
+            callback_data="panel_users"
+        ),
+        types.InlineKeyboardButton(
+            "🔒 قفل‌ها",
+            callback_data="panel_locks"
+        )
+    )
+
+    kb.add(
+        types.InlineKeyboardButton(
+            "🤖 ضداسپم",
+            callback_data="panel_spam"
+        ),
+        types.InlineKeyboardButton(
+            "⚠️ اخطار",
+            callback_data="panel_warn"
+        )
+    )
+
+    kb.add(
+        types.InlineKeyboardButton(
+            "📊 آمار",
+            callback_data="panel_stats"
+        ),
+        types.InlineKeyboardButton(
+            "⚙️ تنظیمات",
+            callback_data="panel_settings"
+        )
+    )
+
+    kb.add(
+        types.InlineKeyboardButton(
+            "📖 راهنما",
+            callback_data="panel_help"
+        )
+    )
+
+    return kb
+    @bot.callback_query_handler(
+    func=lambda c: c.data.startswith("panel_")
+)
+def panel_callback(call):
+    chat_id = call.message.chat.id
+
+    if not is_admin(
+        chat_id,
+        call.from_user.id
+    ):
+        bot.answer_callback_query(
+            call.id,
+            "⛔ فقط ادمین.",
+            show_alert=True
+        )
+        return
+
+    section = call.data
+
+    if section == "panel_main":
+        text = (
+            "⚙️ <b>پنل مدیریت گروه</b>\n\n"
+            "یک بخش را انتخاب کن:"
+        )
+        keyboard = main_panel()
+
+    elif section == "panel_users":
+        text = (
+            "🛡 <b>مدیریت کاربران</b>\n\n"
+            "دستورات روی پیام کاربر:\n\n"
+            "🔨 بن\n"
+            "👢 کیک\n"
+            "🔇 سکوت 10m\n"
+            "🔊 رفع سکوت\n"
+            "⚠️ اخطار\n"
+            "➖ رفع اخطار"
+        )
+        keyboard = back_button()
+
+    elif section == "panel_locks":
+        lines = ["🔒 <b>وضعیت قفل‌ها</b>\n"]
+
+        for key, title in LOCK_NAMES.items():
+            status = (
+                "🔴 فعال"
+                if get_lock(chat_id, key)
+                else "🟢 خاموش"
+            )
+            lines.append(
+                f"{status} — {title}"
+            )
+
+        lines.append(
+            "\nبرای تغییر:\n"
+            "<code>قفل لینک</code>\n"
+            "<code>باز لینک</code>"
+        )
+
+        text = "\n".join(lines)
+        keyboard = back_button()
+
+    elif section == "panel_spam":
+        settings = get_settings(chat_id)
+
+        text = (
+            "🤖 <b>ضداسپم</b>\n\n"
+            f"📨 حد Flood: "
+            f"<b>{settings['flood_limit']}</b>\n"
+            f"⏱ زمان: "
+            f"<b>{settings['flood_seconds']} ثانیه</b>\n\n"
+            f"🔗 ضدلینک: "
+            f"{'🟢' if settings['anti_link'] else '🔴'}\n"
+            f"↪️ ضدفوروارد: "
+            f"{'🟢' if settings['anti_forward'] else '🔴'}\n"
+            f"🔁 ضدتکرار: "
+            f"{'🟢' if settings['anti_repeat'] else '🔴'}"
+        )
+
+        keyboard = types.InlineKeyboardMarkup(
+            row_width=2
+        )
+
+        keyboard.add(
+            types.InlineKeyboardButton(
+                "🔗 ضدلینک",
+                callback_data="toggle_anti_link"
+            ),
+            types.InlineKeyboardButton(
+                "↪️ ضدفوروارد",
+                callback_data="toggle_anti_forward"
+            )
+        )
+
+        keyboard.add(
+            types.InlineKeyboardButton(
+                "🔁 ضدتکرار",
+                callback_data="toggle_anti_repeat"
+            )
+        )
+
+        keyboard.add(
+            types.InlineKeyboardButton(
+                "🔙 برگشت",
+                callback_data="panel_main"
+            )
+        )
+
+    elif section == "panel_warn":
+        settings = get_settings(chat_id)
+
+        text = (
+            "⚠️ <b>سیستم اخطار</b>\n\n"
+            f"حد اخطار فعلی: "
+            f"<b>{settings['warn_limit']}</b>\n\n"
+            "وقتی کاربر به این تعداد اخطار "
+            "برسد، بن می‌شود."
+        )
+
+        keyboard = types.InlineKeyboardMarkup()
+
+        keyboard.add(
+            types.InlineKeyboardButton(
+                "3️⃣ حد = 3",
+                callback_data="warn_3"
+            ),
+            types.InlineKeyboardButton(
+                "5️⃣ حد = 5",
+                callback_data="warn_5"
+            )
+        )
+
+        keyboard.add(
+            types.InlineKeyboardButton(
+                "🔙 برگشت",
+                callback_data="panel_main"
+            )
+        )
+
+    elif section == "panel_stats":
+        con = connect_db()
+
+        actions = con.execute("""
+            SELECT COUNT(*) AS c
+            FROM actions
+            WHERE chat_id=?
+        """, (chat_id,)).fetchone()["c"]
+
+        bans = con.execute("""
+            SELECT COUNT(*) AS c
+            FROM actions
+            WHERE chat_id=?
+            AND action IN ('BAN','AUTO_BAN')
+        """, (chat_id,)).fetchone()["c"]
+
+        warns = con.execute("""
+            SELECT COUNT(*) AS c
+            FROM actions
+            WHERE chat_id=?
+            AND action='WARN'
+        """, (chat_id,)).fetchone()["c"]
+
+        con.close()
+
+        text = (
+            "📊 <b>آمار گروه</b>\n\n"
+            f"📋 عملیات: <b>{actions}</b>\n"
+            f"🔨 بن: <b>{bans}</b>\n"
+            f"⚠️ اخطار: <b>{warns}</b>\n\n"
+            f"🆔 <code>{chat_id}</code>"
+        )
+
+        keyboard = back_button()
+
+    elif section == "panel_settings":
+        settings = get_settings(chat_id)
+
+        text = (
+            "⚙️ <b>تنظیمات گروه</b>\n\n"
+            f"⚠️ حد اخطار: "
+            f"<b>{settings['warn_limit']}</b>\n"
+            f"📨 Flood: "
+            f"<b>{settings['flood_limit']}</b>\n"
+            f"⏱ زمان Flood: "
+            f"<b>{settings['flood_seconds']}s</b>\n"
+            f"👋 خوشامد: "
+            f"{'🟢' if settings['welcome_enabled'] else '🔴'}"
+        )
+
+        keyboard = back_button()
+
+    elif section == "panel_help":
+        text = (
+            "📖 <b>راهنمای سریع</b>\n\n"
+            "1️⃣ ربات را ادمین کن.\n"
+            "2️⃣ دسترسی حذف پیام بده.\n"
+            "3️⃣ دسترسی Ban و Restrict بده.\n"
+            "4️⃣ برای مدیریت /panel را بزن.\n\n"
+            "💡 بیشتر دستورات روی پیام کاربر "
+            "با Reply اجرا می‌شوند."
+        )
+
+        keyboard = back_button()
+
+    else:
+        return
+
+    try:
+        bot.edit_message_text(
+            text,
+            chat_id,
+            call.message.message_id,
+            reply_markup=keyboard
+        )
+    except Exception:
+        pass
+
+    bot.answer_callback_query(call.id)
+
+
+def back_button():
+    kb = types.InlineKeyboardMarkup()
+
+    kb.add(
+        types.InlineKeyboardButton(
+            "🔙 برگشت",
+            callback_data="panel_main"
+        )
+    )
+
+    return kb
+    @bot.callback_query_handler(
+    func=lambda c: c.data.startswith("toggle_")
+)
+def toggle_callback(call):
+    chat_id = call.message.chat.id
+
+    if not is_admin(
+        chat_id,
+        call.from_user.id
+    ):
+        bot.answer_callback_query(
+            call.id,
+            "⛔ فقط ادمین.",
+            show_alert=True
+        )
+        return
+
+    field = call.data.replace(
+        "toggle_",
+        ""
+    )
+
+    settings = get_settings(chat_id)
+
+    if not settings:
+        return
+
+    new_value = 0 if settings[field] else 1
+
+    set_setting(
+        chat_id,
+        field,
+        new_value
+    )
+
+    bot.answer_callback_query(
+        call.id,
+        "✅ تغییر کرد."
+    )
+
+    call.data = "panel_spam"
+    panel_callback(call)
+
+
+@bot.callback_query_handler(
+    func=lambda c: c.data.startswith("warn_")
+)
+def warn_limit_callback(call):
+    chat_id = call.message.chat.id
+
+    if not is_admin(
+        chat_id,
+        call.from_user.id
+    ):
+        return
+
+    value = int(
+        call.data.split("_")[1]
+    )
+
+    set_setting(
+        chat_id,
+        "warn_limit",
+        value
+    )
+
+    bot.answer_callback_query(
+        call.id,
+        f"حد اخطار {value} شد."
+    )
+
+    call.data = "panel_warn"
+    panel_callback(call)
 
 
 @bot.message_handler(
@@ -574,9 +1015,11 @@ def group_help(message):
     and m.text.split()[0].lower()
     in ("بن", "ban")
 )
-def ban_user(message):
-
-    if not admin_only(message):
+def command_ban(message):
+    if not is_admin(
+        message.chat.id,
+        message.from_user.id
+    ):
         return
 
     target = get_target(message)
@@ -584,27 +1027,24 @@ def ban_user(message):
     if not target:
         bot.reply_to(
             message,
-            "❌ روی پیام کاربر ریپلای کن."
+            "❌ روی پیام کاربر Reply کن."
         )
         return
 
-    if protected_user(
+    if is_admin(
         message.chat.id,
         target.id
     ):
         bot.reply_to(
             message,
-            "❌ نمی‌توانی ادمین را بن کنی."
+            "❌ ادمین قابل بن نیست."
         )
         return
 
-    try:
-
-        bot.ban_chat_member(
-            message.chat.id,
-            target.id
-        )
-
+    if ban_user(
+        message.chat.id,
+        target.id
+    ):
         save_action(
             message.chat.id,
             target.id,
@@ -612,26 +1052,10 @@ def ban_user(message):
             "BAN"
         )
 
-        send_log(
-            message.chat.id,
-            f"🔨 <b>BAN</b>\n"
-            f"👤 {user_mention(target)}\n"
-            f"👮 {user_mention(message.from_user)}"
-        )
-
         bot.reply_to(
             message,
-            f"🔨 {user_mention(target)} <b>بن شد.</b>"
+            f"🔨 {mention(target)} <b>بن شد.</b>"
         )
-
-    except Exception as e:
-
-        bot.reply_to(
-            message,
-            "❌ خطا در بن کردن."
-        )
-
-        print(e)
 
 
 @bot.message_handler(
@@ -641,9 +1065,11 @@ def ban_user(message):
     and m.text.split()[0].lower()
     in ("کیک", "kick")
 )
-def kick_user(message):
-
-    if not admin_only(message):
+def command_kick(message):
+    if not is_admin(
+        message.chat.id,
+        message.from_user.id
+    ):
         return
 
     target = get_target(message)
@@ -651,33 +1077,20 @@ def kick_user(message):
     if not target:
         bot.reply_to(
             message,
-            "❌ روی پیام کاربر ریپلای کن."
+            "❌ روی پیام کاربر Reply کن."
         )
         return
 
-    if protected_user(
+    if is_admin(
         message.chat.id,
         target.id
     ):
-        bot.reply_to(
-            message,
-            "❌ ادمین قابل کیک نیست."
-        )
         return
 
-    try:
-
-        bot.ban_chat_member(
-            message.chat.id,
-            target.id
-        )
-
-        bot.unban_chat_member(
-            message.chat.id,
-            target.id,
-            only_if_banned=True
-        )
-
+    if kick_user(
+        message.chat.id,
+        target.id
+    ):
         save_action(
             message.chat.id,
             target.id,
@@ -687,17 +1100,8 @@ def kick_user(message):
 
         bot.reply_to(
             message,
-            f"👢 {user_mention(target)} <b>کیک شد.</b>"
+            f"👢 {mention(target)} <b>کیک شد.</b>"
         )
-
-    except Exception as e:
-
-        bot.reply_to(
-            message,
-            "❌ خطا در کیک."
-        )
-
-        print(e)
 
 
 @bot.message_handler(
@@ -705,11 +1109,13 @@ def kick_user(message):
     is_group(m)
     and m.text
     and m.text.split()[0].lower()
-    in ("سکوت", "mute", "میت")
+    in ("سکوت", "mute")
 )
-def mute_user(message):
-
-    if not admin_only(message):
+def command_mute(message):
+    if not is_admin(
+        message.chat.id,
+        message.from_user.id
+    ):
         return
 
     target = get_target(message)
@@ -717,45 +1123,30 @@ def mute_user(message):
     if not target:
         bot.reply_to(
             message,
-            "❌ روی پیام کاربر ریپلای کن.\n"
+            "❌ روی پیام کاربر Reply کن.\n"
             "مثال: <code>سکوت 10m</code>"
         )
         return
 
-    if protected_user(
+    if is_admin(
         message.chat.id,
         target.id
     ):
-        bot.reply_to(
-            message,
-            "❌ ادمین قابل میوت نیست."
-        )
         return
 
-    seconds = parse_duration(
-        message.text
+    seconds = duration_from_message(
+        message
     )
 
-    until = int(
-        time.time() + seconds
-    )
-
-    try:
-
-        bot.restrict_chat_member(
-            message.chat.id,
-            target.id,
-            permissions=ChatPermissions(
-                can_send_messages=False
-            ),
-            until_date=until
-        )
-
-        with temporary_lock:
-
-            temporary_actions[
+    if restrict_user(
+        message.chat.id,
+        target.id,
+        seconds
+    ):
+        with mute_lock:
+            mute_data[
                 (message.chat.id, target.id)
-            ] = until
+            ] = time.time() + seconds
 
         save_action(
             message.chat.id,
@@ -767,18 +1158,11 @@ def mute_user(message):
 
         bot.reply_to(
             message,
-            f"🔇 {user_mention(target)}\n"
-            f"برای <b>{seconds}</b> ثانیه میوت شد."
+            f"🔇 {mention(target)}\n"
+            f"برای <b>{seconds}</b> ثانیه سکوت شد."
         )
 
-    except Exception as e:
 
-        bot.reply_to(
-            message,
-            "❌ خطا در میوت."
-        )
-
-        print(e)
 @bot.message_handler(
     func=lambda m:
     is_group(m)
@@ -786,9 +1170,11 @@ def mute_user(message):
     and m.text.lower()
     in ("رفع سکوت", "unmute")
 )
-def unmute_user(message):
-
-    if not admin_only(message):
+def command_unmute(message):
+    if not is_admin(
+        message.chat.id,
+        message.from_user.id
+    ):
         return
 
     target = get_target(message)
@@ -796,52 +1182,25 @@ def unmute_user(message):
     if not target:
         bot.reply_to(
             message,
-            "❌ روی پیام کاربر ریپلای کن."
+            "❌ روی پیام کاربر Reply کن."
         )
         return
 
-    permissions = ChatPermissions(
-        can_send_messages=True,
-        can_send_audios=True,
-        can_send_documents=True,
-        can_send_photos=True,
-        can_send_videos=True,
-        can_send_video_notes=True,
-        can_send_voice_notes=True,
-        can_send_polls=True,
-        can_send_other_messages=True,
-        can_add_web_page_previews=True
-    )
-
-    try:
-
-        bot.restrict_chat_member(
-            message.chat.id,
-            target.id,
-            permissions=permissions
-        )
-
-        with temporary_lock:
-
-            temporary_actions.pop(
+    if unrestrict_user(
+        message.chat.id,
+        target.id
+    ):
+        with mute_lock:
+            mute_data.pop(
                 (message.chat.id, target.id),
                 None
             )
 
         bot.reply_to(
             message,
-            f"🔊 {user_mention(target)} "
+            f"🔊 {mention(target)} "
             f"<b>رفع سکوت شد.</b>"
         )
-
-    except Exception as e:
-
-        bot.reply_to(
-            message,
-            "❌ خطا در رفع سکوت."
-        )
-
-        print(e)
 
 
 @bot.message_handler(
@@ -851,9 +1210,11 @@ def unmute_user(message):
     and m.text.split()[0].lower()
     in ("اخطار", "warn")
 )
-def warn_user(message):
-
-    if not admin_only(message):
+def command_warn(message):
+    if not is_admin(
+        message.chat.id,
+        message.from_user.id
+    ):
         return
 
     target = get_target(message)
@@ -861,23 +1222,25 @@ def warn_user(message):
     if not target:
         bot.reply_to(
             message,
-            "❌ روی پیام کاربر ریپلای کن."
+            "❌ روی پیام کاربر Reply کن."
         )
         return
 
-    if protected_user(
+    if is_admin(
         message.chat.id,
         target.id
     ):
-        bot.reply_to(
-            message,
-            "❌ نمی‌توانی به ادمین اخطار بدهی."
-        )
         return
 
-    count = add_warn(
+    count = get_warn(
         message.chat.id,
         target.id
+    ) + 1
+
+    set_warn(
+        message.chat.id,
+        target.id,
+        count
     )
 
     settings = get_settings(
@@ -895,38 +1258,26 @@ def warn_user(message):
     )
 
     if count >= limit:
-
-        try:
-
-            bot.ban_chat_member(
-                message.chat.id,
-                target.id
-            )
-
-            reset_warns(
+        if ban_user(
+            message.chat.id,
+            target.id
+        ):
+            reset_warn(
                 message.chat.id,
                 target.id
             )
 
             bot.reply_to(
                 message,
-                f"🚫 {user_mention(target)}\n"
-                f"به حد اخطار رسید و <b>بن شد.</b>"
+                f"🚫 {mention(target)}\n"
+                f"به <b>{limit}</b> اخطار رسید و بن شد."
             )
-
-        except Exception:
-
-            bot.reply_to(
-                message,
-                "⚠️ اخطار ثبت شد ولی بن خودکار نشد."
-            )
-
-        return
+            return
 
     bot.reply_to(
         message,
-        f"⚠️ <b>اخطار ثبت شد</b>\n\n"
-        f"👤 {user_mention(target)}\n"
+        f"⚠️ <b>اخطار</b>\n"
+        f"👤 {mention(target)}\n"
         f"📊 {count}/{limit}"
     )
 
@@ -936,11 +1287,13 @@ def warn_user(message):
     is_group(m)
     and m.text
     and m.text.lower()
-    in ("برداشتن اخطار", "رفع اخطار", "unwarn")
+    in ("رفع اخطار", "برداشتن اخطار")
 )
-def unwarn_user(message):
-
-    if not admin_only(message):
+def command_unwarn(message):
+    if not is_admin(
+        message.chat.id,
+        message.from_user.id
+    ):
         return
 
     target = get_target(message)
@@ -948,55 +1301,30 @@ def unwarn_user(message):
     if not target:
         bot.reply_to(
             message,
-            "❌ روی پیام کاربر ریپلای کن."
+            "❌ روی پیام کاربر Reply کن."
         )
         return
 
-    count = remove_warn(
+    count = max(
+        0,
+        get_warn(
+            message.chat.id,
+            target.id
+        ) - 1
+    )
+
+    set_warn(
         message.chat.id,
-        target.id
+        target.id,
+        count
     )
 
     bot.reply_to(
         message,
-        f"✅ یک اخطار برداشته شد.\n"
-        f"📊 فعلی: <b>{count}</b>"
+        f"✅ اخطار برداشته شد.\n"
+        f"📊 اخطار فعلی: <b>{count}</b>"
     )
-
-
-@bot.message_handler(
-    func=lambda m:
-    is_group(m)
-    and m.text
-    and m.text.lower()
-    in ("حذف اخطارها", "resetwarn")
-)
-def reset_warning_user(message):
-
-    if not admin_only(message):
-        return
-
-    target = get_target(message)
-
-    if not target:
-        bot.reply_to(
-            message,
-            "❌ روی پیام کاربر ریپلای کن."
-        )
-        return
-
-    reset_warns(
-        message.chat.id,
-        target.id
-    )
-
-    bot.reply_to(
-        message,
-        "🧹 تمام اخطارهای کاربر پاک شد."
-    )
-
-
-@bot.message_handler(
+    @bot.message_handler(
     func=lambda m:
     is_group(m)
     and m.text
@@ -1006,8 +1334,10 @@ def reset_warning_user(message):
     )
 )
 def lock_command(message):
-
-    if not admin_only(message):
+    if not is_admin(
+        message.chat.id,
+        message.from_user.id
+    ):
         return
 
     parts = message.text.split()
@@ -1015,20 +1345,18 @@ def lock_command(message):
     if len(parts) < 2:
         return
 
-    name = parts[1].strip().lower()
-
-    lock_name = LOCK_ALIASES.get(name)
+    alias = parts[1].lower()
+    lock_name = LOCK_ALIASES.get(alias)
 
     if not lock_name:
-
         bot.reply_to(
             message,
-            "❌ نوع قفل شناخته نشد."
+            "❌ نوع قفل پیدا نشد."
         )
         return
 
-    enabled = (
-        message.text.startswith("قفل ")
+    enabled = message.text.startswith(
+        "قفل "
     )
 
     set_lock(
@@ -1037,263 +1365,35 @@ def lock_command(message):
         enabled
     )
 
+    if enabled:
+        text = (
+            "🔒 <b>قفل فعال شد</b>\n\n"
+            f"{LOCK_NAMES[lock_name]}"
+        )
+    else:
+        text = (
+            "🔓 <b>قفل غیرفعال شد</b>\n\n"
+            f"{LOCK_NAMES[lock_name]}"
+        )
+
     bot.reply_to(
         message,
-        (
-            "🔒 قفل فعال شد\n"
-            if enabled
-            else
-            "🔓 قفل غیرفعال شد\n"
-        )
-        + LOCK_TYPES[lock_name]
+        text
     )
 
 
-def has_link(text):
-
-    if not text:
-        return False
-
-    return bool(
-        LINK_PATTERN.search(text)
-    )
-
-
-def is_forwarded(message):
-
-    if getattr(
-        message,
-        "forward_origin",
-        None
-    ):
-        return True
-
-    if getattr(
-        message,
-        "forward_from",
-        None
-    ):
-        return True
-
-    if getattr(
-        message,
-        "forward_from_chat",
-        None
-    ):
-        return True
-
-    return False
-
-
-def message_lock_type(message):
-
-    types_map = {
-        "photo": "photo",
-        "video": "video",
-        "animation": "animation",
-        "sticker": "sticker",
-        "voice": "voice",
-        "audio": "audio",
-        "document": "document"
-    }
-
-    return types_map.get(
-        message.content_type
-    )
-
-
-def contains_badword(text):
-
-    if not text:
-        return False
-
-    low = text.lower()
-
-    return any(
-        word in low
-        for word in BAD_WORDS
-    )
-
-
-def delete_message(message):
-
-    try:
-
-        bot.delete_message(
-            message.chat.id,
-            message.message_id
-        )
-
-        return True
-
-    except Exception as e:
-
-        print(
-            "DELETE ERROR:",
-            e
-        )
-
-        return False
-        def check_flood(message):
-
-    settings = get_settings(
-        message.chat.id
-    )
-
-    if not settings:
-        return False
-
-    user_id = message.from_user.id
-    now = time.time()
-
-    queue = flood_data[
-        message.chat.id
-    ][user_id]
-
-    queue.append(now)
-
-    limit = settings["flood_limit"]
-    seconds = settings["flood_seconds"]
-
-    while queue and (
-        now - queue[0] > seconds
-    ):
-        queue.popleft()
-
-    return len(queue) > limit
-
-
-def check_repeat(message):
-
-    text = (
-        message.text
-        or message.caption
-        or ""
-    )
-
-    if not text:
-        return False
-
-    chat_id = message.chat.id
-    user_id = message.from_user.id
-
-    previous = last_messages[
-        chat_id
-    ].get(user_id)
-
-    last_messages[
-        chat_id
-    ][user_id] = text
-
-    return (
-        previous is not None
-        and previous == text
-    )
-
-
-def auto_mute(message, reason):
-
-    user = message.from_user
-
-    if protected_user(
-        message.chat.id,
-        user.id
-    ):
-        return
-
-    try:
-
-        until = int(
-            time.time() + 600
-        )
-
-        bot.restrict_chat_member(
-            message.chat.id,
-            user.id,
-            permissions=ChatPermissions(
-                can_send_messages=False
-            ),
-            until_date=until
-        )
-
-        save_action(
-            message.chat.id,
-            user.id,
-            0,
-            "AUTO_MUTE",
-            reason
-        )
-
-        send_log(
-            message.chat.id,
-            f"🤖 <b>AUTO MUTE</b>\n"
-            f"👤 {user_mention(user)}\n"
-            f"📌 {reason}"
-        )
-
-    except Exception as e:
-
-        print(
-            "AUTO MUTE ERROR:",
-            e
-        )
-
-
-def auto_ban(message, reason):
-
-    user = message.from_user
-
-    if protected_user(
-        message.chat.id,
-        user.id
-    ):
-        return
-
-    try:
-
-        bot.ban_chat_member(
-            message.chat.id,
-            user.id
-        )
-
-        save_action(
-            message.chat.id,
-            user.id,
-            0,
-            "AUTO_BAN",
-            reason
-        )
-
-        send_log(
-            message.chat.id,
-            f"🤖 <b>AUTO BAN</b>\n"
-            f"👤 {user_mention(user)}\n"
-            f"📌 {reason}"
-        )
-
-    except Exception as e:
-
-        print(
-            "AUTO BAN ERROR:",
-            e
-        )
-
-
-def moderate_message(message):
-
+def moderate(message):
     if not is_group(message):
         return
 
     ensure_group(message.chat)
 
-    user = message.from_user
-
-    if not user:
+    if not message.from_user:
         return
 
-    if protected_user(
+    if is_admin(
         message.chat.id,
-        user.id
+        message.from_user.id
     ):
         return
 
@@ -1301,23 +1401,23 @@ def moderate_message(message):
         message.chat.id
     )
 
-    if check_flood(message):
+    if flood_check(message):
+        delete_msg(message)
 
-        delete_message(message)
-
-        auto_mute(
-            message,
-            "Flood / Spam"
-        )
+        if restrict_user(
+            message.chat.id,
+            message.from_user.id,
+            600
+        ):
+            save_action(
+                message.chat.id,
+                message.from_user.id,
+                0,
+                "AUTO_MUTE",
+                "Flood"
+            )
 
         return
-
-    if settings["anti_repeat"]:
-
-        if check_repeat(message):
-
-            delete_message(message)
-            return
 
     text = (
         message.text
@@ -1327,55 +1427,51 @@ def moderate_message(message):
 
     if (
         settings["anti_link"]
-        and has_link(text)
+        and has_link(message)
     ):
-
-        delete_message(message)
+        delete_msg(message)
         return
 
     if (
         settings["anti_forward"]
         and is_forwarded(message)
     ):
-
-        delete_message(message)
+        delete_msg(message)
         return
 
     if (
-        settings["badword_filter"]
-        and contains_badword(text)
+        settings["anti_repeat"]
+        and repeat_check(message)
     ):
-
-        delete_message(message)
-
-        auto_mute(
-            message,
-            "Bad Word Filter"
-        )
-
+        delete_msg(message)
         return
 
-    media_type = message_lock_type(
-        message
-    )
+    media = get_media_type(message)
 
-    if media_type:
-
+    if media:
         if get_lock(
             message.chat.id,
-            media_type
+            media
         ):
-
-            delete_message(message)
+            delete_msg(message)
             return
 
         if get_lock(
             message.chat.id,
             "all_media"
         ):
-
-            delete_message(message)
+            delete_msg(message)
             return
+
+    if (
+        get_lock(
+            message.chat.id,
+            "link"
+        )
+        and has_link(message)
+    ):
+        delete_msg(message)
+        return
 
     if (
         get_lock(
@@ -1384,19 +1480,7 @@ def moderate_message(message):
         )
         and is_forwarded(message)
     ):
-
-        delete_message(message)
-        return
-
-    if (
-        get_lock(
-            message.chat.id,
-            "link"
-        )
-        and has_link(text)
-    ):
-
-        delete_message(message)
+        delete_msg(message)
         return
 
 
@@ -1412,17 +1496,15 @@ def moderate_message(message):
         "document"
     ]
 )
-def all_messages(message):
-
+def message_handler(message):
     if is_group(message):
-        moderate_message(message)
+        moderate(message)
 
 
 @bot.message_handler(
     content_types=["new_chat_members"]
 )
-def new_member(message):
-
+def welcome_handler(message):
     if not is_group(message):
         return
 
@@ -1436,771 +1518,80 @@ def new_member(message):
         return
 
     for user in message.new_chat_members:
-
         if user.is_bot:
             continue
 
-        welcome = settings["welcome"]
+        text = settings["welcome"]
 
-        if not welcome:
-
-            welcome = (
-                "👋 سلام {name}!\n\n"
-                "به <b>{group}</b> خوش اومدی ❤️"
-            )
-
-        welcome = welcome.replace(
+        text = text.replace(
             "{name}",
-            user_mention(user)
+            mention(user)
         )
 
-        welcome = welcome.replace(
+        text = text.replace(
             "{group}",
             message.chat.title or "گروه"
         )
 
         try:
-
             bot.send_message(
                 message.chat.id,
-                welcome
+                text
             )
-
         except Exception as e:
-
-            print(
-                "WELCOME ERROR:",
-                e
-            )
+            print("WELCOME:", e)
 
 
 @bot.message_handler(
     content_types=["left_chat_member"]
 )
-def left_member(message):
-
-    if not is_group(message):
-        return
-
+def left_handler(message):
     try:
-
         bot.delete_message(
             message.chat.id,
             message.message_id
         )
-
     except Exception:
         pass
 
 
-@bot.message_handler(
-    func=lambda m:
-    is_group(m)
-    and m.text
-    and m.text.startswith("خوشامد ")
-)
-def set_welcome(message):
-
-    if not admin_only(message):
-        return
-
-    welcome = message.text[
-        len("خوشامد "):
-    ].strip()
-
-    if not welcome:
-
-        bot.reply_to(
-            message,
-            "❌ متن خوشامد را وارد کن."
-        )
-
-        return
-
-    set_setting(
-        message.chat.id,
-        "welcome",
-        welcome
-    )
-
-    bot.reply_to(
-        message,
-        "✅ متن خوشامد ذخیره شد.\n\n"
-        "متغیرها:\n"
-        "<code>{name}</code>\n"
-        "<code>{group}</code>"
-    )
-
-
-@bot.message_handler(
-    func=lambda m:
-    is_group(m)
-    and m.text
-    and m.text.lower()
-    in (
-        "خوشامد روشن",
-        "welcome on",
-        "خوشامد خاموش",
-        "welcome off"
-    )
-)
-def welcome_toggle(message):
-
-    if not admin_only(message):
-        return
-
-    enabled = message.text.lower() in (
-        "خوشامد روشن",
-        "welcome on"
-    )
-
-    set_setting(
-        message.chat.id,
-        "welcome_enabled",
-        1 if enabled else 0
-    )
-
-    bot.reply_to(
-        message,
-        "👋 خوشامدگویی "
-        + (
-            "فعال شد."
-            if enabled
-            else
-            "غیرفعال شد."
-        )
-)
-     def admin_panel():
-
-    kb = types.InlineKeyboardMarkup(
-        row_width=2
-    )
-
-    kb.add(
-        types.InlineKeyboardButton(
-            "🛡 مدیریت کاربر",
-            callback_data="panel:users"
-        ),
-        types.InlineKeyboardButton(
-            "🔒 قفل‌ها",
-            callback_data="panel:locks"
-        )
-    )
-
-    kb.add(
-        types.InlineKeyboardButton(
-            "🤖 ضداسپم",
-            callback_data="panel:antispam"
-        ),
-        types.InlineKeyboardButton(
-            "⚠️ اخطارها",
-            callback_data="panel:warnings"
-        )
-    )
-
-    kb.add(
-        types.InlineKeyboardButton(
-            "📊 آمار",
-            callback_data="panel:stats"
-        ),
-        types.InlineKeyboardButton(
-            "⚙️ تنظیمات",
-            callback_data="panel:settings"
-        )
-    )
-
-    kb.add(
-        types.InlineKeyboardButton(
-            "📜 لاگ",
-            callback_data="panel:logs"
-        ),
-        types.InlineKeyboardButton(
-            "📖 راهنما",
-            callback_data="panel:help"
-        )
-    )
-
-    return kb
-
-
-def edit_panel(call, text, keyboard):
-
-    try:
-
-        bot.edit_message_text(
-            text,
-            call.message.chat.id,
-            call.message.message_id,
-            reply_markup=keyboard
-        )
-
-    except Exception as e:
-
-        print(
-            "PANEL ERROR:",
-            e
-        )
-
-
 @bot.callback_query_handler(
-    func=lambda call:
-    call.data.startswith("panel:")
+    func=lambda c:
+    c.data.startswith("p_")
 )
-def panel_callback(call):
-
-    chat_id = call.message.chat.id
-
-    if not is_admin_user(
-        chat_id,
-        call.from_user.id
-    ):
-
-        bot.answer_callback_query(
-            call.id,
-            "⛔ فقط ادمین‌ها.",
-            show_alert=True
-        )
-
-        return
-
-    section = call.data.split(":")[1]
-
-    if section == "users":
-
+def private_callback(call):
+    if call.data == "p_features":
         text = (
-            "🛡 <b>مدیریت کاربران</b>\n\n"
-            "روی پیام کاربر ریپلای کن:\n\n"
+            "🛡 <b>امکانات</b>\n\n"
             "🔨 بن\n"
             "👢 کیک\n"
-            "🔇 سکوت 10m\n"
-            "🔊 رفع سکوت\n"
-            "⚠️ اخطار\n"
-            "➖ برداشتن اخطار"
-        )
-
-        kb = types.InlineKeyboardMarkup()
-
-        kb.add(
-            types.InlineKeyboardButton(
-                "🔙 برگشت",
-                callback_data="panel:main"
-            )
-        )
-
-        edit_panel(call, text, kb)
-        return
-
-    if section == "locks":
-
-        lines = [
-            "🔒 <b>وضعیت قفل‌ها</b>\n"
-        ]
-
-        for key, title in LOCK_TYPES.items():
-
-            status = (
-                "🔴 فعال"
-                if get_lock(chat_id, key)
-                else
-                "🟢 خاموش"
-            )
-
-            lines.append(
-                f"{status} — {title}"
-            )
-
-        lines.append(
-            "\nمثال:\n"
-            "<code>قفل لینک</code>\n"
-            "<code>باز لینک</code>"
-        )
-
-        kb = types.InlineKeyboardMarkup()
-
-        kb.add(
-            types.InlineKeyboardButton(
-                "🔙 برگشت",
-                callback_data="panel:main"
-            )
-        )
-
-        edit_panel(
-            call,
-            "\n".join(lines),
-            kb
-        )
-
-        return
-
-    if section == "antispam":
-
-        settings = get_settings(chat_id)
-
-        text = (
-            "🤖 <b>ضداسپم</b>\n\n"
-            f"📨 Flood: "
-            f"<b>{settings['flood_limit']}</b>\n"
-            f"⏱ بازه: "
-            f"<b>{settings['flood_seconds']} ثانیه</b>\n\n"
-            f"🔗 ضدلینک: "
-            f"{'فعال' if settings['anti_link'] else 'خاموش'}\n"
-            f"↪️ ضدفوروارد: "
-            f"{'فعال' if settings['anti_forward'] else 'خاموش'}\n"
-            f"🔁 ضدتکرار: "
-            f"{'فعال' if settings['anti_repeat'] else 'خاموش'}\n"
-            f"🤬 فیلتر کلمات: "
-            f"{'فعال' if settings['badword_filter'] else 'خاموش'}"
-        )
-
-        kb = types.InlineKeyboardMarkup(
-            row_width=2
-        )
-
-        kb.add(
-            types.InlineKeyboardButton(
-                "🔗 ضدلینک",
-                callback_data="toggle:anti_link"
-            ),
-            types.InlineKeyboardButton(
-                "↪️ ضدفوروارد",
-                callback_data="toggle:anti_forward"
-            )
-        )
-
-        kb.add(
-            types.InlineKeyboardButton(
-                "🔁 ضدتکرار",
-                callback_data="toggle:anti_repeat"
-            ),
-            types.InlineKeyboardButton(
-                "🤬 فیلتر کلمات",
-                callback_data="toggle:badword_filter"
-            )
-        )
-
-        kb.add(
-            types.InlineKeyboardButton(
-                "🔙 برگشت",
-                callback_data="panel:main"
-            )
-        )
-
-        edit_panel(
-            call,
-            text,
-            kb
-        )
-
-        return
-
-    if section == "warnings":
-
-        settings = get_settings(chat_id)
-
-        text = (
-            "⚠️ <b>سیستم اخطار</b>\n\n"
-            f"حد فعلی: "
-            f"<b>{settings['warn_limit']}</b>\n\n"
-            "رسیدن به حد = بن خودکار"
-        )
-
-        kb = types.InlineKeyboardMarkup()
-
-        kb.add(
-            types.InlineKeyboardButton(
-                "🔙 برگشت",
-                callback_data="panel:main"
-            )
-        )
-
-        edit_panel(
-            call,
-            text,
-            kb
-        )
-
-        return
-
-    if section == "stats":
-
-        con = db()
-
-        actions = con.execute("""
-            SELECT COUNT(*) total
-            FROM actions
-            WHERE chat_id=?
-        """, (chat_id,)).fetchone()["total"]
-
-        bans = con.execute("""
-            SELECT COUNT(*) total
-            FROM actions
-            WHERE chat_id=?
-            AND action IN ('BAN','AUTO_BAN')
-        """, (chat_id,)).fetchone()["total"]
-
-        warns = con.execute("""
-            SELECT COUNT(*) total
-            FROM actions
-            WHERE chat_id=?
-            AND action='WARN'
-        """, (chat_id,)).fetchone()["total"]
-
-        con.close()
-
-        text = (
-            "📊 <b>آمار گروه</b>\n\n"
-            f"📋 عملیات: <b>{actions}</b>\n"
-            f"🔨 بن: <b>{bans}</b>\n"
-            f"⚠️ اخطار: <b>{warns}</b>\n"
-            f"🆔 ID: <code>{chat_id}</code>"
-        )
-
-        kb = types.InlineKeyboardMarkup()
-
-        kb.add(
-            types.InlineKeyboardButton(
-                "🔙 برگشت",
-                callback_data="panel:main"
-            )
-        )
-
-        edit_panel(
-            call,
-            text,
-            kb
-        )
-
-        return
-
-    if section == "settings":
-
-        settings = get_settings(chat_id)
-
-        text = (
-            "⚙️ <b>تنظیمات</b>\n\n"
-            f"⚠️ حد اخطار: "
-            f"<b>{settings['warn_limit']}</b>\n"
-            f"🤖 Flood: "
-            f"<b>{settings['flood_limit']}</b> / "
-            f"{settings['flood_seconds']}s\n"
-            f"👋 خوشامد: "
-            f"{'فعال' if settings['welcome_enabled'] else 'خاموش'}"
-        )
-
-        kb = types.InlineKeyboardMarkup()
-
-        kb.add(
-            types.InlineKeyboardButton(
-                "⚠️ حد اخطار 3",
-                callback_data="warnlimit:3"
-            ),
-            types.InlineKeyboardButton(
-                "⚠️ حد اخطار 5",
-                callback_data="warnlimit:5"
-            )
-        )
-
-        kb.add(
-            types.InlineKeyboardButton(
-                "🔙 برگشت",
-                callback_data="panel:main"
-            )
-        )
-
-        edit_panel(
-            call,
-            text,
-            kb
-        )
-
-        return
-
-    if section == "logs":
-
-        con = db()
-
-        rows = con.execute("""
-            SELECT *
-            FROM actions
-            WHERE chat_id=?
-            ORDER BY id DESC
-            LIMIT 8
-        """, (chat_id,)).fetchall()
-
-        con.close()
-
-        if not rows:
-
-            text = (
-                "📜 <b>لاگ</b>\n\n"
-                "هنوز عملیاتی ثبت نشده."
-            )
-
-        else:
-
-            lines = [
-                "📜 <b>آخرین عملیات</b>\n"
-            ]
-
-            for row in rows:
-
-                lines.append(
-                    f"• <b>{row['action']}</b> "
-                    f"User: <code>{row['user_id']}</code>"
-                )
-
-            text = "\n".join(lines)
-
-        kb = types.InlineKeyboardMarkup()
-
-        kb.add(
-            types.InlineKeyboardButton(
-                "🔙 برگشت",
-                callback_data="panel:main"
-            )
-        )
-
-        edit_panel(
-            call,
-            text,
-            kb
-        )
-
-        return
-
-    if section == "help":
-
-        text = (
-            "📖 <b>راهنمای مدیریت</b>\n\n"
-            "🔨 بن / کیک\n"
-            "🔇 میوت موقت\n"
-            "⚠️ اخطار\n"
+            "🔇 سکوت موقت\n"
+            "⚠️ سیستم اخطار\n"
             "🔒 قفل رسانه‌ها\n"
-            "🤖 ضداسپم\n"
             "🔗 ضدلینک\n"
             "↪️ ضدفوروارد\n"
             "🔁 ضدتکرار\n"
-            "👋 خوشامدگویی\n"
-            "📊 آمار\n"
-            "📜 لاگ"
-        )
-
-        kb = types.InlineKeyboardMarkup()
-
-        kb.add(
-            types.InlineKeyboardButton(
-                "🔙 برگشت",
-                callback_data="panel:main"
-            )
-        )
-
-        edit_panel(
-            call,
-            text,
-            kb
-        )
-
-        return
-
-    if section == "main":
-
-        edit_panel(
-            call,
-            "⚙️ <b>پنل مدیریت گروه</b>\n\n"
-            "بخش موردنظر را انتخاب کن:",
-            admin_panel()
-        )
-
-
-@bot.callback_query_handler(
-    func=lambda call:
-    call.data.startswith("toggle:")
-)
-def toggle_callback(call):
-
-    chat_id = call.message.chat.id
-
-    if not is_admin_user(
-        chat_id,
-        call.from_user.id
-    ):
-        return
-
-    setting = call.data.split(":")[1]
-
-    settings = get_settings(chat_id)
-
-    current = settings[setting]
-    new_value = 0 if current else 1
-
-    set_setting(
-        chat_id,
-        setting,
-        new_value
-    )
-
-    bot.answer_callback_query(
-        call.id,
-        "✅ تغییر کرد."
-    )
-
-    panel_callback(
-        type(
-            "FakeCall",
-            (),
-            {
-                "message": call.message,
-                "from_user": call.from_user,
-                "data": "panel:antispam"
-            }
-        )()
-    )
-@bot.callback_query_handler(
-    func=lambda call:
-    call.data.startswith("warnlimit:")
-)
-def warnlimit_callback(call):
-
-    chat_id = call.message.chat.id
-
-    if not is_admin_user(
-        chat_id,
-        call.from_user.id
-    ):
-        return
-
-    value = int(
-        call.data.split(":")[1]
-    )
-
-    set_setting(
-        chat_id,
-        "warn_limit",
-        value
-    )
-
-    bot.answer_callback_query(
-        call.id,
-        f"حد اخطار {value} شد."
-    )
-
-    try:
-
-        bot.edit_message_text(
-            f"✅ <b>تنظیم شد</b>\n\n"
-            f"⚠️ حد اخطار: <b>{value}</b>",
-            chat_id,
-            call.message.message_id,
-            reply_markup=admin_panel()
-        )
-
-    except Exception:
-        pass
-
-
-@bot.message_handler(commands=["start"])
-def private_start(message):
-
-    if message.chat.type != "private":
-        return
-
-    kb = types.InlineKeyboardMarkup(
-        row_width=2
-    )
-
-    kb.add(
-        types.InlineKeyboardButton(
-            "🛡 امکانات",
-            callback_data="private:features"
-        ),
-        types.InlineKeyboardButton(
-            "📖 راهنما",
-            callback_data="private:help"
-        )
-    )
-
-    kb.add(
-        types.InlineKeyboardButton(
-            "🤖 وضعیت",
-            callback_data="private:status"
-        )
-    )
-
-    bot.send_message(
-        message.chat.id,
-        "🤖 <b>Group Manager</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "🛡 ربات حرفه‌ای مدیریت گروه\n\n"
-        "بات را به گروه اضافه کن، "
-        "ادمینش کن و سپس:\n\n"
-        "<code>/panel</code>\n\n"
-        "را بزن.",
-        reply_markup=kb
-    )
-
-
-@bot.callback_query_handler(
-    func=lambda call:
-    call.data.startswith("private:")
-)
-def private_callback(call):
-
-    section = call.data.split(":")[1]
-
-    if section == "features":
-
-        text = (
-            "🛡 <b>امکانات ربات</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━\n\n"
-            "🔨 بن\n"
-            "👢 کیک\n"
-            "🔇 میوت موقت\n"
-            "⚠️ سیستم اخطار\n"
             "🤖 ضد Flood\n"
-            "🔗 ضد لینک\n"
-            "↪️ ضد فوروارد\n"
-            "🔁 ضد تکرار\n"
-            "🤬 فیلتر کلمات\n"
-            "🔒 قفل عکس\n"
-            "🔒 قفل فیلم\n"
-            "🔒 قفل GIF\n"
-            "🔒 قفل استیکر\n"
-            "🔒 قفل ویس\n"
-            "🔒 قفل فایل\n"
             "👋 خوشامدگویی\n"
             "📊 آمار\n"
-            "📜 لاگ\n"
-            "⚙️ پنل شیشه‌ای\n"
-            "💾 تنظیمات جدا برای هر گروه"
+            "⚙️ پنل شیشه‌ای"
         )
 
-    elif section == "status":
-
-        text = (
-            "🟢 <b>ربات آنلاین است</b>\n\n"
-            "⚡ آماده مدیریت گروه‌ها\n"
-            "🛡 سیستم امنیتی آماده\n"
-            "💾 دیتابیس فعال"
-        )
-
-    elif section == "help":
-
+    elif call.data == "p_help":
         text = (
             "📖 <b>راهنما</b>\n\n"
-            "1️⃣ بات را به گروه اضافه کن.\n"
-            "2️⃣ بات را ادمین کن.\n"
-            "3️⃣ دسترسی حذف پیام بده.\n"
-            "4️⃣ دسترسی Ban/Restrict بده.\n"
-            "5️⃣ در BotFather بخش Privacy را "
-            "روی Disable قرار بده.\n"
-            "6️⃣ داخل گروه <code>/panel</code> بزن."
+            "بات را به گروه اضافه کن.\n"
+            "ادمینش کن.\n"
+            "دسترسی حذف پیام، Ban و Restrict "
+            "را بده.\n\n"
+            "سپس داخل گروه:\n"
+            "<code>/panel</code>"
         )
 
     else:
-
         text = (
-            "🤖 <b>Group Manager</b>\n\n"
-            "ربات مدیریت حرفه‌ای گروه."
+            "🟢 <b>ربات آنلاین است</b>\n\n"
+            "⚡ سیستم مدیریت آماده است."
         )
 
     kb = types.InlineKeyboardMarkup()
@@ -2208,119 +1599,83 @@ def private_callback(call):
     kb.add(
         types.InlineKeyboardButton(
             "🔙 برگشت",
-            callback_data="private:back"
+            callback_data="p_back"
         )
     )
 
     try:
-
         bot.edit_message_text(
             text,
             call.message.chat.id,
             call.message.message_id,
             reply_markup=kb
         )
-
     except Exception:
         pass
 
+    bot.answer_callback_query(call.id)
 
-@bot.my_chat_member_handler()
-def bot_status_update(message):
+
+@bot.callback_query_handler(
+    func=lambda c: c.data == "p_back"
+)
+def private_back(call):
+    kb = types.InlineKeyboardMarkup(
+        row_width=2
+    )
+
+    kb.add(
+        types.InlineKeyboardButton(
+            "🛡 امکانات",
+            callback_data="p_features"
+        ),
+        types.InlineKeyboardButton(
+            "📖 راهنما",
+            callback_data="p_help"
+        )
+    )
+
+    kb.add(
+        types.InlineKeyboardButton(
+            "⚙️ وضعیت",
+            callback_data="p_status"
+        )
+    )
 
     try:
-
-        chat = message.chat
-
-        if chat.type not in (
-            "group",
-            "supergroup"
-        ):
-            return
-
-        ensure_group(chat)
-
-        status = (
-            message.new_chat_member.status
+        bot.edit_message_text(
+            "🤖 <b>GROUP MANAGER</b>\n\n"
+            "به پنل اصلی خوش آمدی.",
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=kb
         )
+    except Exception:
+        pass
 
-        if status in (
-            "administrator",
-            "member"
-        ):
-
-            try:
-
-                bot.send_message(
-                    chat.id,
-                    "🤖 <b>سلام!</b>\n\n"
-                    "من برای مدیریت گروه آماده‌ام.\n\n"
-                    "⚙️ پنل:\n"
-                    "<code>/panel</code>\n\n"
-                    "📖 راهنما:\n"
-                    "<code>/help</code>"
-                )
-
-            except Exception:
-                pass
-
-    except Exception as e:
-
-        print(
-            "STATUS ERROR:",
-            e
-        )
+    bot.answer_callback_query(call.id)
 
 
-def temporary_worker():
-
+def mute_worker():
     while True:
-
-        now = int(time.time())
+        now = time.time()
         expired = []
 
-        with temporary_lock:
-
+        with mute_lock:
             for key, until in list(
-                temporary_actions.items()
+                mute_data.items()
             ):
-
                 if now >= until:
                     expired.append(key)
 
         for chat_id, user_id in expired:
+            unrestrict_user(
+                chat_id,
+                user_id
+            )
 
-            try:
-
-                permissions = ChatPermissions(
-                    can_send_messages=True,
-                    can_send_audios=True,
-                    can_send_documents=True,
-                    can_send_photos=True,
-                    can_send_videos=True,
-                    can_send_video_notes=True,
-                    can_send_voice_notes=True,
-                    can_send_polls=True,
-                    can_send_other_messages=True,
-                    can_add_web_page_previews=True
-                )
-
-                bot.restrict_chat_member(
-                    chat_id,
-                    user_id,
-                    permissions=permissions
-                )
-
-            except Exception as e:
-
-                print(
-                    "AUTO UNMUTE ERROR:",
-                    e
-                )
-
-            with temporary_lock:
-
-                temporary_actions.pop(
+            with mute_lock:
+                mute_data.pop(
                     (chat_id, user_id),
                     None
                 )
@@ -2328,39 +1683,19 @@ def temporary_worker():
         time.sleep(5)
 
 
-def startup():
-
-    print(
-        "================================"
-    )
-
-    print(
-        "🤖 Group Manager"
-    )
-
-    print(
-        "🟢 Bot is running..."
-    )
-
-    print(
-        "💾 Database:",
-        DB_NAME
-    )
-
-    print(
-        "================================"
-    )
-
-
 threading.Thread(
-    target=temporary_worker,
+    target=mute_worker,
     daemon=True
 ).start()
 
-startup()
+print("================================")
+print("🤖 GROUP MANAGER")
+print("🟢 BOT STARTED")
+print("💾 DATABASE READY")
+print("================================")
 
 bot.infinity_polling(
     skip_pending=True,
     timeout=60,
     long_polling_timeout=60
-        )
+    )
