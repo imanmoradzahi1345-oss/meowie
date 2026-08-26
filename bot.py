@@ -5,9 +5,9 @@ import time
 import re
 import threading
 
-# =========================
-# CONFIG
-# =========================
+# =========================================================
+# تنظیمات
+# =========================================================
 
 BOT_TOKEN = "8597049833:AAFnEjGLcOz09Duy6MIvOoMD9TA1-fiRhPE"
 ADMIN_ID = 7781305425
@@ -16,95 +16,133 @@ bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 
 DB_NAME = "archive.db"
 
+# وضعیت فعلی بات برای ادمین
 states = {}
-sent_messages = {}
+
+# پیام‌هایی که در عملیات فعلی باید قابل پاکسازی باشند
+session_messages = {}
+
+# پیام‌های ارسال‌شده در آخرین عملیات ارسال
+last_sent_messages = {}
+
+# قفل دیتابیس
+db_lock = threading.Lock()
 
 
-# =========================
+# =========================================================
 # DATABASE
-# =========================
+# =========================================================
 
 def connect():
-    con = sqlite3.connect(DB_NAME, check_same_thread=False)
+    con = sqlite3.connect(
+        DB_NAME,
+        timeout=30,
+        check_same_thread=False
+    )
+
     con.row_factory = sqlite3.Row
+
     return con
 
 
 def init_db():
-    con = connect()
-    cur = con.cursor()
 
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS titles (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            name TEXT NOT NULL,
-            created_at INTEGER NOT NULL
-        )
-    """)
+    with db_lock:
 
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS items (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            title_id INTEGER NOT NULL,
-            item_type TEXT NOT NULL,
-            file_id TEXT,
-            content TEXT,
-            created_at INTEGER NOT NULL
-        )
-    """)
+        con = connect()
 
-    con.commit()
-    con.close()
+        con.execute("PRAGMA journal_mode=WAL")
+        con.execute("PRAGMA synchronous=NORMAL")
+
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS titles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            )
+        """)
+
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                title_id INTEGER NOT NULL,
+                item_type TEXT NOT NULL,
+                file_id TEXT,
+                content TEXT,
+                created_at INTEGER NOT NULL
+            )
+        """)
+
+        con.execute("""
+            CREATE INDEX IF NOT EXISTS idx_items_title
+            ON items(user_id, title_id, item_type)
+        """)
+
+        con.commit()
+        con.close()
 
 
 init_db()
 
 
-# =========================
+# =========================================================
 # SECURITY
-# =========================
+# =========================================================
 
 def allowed(message):
+
     return (
-        message.from_user
+        message.from_user is not None
         and message.from_user.id == ADMIN_ID
         and message.chat.type == "private"
     )
 
 
-# =========================
-# DATABASE FUNCTIONS
-# =========================
+def allowed_call(call):
 
-def create_title(name):
-    con = connect()
-
-    cur = con.cursor()
-
-    cur.execute(
-        """
-        INSERT INTO titles
-        (user_id, name, created_at)
-        VALUES (?, ?, ?)
-        """,
-        (
-            ADMIN_ID,
-            name,
-            int(time.time())
-        )
+    return (
+        call.from_user is not None
+        and call.from_user.id == ADMIN_ID
     )
 
-    title_id = cur.lastrowid
 
-    con.commit()
-    con.close()
+# =========================================================
+# DATABASE - TITLES
+# =========================================================
+
+def create_title(name):
+
+    with db_lock:
+
+        con = connect()
+
+        cur = con.cursor()
+
+        cur.execute(
+            """
+            INSERT INTO titles
+            (user_id, name, created_at)
+            VALUES (?, ?, ?)
+            """,
+            (
+                ADMIN_ID,
+                name,
+                int(time.time())
+            )
+        )
+
+        title_id = cur.lastrowid
+
+        con.commit()
+        con.close()
 
     return title_id
 
 
 def get_titles():
+
     con = connect()
 
     rows = con.execute(
@@ -123,6 +161,7 @@ def get_titles():
 
 
 def get_title(title_id):
+
     con = connect()
 
     row = con.execute(
@@ -142,42 +181,50 @@ def get_title(title_id):
     return row
 
 
+# =========================================================
+# DATABASE - ITEMS
+# =========================================================
+
 def save_item(
     title_id,
     item_type,
     file_id=None,
     content=None
 ):
-    con = connect()
 
-    con.execute(
-        """
-        INSERT INTO items
-        (
-            user_id,
-            title_id,
-            item_type,
-            file_id,
-            content,
-            created_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        (
-            ADMIN_ID,
-            title_id,
-            item_type,
-            file_id,
-            content,
-            int(time.time())
-        )
-    )
+    with db_lock:
 
-    con.commit()
-    con.close()
+        con = connect()
+
+        con.execute(
+            """
+            INSERT INTO items
+            (
+                user_id,
+                title_id,
+                item_type,
+                file_id,
+                content,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                ADMIN_ID,
+                title_id,
+                item_type,
+                file_id,
+                content,
+                int(time.time())
+            )
+        )
+
+        con.commit()
+        con.close()
 
 
 def get_items(title_id, item_type):
+
     con = connect()
 
     rows = con.execute(
@@ -203,6 +250,7 @@ def get_items(title_id, item_type):
 
 
 def get_count(title_id, item_type):
+
     con = connect()
 
     row = con.execute(
@@ -227,30 +275,33 @@ def get_count(title_id, item_type):
 
 
 def delete_category(title_id, item_type):
-    con = connect()
 
-    con.execute(
-        """
-        DELETE FROM items
-        WHERE
-            user_id=?
-            AND title_id=?
-            AND item_type=?
-        """,
-        (
-            ADMIN_ID,
-            title_id,
-            item_type
+    with db_lock:
+
+        con = connect()
+
+        con.execute(
+            """
+            DELETE FROM items
+            WHERE
+                user_id=?
+                AND title_id=?
+                AND item_type=?
+            """,
+            (
+                ADMIN_ID,
+                title_id,
+                item_type
+            )
         )
-    )
 
-    con.commit()
-    con.close()
+        con.commit()
+        con.close()
 
 
-# =========================
+# =========================================================
 # CONTENT DETECTION
-# =========================
+# =========================================================
 
 URL_PATTERN = re.compile(
     r"(https?://\S+|www\.\S+)",
@@ -258,41 +309,51 @@ URL_PATTERN = re.compile(
 )
 
 
-def detect(message):
+def detect_content(message):
 
+    # عکس
     if message.content_type == "photo":
+
         return (
             "photo",
             message.photo[-1].file_id,
             None
         )
 
+    # فیلم
     if message.content_type == "video":
+
         return (
             "video",
             message.video.file_id,
             None
         )
 
+    # GIF / Animation
     if message.content_type == "animation":
+
         return (
             "gif",
             message.animation.file_id,
             None
         )
 
+    # استیکر
     if message.content_type == "sticker":
+
         return (
             "sticker",
             message.sticker.file_id,
             None
         )
 
+    # متن و لینک
     if message.content_type == "text":
 
         text = message.text or ""
 
         if URL_PATTERN.search(text):
+
             return (
                 "link",
                 None,
@@ -312,57 +373,73 @@ def detect(message):
     )
 
 
-# =========================
+# =========================================================
 # MESSAGE MEMORY
-# =========================
+# =========================================================
 
-def remember(chat_id, message_id):
+def remember_session(
+    chat_id,
+    message_id
+):
 
-    if chat_id not in sent_messages:
-        sent_messages[chat_id] = set()
+    session_messages.setdefault(
+        chat_id,
+        set()
+    )
 
-    sent_messages[chat_id].add(message_id)
+    session_messages[chat_id].add(
+        message_id
+    )
 
 
-def delete_message(chat_id, message_id):
+def safe_delete(
+    chat_id,
+    message_id
+):
 
     try:
+
         bot.delete_message(
             chat_id,
             message_id
         )
+
     except Exception:
+
         pass
 
 
 def clear_session(chat_id):
 
     ids = list(
-        sent_messages.get(
+        session_messages.get(
             chat_id,
             set()
         )
     )
 
     for message_id in ids:
-        delete_message(
+
+        safe_delete(
             chat_id,
             message_id
         )
 
-    sent_messages.pop(
+    session_messages.pop(
         chat_id,
         None
     )
 
 
-# =========================
+# =========================================================
 # KEYBOARDS
-# =========================
+# =========================================================
 
 def home_keyboard():
 
-    kb = types.InlineKeyboardMarkup()
+    kb = types.InlineKeyboardMarkup(
+        row_width=1
+    )
 
     kb.add(
         types.InlineKeyboardButton(
@@ -465,9 +542,51 @@ def title_keyboard(title_id):
     )
 
     return kb
-    # =========================
-# TITLES PAGE
-# =========================
+    # =========================================================
+# START
+# =========================================================
+
+@bot.message_handler(
+    commands=["start"]
+)
+def start(message):
+
+    if not allowed(message):
+        return
+
+    chat_id = message.chat.id
+
+    states.pop(
+        chat_id,
+        None
+    )
+
+    session_messages.pop(
+        chat_id,
+        None
+    )
+
+    last_sent_messages.pop(
+        chat_id,
+        None
+    )
+
+    msg = bot.send_message(
+        chat_id,
+        "🗄 <b>آرشیو شخصی</b>\n\n"
+        "آرشیو خودت را مدیریت کن.",
+        reply_markup=home_keyboard()
+    )
+
+    remember_session(
+        chat_id,
+        msg.message_id
+    )
+
+
+# =========================================================
+# SHOW TITLES
+# =========================================================
 
 def show_titles(
     chat_id,
@@ -484,7 +603,7 @@ def show_titles(
 
         text = (
             "📂 <b>عنوان‌های من</b>\n\n"
-            "هنوز عنوانی نداری."
+            "هنوز هیچ عنوانی ساخته نشده."
         )
 
     else:
@@ -500,14 +619,15 @@ def show_titles(
 
             total = 0
 
-            for item_type in [
+            for item_type in (
                 "photo",
                 "video",
                 "text",
                 "sticker",
                 "gif",
                 "link"
-            ]:
+            ):
+
                 total += get_count(
                     title_id,
                     item_type
@@ -534,16 +654,19 @@ def show_titles(
         )
     )
 
-    if message_id:
+    if message_id is not None:
 
         try:
+
             bot.edit_message_text(
                 text,
                 chat_id,
                 message_id,
                 reply_markup=kb
             )
+
         except Exception:
+
             pass
 
     else:
@@ -554,52 +677,27 @@ def show_titles(
             reply_markup=kb
         )
 
-        remember(
+        remember_session(
             chat_id,
             msg.message_id
         )
 
 
-# =========================
-# START
-# =========================
-
-@bot.message_handler(
-    commands=["start"]
-)
-def start(message):
-
-    if not allowed(message):
-        return
-
-    states.pop(
-        message.chat.id,
-        None
-    )
-
-    msg = bot.send_message(
-        message.chat.id,
-        "🗄 <b>آرشیو شخصی</b>\n\n"
-        "به آرشیو خودت خوش آمدی.",
-        reply_markup=home_keyboard()
-    )
-
-    remember(
-        message.chat.id,
-        msg.message_id
-    )
-
-
-# =========================
-# CALLBACKS
-# =========================
+# =========================================================
+# CALLBACK HANDLER
+# =========================================================
 
 @bot.callback_query_handler(
     func=lambda call: True
 )
 def callbacks(call):
 
-    if call.from_user.id != ADMIN_ID:
+    if not allowed_call(call):
+
+        bot.answer_callback_query(
+            call.id
+        )
+
         return
 
     chat_id = call.message.chat.id
@@ -610,9 +708,9 @@ def callbacks(call):
         call.id
     )
 
-    # ---------------------
+    # =====================================================
     # HOME
-    # ---------------------
+    # =====================================================
 
     if data == "home":
 
@@ -622,6 +720,7 @@ def callbacks(call):
         )
 
         try:
+
             bot.edit_message_text(
                 "🗄 <b>آرشیو شخصی</b>\n\n"
                 "یک گزینه انتخاب کن:",
@@ -629,14 +728,16 @@ def callbacks(call):
                 message_id,
                 reply_markup=home_keyboard()
             )
+
         except Exception:
+
             pass
 
         return
 
-    # ---------------------
+    # =====================================================
     # TITLES
-    # ---------------------
+    # =====================================================
 
     if data == "titles":
 
@@ -652,9 +753,9 @@ def callbacks(call):
 
         return
 
-    # ---------------------
+    # =====================================================
     # NEW TITLE
-    # ---------------------
+    # =====================================================
 
     if data == "new_title":
 
@@ -672,23 +773,26 @@ def callbacks(call):
         )
 
         try:
+
             bot.edit_message_text(
                 "🏷 <b>ساخت عنوان</b>\n\n"
-                "نام عنوان را بفرست.\n\n"
+                "اسم عنوان را بفرست.\n\n"
                 "مثال:\n"
                 "<code>وطنی</code>",
                 chat_id,
                 message_id,
                 reply_markup=kb
             )
+
         except Exception:
+
             pass
 
         return
 
-    # ---------------------
+    # =====================================================
     # OPEN TITLE
-    # ---------------------
+    # =====================================================
 
     if data.startswith("title:"):
 
@@ -738,10 +842,11 @@ def callbacks(call):
             f"🎭 استیکر: {counts['sticker']}\n"
             f"🎞 GIF: {counts['gif']}\n"
             f"🔗 لینک: {counts['link']}\n\n"
-            "یک بخش را انتخاب کن:"
+            "بخش موردنظر را انتخاب کن:"
         )
 
         try:
+
             bot.edit_message_text(
                 text,
                 chat_id,
@@ -750,14 +855,16 @@ def callbacks(call):
                     title_id
                 )
             )
+
         except Exception:
+
             pass
 
         return
 
-    # ---------------------
+    # =====================================================
     # SAVE MODE
-    # ---------------------
+    # =====================================================
 
     if data.startswith("save:"):
 
@@ -772,10 +879,22 @@ def callbacks(call):
         if not title:
             return
 
+        # حالت ذخیره
         states[chat_id] = {
             "mode": "save",
-            "title_id": title_id
+            "title_id": title_id,
+            "saved": {
+                "photo": 0,
+                "video": 0,
+                "text": 0,
+                "sticker": 0,
+                "gif": 0,
+                "link": 0
+            }
         }
+
+        # پیام‌های قبلی جلسه ذخیره پاک می‌شوند
+        session_messages[chat_id] = set()
 
         kb = types.InlineKeyboardMarkup()
 
@@ -787,29 +906,29 @@ def callbacks(call):
         )
 
         try:
+
             bot.edit_message_text(
-                f"📥 <b>حالت ذخیره فعال شد</b>\n\n"
-                f"📁 عنوان: <b>{title['name']}</b>\n\n"
-                "هر چیزی بفرستی یا Forward کنی "
-                "خودکار تشخیص داده می‌شود.\n\n"
-                "🖼 عکس\n"
-                "🎬 فیلم\n"
-                "📝 متن\n"
-                "🎭 استیکر\n"
-                "🎞 GIF\n"
-                "🔗 لینک",
+                "📥 <b>حالت ذخیره فعال شد</b>\n\n"
+                f"📁 مقصد: <b>{title['name']}</b>\n\n"
+                "حالا هر تعداد عکس، فیلم، متن، "
+                "استیکر، GIF یا لینک خواستی بفرست "
+                "یا از کانال/ربات Forward کن.\n\n"
+                "⚡ همه خودکار تشخیص داده و ذخیره می‌شوند.\n\n"
+                "برای پایان روی دکمه زیر بزن.",
                 chat_id,
                 message_id,
                 reply_markup=kb
             )
+
         except Exception:
+
             pass
 
         return
 
-    # ---------------------
+    # =====================================================
     # FINISH SAVE
-    # ---------------------
+    # =====================================================
 
     if data.startswith("finish:"):
 
@@ -817,11 +936,25 @@ def callbacks(call):
             data.split(":")[1]
         )
 
+        state = states.get(
+            chat_id
+        )
+
+        # اگر حالت ذخیره وجود داشته باشد
+        stats = None
+
+        if state:
+
+            stats = state.get(
+                "saved"
+            )
+
         states.pop(
             chat_id,
             None
         )
 
+        # پاک کردن پیام‌های جلسه
         clear_session(
             chat_id
         )
@@ -830,27 +963,45 @@ def callbacks(call):
             title_id
         )
 
-        if title:
+        if not title:
+            return
 
-            msg = bot.send_message(
-                chat_id,
-                f"✅ <b>ذخیره تمام شد</b>\n\n"
-                f"📁 {title['name']}",
-                reply_markup=title_keyboard(
-                    title_id
-                )
-            )
+        if stats is None:
 
-            remember(
-                chat_id,
-                msg.message_id
+            stats = {
+                "photo": 0,
+                "video": 0,
+                "text": 0,
+                "sticker": 0,
+                "gif": 0,
+                "link": 0
+            }
+
+        msg = bot.send_message(
+            chat_id,
+            f"✅ <b>ذخیره تمام شد</b>\n\n"
+            f"📁 <b>{title['name']}</b>\n\n"
+            f"🖼 عکس جدید: {stats['photo']}\n"
+            f"🎬 فیلم جدید: {stats['video']}\n"
+            f"📝 متن جدید: {stats['text']}\n"
+            f"🎭 استیکر جدید: {stats['sticker']}\n"
+            f"🎞 GIF جدید: {stats['gif']}\n"
+            f"🔗 لینک جدید: {stats['link']}",
+            reply_markup=title_keyboard(
+                title_id
             )
+        )
+
+        remember_session(
+            chat_id,
+            msg.message_id
+        )
 
         return
 
-    # ---------------------
+    # =====================================================
     # CATEGORY
-    # ---------------------
+    # =====================================================
 
     if data.startswith("cat:"):
 
@@ -909,6 +1060,7 @@ def callbacks(call):
         )
 
         try:
+
             bot.edit_message_text(
                 f"📁 <b>{title['name']}</b>\n\n"
                 f"{names[item_type]}\n\n"
@@ -917,14 +1069,16 @@ def callbacks(call):
                 message_id,
                 reply_markup=kb
             )
+
         except Exception:
+
             pass
 
         return
 
-    # ---------------------
+    # =====================================================
     # CLEAR CONFIRM
-    # ---------------------
+    # =====================================================
 
     if data.startswith("clear:"):
 
@@ -935,6 +1089,20 @@ def callbacks(call):
         )
 
         item_type = parts[2]
+
+        names = {
+            "photo": "عکس",
+            "video": "فیلم",
+            "text": "متن",
+            "sticker": "استیکر",
+            "gif": "GIF",
+            "link": "لینک"
+        }
+
+        count = get_count(
+            title_id,
+            item_type
+        )
 
         kb = types.InlineKeyboardMarkup(
             row_width=2
@@ -952,23 +1120,26 @@ def callbacks(call):
         )
 
         try:
+
             bot.edit_message_text(
-                "⚠️ <b>مطمئنی؟</b>\n\n"
-                "تمام موارد این بخش از آرشیو حذف "
-                "می‌شوند.\n\n"
-                "این عملیات قابل برگشت نیست.",
+                f"⚠️ <b>مطمئنی؟</b>\n\n"
+                f"قرار است {count} مورد از بخش "
+                f"<b>{names[item_type]}</b> حذف شود.\n\n"
+                "این عملیات از آرشیو حذف می‌کند "
+                "و قابل برگشت نیست.",
                 chat_id,
                 message_id,
                 reply_markup=kb
             )
+
         except Exception:
+
             pass
 
         return
-
-    # ---------------------
-    # CONFIRM DELETE
-    # ---------------------
+        # =========================================================
+# CONFIRM DELETE
+# =========================================================
 
     if data.startswith("confirm:"):
 
@@ -989,27 +1160,30 @@ def callbacks(call):
 
         kb.add(
             types.InlineKeyboardButton(
-                "🔙 برگشت",
+                "🔙 برگشت به عنوان",
                 callback_data=f"title:{title_id}"
             )
         )
 
         try:
+
             bot.edit_message_text(
-                "✅ <b>پاک شد.</b>\n\n"
+                "✅ <b>پاکسازی انجام شد.</b>\n\n"
                 "موارد این بخش از آرشیو حذف شدند.",
                 chat_id,
                 message_id,
                 reply_markup=kb
             )
+
         except Exception:
+
             pass
 
         return
 
-    # ---------------------
+    # =====================================================
     # SEND
-    # ---------------------
+    # =====================================================
 
     if data.startswith("send:"):
 
@@ -1020,6 +1194,9 @@ def callbacks(call):
         )
 
         item_type = parts[2]
+
+        # هر ارسال جدید، لیست پیام‌های قبلی را جدا می‌کند
+        last_sent_messages[chat_id] = []
 
         threading.Thread(
             target=send_worker,
@@ -1032,9 +1209,50 @@ def callbacks(call):
         ).start()
 
         return
-        # =========================
+
+    # =====================================================
+    # DELETE SENT FROM CHAT
+    # =====================================================
+
+    if data.startswith("deletechat:"):
+
+        ids = list(
+            last_sent_messages.get(
+                chat_id,
+                []
+            )
+        )
+
+        bot.answer_callback_query(
+            call.id,
+            "در حال پاک کردن پیام‌ها..."
+        )
+
+        # اول پیام‌های محتوا
+        for sent_id in ids:
+
+            safe_delete(
+                chat_id,
+                sent_id
+            )
+
+        # سپس پنل
+        safe_delete(
+            chat_id,
+            message_id
+        )
+
+        last_sent_messages.pop(
+            chat_id,
+            None
+        )
+
+        return
+
+
+# =========================================================
 # SEND WORKER
-# =========================
+# =========================================================
 
 def send_worker(
     chat_id,
@@ -1054,7 +1272,7 @@ def send_worker(
             "❌ این بخش خالی است."
         )
 
-        remember(
+        remember_session(
             chat_id,
             msg.message_id
         )
@@ -1065,13 +1283,21 @@ def send_worker(
         title_id
     )
 
+    if not title:
+        return
+
     sent_ids = []
 
-    for item in items:
+    # ارسال بدون ذخیره مجدد
+    for index, item in enumerate(items):
 
         try:
 
             sent = None
+
+            # -----------------------------
+            # PHOTO
+            # -----------------------------
 
             if item_type == "photo":
 
@@ -1080,12 +1306,20 @@ def send_worker(
                     item["file_id"]
                 )
 
+            # -----------------------------
+            # VIDEO
+            # -----------------------------
+
             elif item_type == "video":
 
                 sent = bot.send_video(
                     chat_id,
                     item["file_id"]
                 )
+
+            # -----------------------------
+            # GIF
+            # -----------------------------
 
             elif item_type == "gif":
 
@@ -1094,12 +1328,20 @@ def send_worker(
                     item["file_id"]
                 )
 
+            # -----------------------------
+            # STICKER
+            # -----------------------------
+
             elif item_type == "sticker":
 
                 sent = bot.send_sticker(
                     chat_id,
                     item["file_id"]
                 )
+
+            # -----------------------------
+            # TEXT / LINK
+            # -----------------------------
 
             elif item_type in (
                 "text",
@@ -1117,28 +1359,21 @@ def send_worker(
                     sent.message_id
                 )
 
-            time.sleep(3)
-
         except Exception as e:
 
-            try:
+            print(
+                "SEND ERROR:",
+                e
+            )
 
-                err = bot.send_message(
-                    chat_id,
-                    "⚠️ خطا در ارسال یک مورد."
-                )
+        # فاصله سه ثانیه
+        # به جز بعد از آخرین مورد
+        if index < len(items) - 1:
 
-                sent_ids.append(
-                    err.message_id
-                )
+            time.sleep(3)
 
-            except Exception:
-                pass
-
-    # ذخیره پیام‌های همین ارسال
-    sent_messages[chat_id] = set(
-        sent_ids
-    )
+    # ذخیره شناسه پیام‌های همین ارسال
+    last_sent_messages[chat_id] = sent_ids
 
     kb = types.InlineKeyboardMarkup()
 
@@ -1168,60 +1403,18 @@ def send_worker(
         chat_id,
         f"✅ <b>ارسال کامل شد</b>\n\n"
         f"📁 {title['name']}\n"
-        f"📦 تعداد: {len(sent_ids)}\n\n"
-        "آرشیو اصلی حذف نشده است.",
+        f"📦 تعداد ارسال‌شده: <b>{len(sent_ids)}</b>\n\n"
+        "آرشیو اصلی دست‌نخورده باقی مانده.",
         reply_markup=kb
     )
 
-    # پنل هم در لیست پیام‌های قابل حذف باشد
-    sent_messages[chat_id].add(
-        msg.message_id
-    )
+    # پنل را هم برای حذف از چت نگه می‌داریم
+    last_sent_messages[chat_id] = sent_ids
 
 
-# =========================
-# DELETE SENT MESSAGES
-# =========================
-
-@bot.callback_query_handler(
-    func=lambda call:
-        call.data.startswith("deletechat:")
-)
-def delete_chat(call):
-
-    if call.from_user.id != ADMIN_ID:
-        return
-
-    chat_id = call.message.chat.id
-
-    bot.answer_callback_query(
-        call.id,
-        "در حال حذف پیام‌ها..."
-    )
-
-    ids = list(
-        sent_messages.get(
-            chat_id,
-            set()
-        )
-    )
-
-    for message_id in ids:
-
-        delete_message(
-            chat_id,
-            message_id
-        )
-
-    sent_messages.pop(
-        chat_id,
-        None
-    )
-
-
-# =========================
+# =========================================================
 # RECEIVE CONTENT
-# =========================
+# =========================================================
 
 @bot.message_handler(
     content_types=[
@@ -1232,7 +1425,7 @@ def delete_chat(call):
         "sticker"
     ]
 )
-def receive(message):
+def receive_content(message):
 
     if not allowed(message):
         return
@@ -1246,9 +1439,9 @@ def receive(message):
     if not state:
         return
 
-    # =====================
+    # =====================================================
     # CREATE TITLE
-    # =====================
+    # =====================================================
 
     if state.get("mode") == "new_title":
 
@@ -1256,10 +1449,10 @@ def receive(message):
 
             msg = bot.send_message(
                 chat_id,
-                "❌ فقط اسم عنوان را به صورت متن بفرست."
+                "❌ اسم عنوان را به صورت متن بفرست."
             )
 
-            remember(
+            remember_session(
                 chat_id,
                 msg.message_id
             )
@@ -1275,10 +1468,10 @@ def receive(message):
 
             msg = bot.send_message(
                 chat_id,
-                "❌ عنوان نباید بیشتر از ۶۰ کاراکتر باشد."
+                "❌ عنوان حداکثر ۶۰ کاراکتر باشد."
             )
 
-            remember(
+            remember_session(
                 chat_id,
                 msg.message_id
             )
@@ -1294,7 +1487,7 @@ def receive(message):
             None
         )
 
-        remember(
+        remember_session(
             chat_id,
             message.message_id
         )
@@ -1308,16 +1501,16 @@ def receive(message):
             )
         )
 
-        remember(
+        remember_session(
             chat_id,
             msg.message_id
         )
 
         return
 
-    # =====================
+    # =====================================================
     # SAVE CONTENT
-    # =====================
+    # =====================================================
 
     if state.get("mode") == "save":
 
@@ -1330,97 +1523,85 @@ def receive(message):
         )
 
         if not title:
+
             states.pop(
                 chat_id,
                 None
             )
+
             return
 
-        item_type, file_id, content = detect(
+        item_type, file_id, content = detect_content(
             message
         )
 
+        # اگر نوع پشتیبانی نشود
         if not item_type:
 
-            msg = bot.send_message(
-                chat_id,
-                "❌ این نوع محتوا پشتیبانی نمی‌شود."
-            )
-
-            remember(
+            remember_session(
                 chat_id,
                 message.message_id
             )
 
-            remember(
-                chat_id,
-                msg.message_id
-            )
-
             return
 
-        # =================
-        # SAVE TO DATABASE
-        # =================
+        # =================================================
+        # ذخیره فوری
+        # =================================================
 
-        save_item(
-            title_id=title_id,
-            item_type=item_type,
-            file_id=file_id,
-            content=content
-        )
+        try:
 
-        # پیام ورودی و پیام تأیید
-        # بعداً با اتمام ذخیره پاک می‌شوند
-        remember(
-            chat_id,
-            message.message_id
-        )
-
-        names = {
-            "photo": "🖼 عکس",
-            "video": "🎬 فیلم",
-            "text": "📝 متن",
-            "sticker": "🎭 استیکر",
-            "gif": "🎞 GIF",
-            "link": "🔗 لینک"
-        }
-
-        count = get_count(
-            title_id,
-            item_type
-        )
-
-        kb = types.InlineKeyboardMarkup()
-
-        kb.add(
-            types.InlineKeyboardButton(
-                "✅ اتمام ذخیره",
-                callback_data=(
-                    f"finish:{title_id}"
-                )
+            save_item(
+                title_id=title_id,
+                item_type=item_type,
+                file_id=file_id,
+                content=content
             )
-        )
 
-        msg = bot.send_message(
-            chat_id,
-            f"✅ {names[item_type]} ذخیره شد\n\n"
-            f"📁 {title['name']}\n"
-            f"📊 تعداد این بخش: {count}",
-            reply_markup=kb
-        )
+            # آمار لحظه‌ای را فقط داخل حافظه زیاد می‌کنیم
+            state["saved"][item_type] += 1
 
-        remember(
-            chat_id,
-            msg.message_id
-        )
+            # پیام ورودی ذخیره می‌شود تا اتمام عملیات پاک شود
+            remember_session(
+                chat_id,
+                message.message_id
+            )
+
+            print(
+                "SAVED:",
+                item_type,
+                "=>",
+                title["name"]
+            )
+
+        except Exception as e:
+
+            print(
+                "SAVE ERROR:",
+                e
+            )
+
+        # =================================================
+        # مهم:
+        # هیچ پیام تأییدی برای هر فایل ارسال نمی‌شود.
+        #
+        # بنابراین اگر 20 فیلم Forward شود:
+        #
+        # فیلم 1 -> ذخیره
+        # فیلم 2 -> ذخیره
+        # فیلم 3 -> ذخیره
+        # ...
+        # فیلم 20 -> ذخیره
+        #
+        # بدون 20 پیام اضافی.
+        # =================================================
 
         return
 
 
-# =========================
+# =========================================================
 # UNSUPPORTED FILES
-# =========================
+# =========================================================
 
 @bot.message_handler(
     content_types=[
@@ -1446,45 +1627,45 @@ def unsupported(message):
     if state.get("mode") != "save":
         return
 
-    remember(
+    # فعلاً این نوع فایل‌ها ذخیره نمی‌شوند
+    remember_session(
         message.chat.id,
         message.message_id
     )
 
-    msg = bot.send_message(
-        message.chat.id,
-        "⚠️ این نوع فایل فعلاً پشتیبانی نمی‌شود.\n\n"
-        "پشتیبانی:\n"
-        "🖼 عکس\n"
-        "🎬 فیلم\n"
-        "📝 متن\n"
-        "🎭 استیکر\n"
-        "🎞 GIF\n"
-        "🔗 لینک"
-    )
-
-    remember(
-        message.chat.id,
-        msg.message_id
+    print(
+        "UNSUPPORTED:",
+        message.content_type
     )
 
 
-# =========================
+# =========================================================
+# ERROR / LOG
+# =========================================================
+
+print(
+    "================================="
+)
+
+print(
+    "Personal Archive Bot"
+)
+
+print(
+    "Bot is running..."
+)
+
+print(
+    "================================="
+)
+
+
+# =========================================================
 # RUN
-# =========================
-
-print(
-    "=============================="
-)
-
-print(
-    "Personal Archive Bot Started"
-)
-
-print(
-    "=============================="
-)
+# =========================================================
 
 bot.infinity_polling(
-    skip_pending=True
-    )
+    skip_pending=True,
+    timeout=30,
+    long_polling_timeout=30
+        )
