@@ -10,7 +10,7 @@ import threading
 # =========================
 
 BOT_TOKEN = "8597049833:AAFnEjGLcOz09Duy6MIvOoMD9TA1-fiRhPE"
-ADMIN_ID = 7530457395
+ADMIN_ID = 7781305425
 
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 
