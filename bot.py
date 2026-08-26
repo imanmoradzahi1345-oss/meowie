@@ -12,7 +12,7 @@ import time
 import threading
 
 # ====================== تنظیمات ======================
-TOKEN = "8018651981:AAGBQmCpf0Yz-rhdB_tyBsRdFL-qT4iLJV0"
+TOKEN = "8535755083:AAEG-3mjw_IoCg6T5efZxViT0V_2zH7k5cs"
 DATA_FILE = "bot_data.json"
 SUPER_ADMIN = 7530457395  # آیدی عددی ادمین اصلی (ثابت و غیرقابل تغییر)
 # =====================================================
