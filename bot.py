@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-ربات تلگرام مدیریت گپ‌ها ── مسابقه بیشترین پیام ── چند ادمینه ── بخش ۱/۲
+ربات تلگرام مدیریت گپ‌ها ── مسابقه بیشترین پیام ── سیستم چند ادمینه
 قابل اجرا در Pydroid 3
 """
 
@@ -14,7 +14,7 @@ import threading
 # ====================== تنظیمات ======================
 TOKEN = "8535755083:AAEG-3mjw_IoCg6T5efZxViT0V_2zH7k5cs"
 DATA_FILE = "bot_data.json"
-SUPER_ADMIN = 7530457395
+SUPER_ADMIN = 7530457395  # آیدی عددی ادمین اصلی (ثابت و غیرقابل تغییر)
 # =====================================================
 
 bot = telebot.TeleBot(TOKEN)
@@ -25,9 +25,9 @@ def load_data():
         with open(DATA_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
     return {
-        "admin_usernames": [],
-        "admin_ids": [],
-        "groups": []
+        "admin_usernames": [],   # لیست یوزرنیم‌های ادمین اضافه
+        "admin_ids": [],         # آیدی عددی آن‌ها (پس از ثبت نام)
+        "groups": []             # گپ‌های عضو
     }
 
 def save_data():
@@ -36,6 +36,7 @@ def save_data():
 
 db = load_data()
 
+# اطمینان از اینکه آیدی سوپر ادمین همیشه در لیست هست
 if SUPER_ADMIN not in db["admin_ids"]:
     db["admin_ids"].append(SUPER_ADMIN)
     save_data()
@@ -45,61 +46,15 @@ active_senders = {}
 data_lock = threading.Lock()
 
 
-# ================ بررسی مجدد گپ‌ها ====================
-
-def refresh_groups_from_updates():
-    added = 0
-    try:
-        updates = bot.get_updates(allowed_updates=["my_chat_member"])
-        for upd in updates:
-            if upd.my_chat_member:
-                chat = upd.my_chat_member.chat
-                if chat.type in ("group", "supergroup"):
-                    status = upd.my_chat_member.new_chat_member.status
-                    if status in ("member", "administrator"):
-                        with data_lock:
-                            if chat.id not in db["groups"]:
-                                db["groups"].append(chat.id)
-                                added += 1
-        if added > 0:
-            save_data()
-    except Exception as e:
-        print(f"⚠️ خطا در refresh: {e}")
-    return added
-
-
-def refresh_groups_by_test():
-    removed = 0
-    with data_lock:
-        gids = db["groups"].copy()
-    for gid in gids:
-        try:
-            bot.get_chat(gid)
-        except Exception as e:
-            if "chat not found" in str(e).lower() or "bot was kicked" in str(e).lower() or "bot is not a member" in str(e).lower():
-                with data_lock:
-                    if gid in db["groups"]:
-                        db["groups"].remove(gid)
-                        removed += 1
-    if removed > 0:
-        save_data()
-    return removed
-
-
-print("🔄 بررسی گپ‌های عضو...")
-added_count = refresh_groups_from_updates()
-print(f"✅ {added_count} گپ جدید از آپدیت‌های قدیمی پیدا شد.")
-
-# ======================================================
-
-
 def is_admin(user_id):
+    """بررسی دسترسی ادمین"""
     if user_id == SUPER_ADMIN:
         return True
     with data_lock:
         return user_id in db["admin_ids"]
 
 def get_all_admin_ids():
+    """لیست کامل آیدی ادمین‌ها"""
     with data_lock:
         admins = set(db["admin_ids"])
     admins.add(SUPER_ADMIN)
@@ -115,6 +70,7 @@ def get_chat_name(chat_id):
 
 
 def notify_admins(text):
+    """به همه ادمین‌ها پیام بده"""
     for aid in get_all_admin_ids():
         try:
             bot.send_message(aid, text)
@@ -123,6 +79,7 @@ def notify_admins(text):
 
 
 def notify_admin_about_groups():
+    """وقتی گپ جدید اضافه/حذف میشه"""
     with data_lock:
         count = len(db["groups"])
     if count == 0:
@@ -144,6 +101,7 @@ def start_handler(msg):
     uid = msg.from_user.id
     username = msg.from_user.username
 
+    # ----- ثبت ادمین جدید از روی یوزرنیم -----
     if username and uid != SUPER_ADMIN:
         with data_lock:
             normalized = username.lower()
@@ -168,33 +126,9 @@ def start_handler(msg):
            "/removeadmin @username – حذف ادمین\n"
            "/groups – لیست گپ‌ها\n"
            "/leave – خروج از گپ\n"
-           "/refresh – بروزرسانی گپ‌ها\n"
            "/stats – آمار\n\n"
            "💬 برای ارسال خودکار، هر نوع محتوایی بفرستید.")
     bot.reply_to(msg, txt)
-
-
-@bot.message_handler(commands=["refresh"])
-def refresh_handler(msg):
-    if not is_admin(msg.from_user.id):
-        return
-
-    m = bot.reply_to(msg, "🔄 در حال بررسی گپ‌ها...")
-    added = refresh_groups_from_updates()
-    removed = refresh_groups_by_test()
-
-    with data_lock:
-        total = len(db["groups"])
-
-    txt = (f"✅ بروزرسانی انجام شد:\n"
-           f"📌 گپ جدید: {added}\n"
-           f"🗑 گپ حذف‌شده: {removed}\n"
-           f"🏷 مجموع: {total}")
-
-    try:
-        bot.edit_message_text(txt, msg.chat.id, m.message_id)
-    except:
-        bot.reply_to(msg, txt)
 
 
 @bot.message_handler(commands=["admins"])
@@ -204,6 +138,7 @@ def admins_list_handler(msg):
 
     txt = "👥 لیست ادمین‌ها:\n\n"
 
+    # ادمین اصلی
     try:
         s = bot.get_chat(SUPER_ADMIN)
         sname = f"@{s.username}" if s.username else s.first_name
@@ -211,6 +146,7 @@ def admins_list_handler(msg):
         sname = str(SUPER_ADMIN)
     txt += f"⭐ {sname} (مالک)\n🆔 {SUPER_ADMIN}\n\n"
 
+    # ادمین‌های اضافه
     with data_lock:
         for uid in db["admin_ids"]:
             if uid == SUPER_ADMIN:
@@ -222,21 +158,12 @@ def admins_list_handler(msg):
                 uname = str(uid)
             txt += f"👤 {uname}\n🆔 {uid}\n\n"
 
+    # یوزرنیم‌های تأییدنشده
     with data_lock:
-        pending = []
-        for u in db["admin_usernames"]:
-            found = False
-            for aid in db["admin_ids"]:
-                try:
-                    c = bot.get_chat(aid)
-                    if c.username and c.username.lower() == u.lower():
-                        found = True
-                        break
-                except:
-                    pass
-            if not found:
-                pending.append(u)
-
+        pending = [u for u in db["admin_usernames"]
+                   if u.lower() not in [str(bot.get_chat(aid).username).lower()
+                                        for aid in db["admin_ids"]
+                                        if bot.get_chat(aid).username]]
     if pending:
         txt += "⏳ در انتظار ثبت‌نام:\n"
         for u in pending:
@@ -296,9 +223,11 @@ def remove_admin_handler(msg):
     removed_userid = None
 
     with data_lock:
+        # حذف از لیست یوزرنیم‌ها
         db["admin_usernames"] = [u for u in db["admin_usernames"]
                                  if u.lower() != normalized]
 
+        # حذف از لیست آیدی‌ها (اگر قبلاً ثبت‌نام کرده)
         for aid in db["admin_ids"][:]:
             try:
                 c = bot.get_chat(aid)
@@ -361,7 +290,9 @@ def stats_handler(msg):
         for g in groups:
             txt += f"\n• {get_chat_name(g)}"
     bot.reply_to(msg, txt)
-    # ================ تشخیص اضافه شدن به گپ ================
+
+
+# ================ تشخیص اضافه شدن به گپ ================
 
 @bot.message_handler(content_types=["new_chat_members"])
 def on_new_members(msg):
@@ -406,6 +337,7 @@ def on_my_chat_member(upd):
 def content_handler(msg):
     uid = msg.from_user.id
 
+    # ----- مرحله دریافت تعداد -----
     if uid in user_states:
         st = user_states[uid]
         if st["step"] == "count":
@@ -421,6 +353,7 @@ def content_handler(msg):
             bot.reply_to(msg, "⏱ ثانیه رو وارد کنید (مثلاً 3):")
             return
 
+        # ----- مرحله دریافت فاصله زمانی -----
         if st["step"] == "interval":
             try:
                 interval = float(msg.text)
@@ -445,6 +378,7 @@ def content_handler(msg):
             bot.reply_to(msg, txt, reply_markup=markup)
             return
 
+    # ----- شروع فرآیند: ذخیره محتوای دریافتی -----
     content = {"type": "text"}
     if msg.photo:
         content["type"] = "photo"
@@ -476,8 +410,7 @@ def content_handler(msg):
     with data_lock:
         groups = db["groups"].copy()
     if not groups:
-        bot.reply_to(msg, "ℹ️ هیچ گپی ثبت نشده. اول ربات رو اضافه کنید.\n"
-                          "اگر ربات قبلاً توی گپ هست، /refresh رو بزنید.")
+        bot.reply_to(msg, "ℹ️ هیچ گپی ثبت نشده. اول ربات رو اضافه کنید.")
         del user_states[uid]
         return
 
