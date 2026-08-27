@@ -23,7 +23,7 @@ from telegram.ext import (
 # ═══════════════════════════════
 # ✏️  تنظیمات
 # ═══════════════════════════════
-BOT_TOKEN = "8850722490:AAHjx9fjn-QGwvRff-4kzeRA_mU1B-yqtOA"
+BOT_TOKEN = "8687275296:AAEGX1ocejkfaLZddS2Ayu3cBZISHKSsIe0"
 MASTER_ADMIN = 7530457395
 DATA_FILE = "bot_data.json"
 
