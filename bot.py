@@ -31,7 +31,7 @@ from telegram.ext import (
 # ==============================
 # ✏️  تنظیمات (CONFIGURATION)
 # ==============================
-BOT_TOKEN = "8966387398:AAE9iZSQ5UhMcd79Wvbj-fDoGFV0K3ARoc0"   # <--- توکن ربات خود را اینجا وارد کنید
+BOT_TOKEN = "8850722490:AAHjx9fjn-QGwvRff-4kzeRA_mU1B-yqtOA"   # <--- توکن ربات خود را اینجا وارد کنید
 ADMIN_ID = 7530457395               # <--- آیدی عددی ادمین اصلی
 DATA_FILE = "bot_data.json"         # فایل ذخیره اطلاعات
 
