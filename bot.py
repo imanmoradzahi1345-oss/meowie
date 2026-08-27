@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 
 import io
-import math
+import os
+import json
+import html
 import telebot
 
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
@@ -11,9 +13,11 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter
 # SETTINGS
 # =========================================================
 
-BOT_TOKEN = "8617545814:AAFAofo_nV39gFT1-IgfXu-esnGgXol62r4"
+BOT_TOKEN = "توکن_جدید_ربات_را_اینجا_بگذار"
 
 ADMIN_ID = 7530457395
+
+SETTINGS_FILE = "welcome_settings.json"
 
 bot = telebot.TeleBot(
     BOT_TOKEN,
@@ -22,33 +26,135 @@ bot = telebot.TeleBot(
 
 
 # =========================================================
+# SETTINGS STORAGE
+# =========================================================
+
+DEFAULT_WELCOME = (
+    "👋 {mention} عزیز، به <b>{group}</b> خوش اومدی! ❤️\n\n"
+    "✨ امیدواریم اینجا بهت خوش بگذره."
+)
+
+
+def load_settings():
+    try:
+        if not os.path.exists(SETTINGS_FILE):
+            return {
+                "welcome_text": DEFAULT_WELCOME
+            }
+
+        with open(
+            SETTINGS_FILE,
+            "r",
+            encoding="utf-8"
+        ) as f:
+            data = json.load(f)
+
+        if not isinstance(data, dict):
+            return {
+                "welcome_text": DEFAULT_WELCOME
+            }
+
+        text = data.get(
+            "welcome_text",
+            DEFAULT_WELCOME
+        )
+
+        if not isinstance(text, str) or not text.strip():
+            text = DEFAULT_WELCOME
+
+        return {
+            "welcome_text": text
+        }
+
+    except Exception as e:
+        print("LOAD SETTINGS ERROR:", e)
+
+        return {
+            "welcome_text": DEFAULT_WELCOME
+        }
+
+
+def save_settings(data):
+    try:
+        with open(
+            SETTINGS_FILE,
+            "w",
+            encoding="utf-8"
+        ) as f:
+            json.dump(
+                data,
+                f,
+                ensure_ascii=False,
+                indent=2
+            )
+
+        return True
+
+    except Exception as e:
+        print("SAVE SETTINGS ERROR:", e)
+        return False
+
+
+settings = load_settings()
+
+
+# =========================================================
+# ADMIN
+# =========================================================
+
+def is_admin(message):
+    return (
+        message.from_user is not None
+        and message.from_user.id == ADMIN_ID
+    )
+
+
+# =========================================================
 # FONTS
 # =========================================================
 
 def get_font(size, bold=False):
+
     if bold:
         paths = [
             "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
             "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+            "/data/data/com.termux/files/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
         ]
+
     else:
         paths = [
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
             "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+            "/data/data/com.termux/files/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
         ]
 
     for path in paths:
         try:
-            return ImageFont.truetype(path, size)
+            return ImageFont.truetype(
+                path,
+                size
+            )
         except Exception:
             pass
 
     return ImageFont.load_default()
 
 
-def fit_font(draw, text, max_width, size, bold=False):
+def fit_font(
+    draw,
+    text,
+    max_width,
+    size,
+    bold=False
+):
+
     while size >= 14:
-        font = get_font(size, bold)
+
+        font = get_font(
+            size,
+            bold
+        )
 
         box = draw.textbbox(
             (0, 0),
@@ -63,10 +169,21 @@ def fit_font(draw, text, max_width, size, bold=False):
 
         size -= 2
 
-    return get_font(14, bold)
+    return get_font(
+        14,
+        bold
+    )
 
 
-def center_text(draw, text, y, font, fill, width):
+def center_text(
+    draw,
+    text,
+    y,
+    font,
+    fill,
+    width
+):
+
     box = draw.textbbox(
         (0, 0),
         text,
@@ -102,7 +219,15 @@ MUTED = (115, 130, 180, 255)
 # GLOW
 # =========================================================
 
-def glow_circle(base, x, y, radius, color, blur=35):
+def glow_circle(
+    base,
+    x,
+    y,
+    radius,
+    color,
+    blur=35
+):
+
     layer = Image.new(
         "RGBA",
         base.size,
@@ -128,7 +253,13 @@ def glow_circle(base, x, y, radius, color, blur=35):
     base.alpha_composite(layer)
 
 
-def neon_line(base, points, color, width=3):
+def neon_line(
+    base,
+    points,
+    color,
+    width=3
+):
+
     glow = Image.new(
         "RGBA",
         base.size,
@@ -164,7 +295,11 @@ def neon_line(base, points, color, width=3):
 # BACKGROUND
 # =========================================================
 
-def make_background(width, height):
+def make_background(
+    width,
+    height
+):
+
     image = Image.new(
         "RGBA",
         (width, height),
@@ -174,13 +309,28 @@ def make_background(width, height):
     pixels = image.load()
 
     for y in range(height):
+
         for x in range(width):
+
             nx = x / width
             ny = y / height
 
-            r = int(8 + 25 * nx + 15 * ny)
-            g = int(7 + 4 * nx)
-            b = int(27 + 55 * (1 - nx) + 25 * (1 - ny))
+            r = int(
+                8
+                + 25 * nx
+                + 15 * ny
+            )
+
+            g = int(
+                7
+                + 4 * nx
+            )
+
+            b = int(
+                27
+                + 55 * (1 - nx)
+                + 25 * (1 - ny)
+            )
 
             pixels[x, y] = (
                 min(r, 255),
@@ -197,6 +347,7 @@ def make_background(width, height):
 # =========================================================
 
 def default_avatar(size):
+
     avatar = Image.new(
         "RGBA",
         (size, size),
@@ -206,7 +357,12 @@ def default_avatar(size):
     draw = ImageDraw.Draw(avatar)
 
     draw.ellipse(
-        (4, 4, size - 4, size - 4),
+        (
+            4,
+            4,
+            size - 4,
+            size - 4
+        ),
         fill=(28, 30, 65, 255)
     )
 
@@ -237,17 +393,73 @@ def default_avatar(size):
 
 
 # =========================================================
-# MAKE CIRCLE AVATAR
+# PROFILE PHOTO
 # =========================================================
 
-def circle_avatar(data, size):
+def get_profile_photo(user_id):
+
     try:
+
+        photos = bot.get_user_profile_photos(
+            user_id,
+            limit=1
+        )
+
+        if not photos:
+            return None
+
+        if photos.total_count <= 0:
+            return None
+
+        if not photos.photos:
+            return None
+
+        photo = photos.photos[0][-1]
+
+        file_info = bot.get_file(
+            photo.file_id
+        )
+
+        data = bot.download_file(
+            file_info.file_path
+        )
+
+        if not data:
+            return None
+
+        return data
+
+    except Exception as e:
+
+        print(
+            "PROFILE PHOTO ERROR:",
+            e
+        )
+
+        return None
+
+
+# =========================================================
+# CIRCLE AVATAR
+# =========================================================
+
+def circle_avatar(
+    data,
+    size
+):
+
+    try:
+
         original = Image.open(
             io.BytesIO(data)
         ).convert("RGB")
 
         w, h = original.size
-        side = min(w, h)
+
+        side = min(
+            w,
+            h
+        )
 
         left = (w - side) // 2
         top = (h - side) // 2
@@ -281,7 +493,12 @@ def circle_avatar(data, size):
         mask_draw = ImageDraw.Draw(mask)
 
         mask_draw.ellipse(
-            (0, 0, size - 1, size - 1),
+            (
+                0,
+                0,
+                size - 1,
+                size - 1
+            ),
             fill=255
         )
 
@@ -294,44 +511,25 @@ def circle_avatar(data, size):
         return result
 
     except Exception as e:
-        print("Avatar error:", e)
+
+        print(
+            "AVATAR ERROR:",
+            e
+        )
+
         return default_avatar(size)
 
 
 # =========================================================
-# GET PROFILE PHOTO
+# RINGS
 # =========================================================
 
-def get_profile_photo(user_id):
-    try:
-        photos = bot.get_user_profile_photos(
-            user_id,
-            limit=1
-        )
+def draw_rings(
+    base,
+    cx,
+    cy
+):
 
-        if photos.total_count <= 0:
-            return None
-
-        photo = photos.photos[0][-1]
-
-        file_info = bot.get_file(
-            photo.file_id
-        )
-
-        return bot.download_file(
-            file_info.file_path
-        )
-
-    except Exception as e:
-        print("Profile photo error:", e)
-        return None
-
-
-# =========================================================
-# AVATAR RINGS
-# =========================================================
-
-def draw_rings(base, cx, cy):
     glow = Image.new(
         "RGBA",
         base.size,
@@ -347,6 +545,7 @@ def draw_rings(base, cx, cy):
     ]
 
     for radius, color, width in rings:
+
         gd.ellipse(
             (
                 cx - radius,
@@ -367,6 +566,7 @@ def draw_rings(base, cx, cy):
     draw = ImageDraw.Draw(base)
 
     for radius, color, width in rings:
+
         draw.ellipse(
             (
                 cx - radius,
@@ -376,14 +576,16 @@ def draw_rings(base, cx, cy):
             ),
             outline=color,
             width=width
-        )
-
-
+)
 # =========================================================
-# CREATE CARD
+# CREATE WELCOME CARD
 # =========================================================
 
-def create_welcome_card(user, chat):
+def create_welcome_card(
+    user,
+    chat
+):
+
     WIDTH = 1200
     HEIGHT = 700
 
@@ -393,6 +595,7 @@ def create_welcome_card(user, chat):
     )
 
     # Background glows
+
     glow_circle(
         base,
         80,
@@ -420,7 +623,8 @@ def create_welcome_card(user, chat):
         80
     )
 
-    # Main glass panel
+    # Glass panel
+
     panel = Image.new(
         "RGBA",
         (WIDTH, HEIGHT),
@@ -430,7 +634,12 @@ def create_welcome_card(user, chat):
     pd = ImageDraw.Draw(panel)
 
     pd.rounded_rectangle(
-        (28, 28, WIDTH - 28, HEIGHT - 28),
+        (
+            28,
+            28,
+            WIDTH - 28,
+            HEIGHT - 28
+        ),
         radius=48,
         fill=(13, 15, 38, 230),
         outline=(100, 115, 190, 180),
@@ -442,21 +651,29 @@ def create_welcome_card(user, chat):
     draw = ImageDraw.Draw(base)
 
     # Decorative lines
+
     neon_line(
         base,
-        [(65, 105), (290, 105)],
+        [
+            (65, 105),
+            (290, 105)
+        ],
         BLUE,
         3
     )
 
     neon_line(
         base,
-        [(910, 595), (1135, 595)],
+        [
+            (910, 595),
+            (1135, 595)
+        ],
         PINK,
         3
     )
 
-    # Top title
+    # WELCOME
+
     title_font = get_font(
         62,
         True
@@ -473,22 +690,29 @@ def create_welcome_card(user, chat):
 
     neon_line(
         base,
-        [(470, 135), (730, 135)],
+        [
+            (470, 135),
+            (730, 135)
+        ],
         PURPLE,
         3
     )
 
-    # Profile photo
+    # Avatar
+
     photo_data = get_profile_photo(
         user.id
     )
 
     if photo_data:
+
         avatar = circle_avatar(
             photo_data,
             300
         )
+
     else:
+
         avatar = default_avatar(
             300
         )
@@ -507,7 +731,10 @@ def create_welcome_card(user, chat):
 
     base.alpha_composite(
         avatar,
-        (avatar_x, avatar_y)
+        (
+            avatar_x,
+            avatar_y
+        )
     )
 
     draw_rings(
@@ -516,7 +743,8 @@ def create_welcome_card(user, chat):
         310
     )
 
-    # User name
+    # Name
+
     name = user.first_name or "User"
 
     if len(name) > 24:
@@ -540,13 +768,24 @@ def create_welcome_card(user, chat):
     )
 
     # Username
+
     if user.username:
-        username = "@" + user.username
+
+        username = (
+            "@"
+            + user.username
+        )
+
     else:
+
         username = "@NoUsername"
 
     if len(username) > 30:
-        username = username[:27] + "..."
+
+        username = (
+            username[:27]
+            + "..."
+        )
 
     username_font = fit_font(
         draw,
@@ -564,8 +803,13 @@ def create_welcome_card(user, chat):
         SOFT_WHITE,
         WIDTH
     )
-        # Numeric ID
-    id_text = "ID  •  " + str(user.id)
+
+    # Numeric ID
+
+    id_text = (
+        "ID  •  "
+        + str(user.id)
+    )
 
     id_font = get_font(
         24,
@@ -582,10 +826,18 @@ def create_welcome_card(user, chat):
     )
 
     # Group name
-    group_name = chat.title or "THE GROUP"
+
+    group_name = (
+        chat.title
+        or "THE GROUP"
+    )
 
     if len(group_name) > 34:
-        group_name = group_name[:31] + "..."
+
+        group_name = (
+            group_name[:31]
+            + "..."
+        )
 
     group_font = fit_font(
         draw,
@@ -604,7 +856,8 @@ def create_welcome_card(user, chat):
         WIDTH
     )
 
-    # Small bottom text
+    # Bottom text
+
     tiny_font = get_font(
         12,
         False
@@ -619,7 +872,8 @@ def create_welcome_card(user, chat):
         WIDTH
     )
 
-    # Decorative dots
+    # Dots
+
     dots = [
         (85, 75, 6, BLUE),
         (1115, 75, 6, PINK),
@@ -628,6 +882,7 @@ def create_welcome_card(user, chat):
     ]
 
     for x, y, r, color in dots:
+
         glow_circle(
             base,
             x,
@@ -647,12 +902,17 @@ def create_welcome_card(user, chat):
             fill=color
         )
 
-    # Final image
+    # Save to memory
+
     output = io.BytesIO()
 
-    output.name = "welcome_card.jpg"
+    output.name = (
+        "welcome_card.jpg"
+    )
 
-    base.convert("RGB").save(
+    base.convert(
+        "RGB"
+    ).save(
         output,
         format="JPEG",
         quality=95,
@@ -665,37 +925,84 @@ def create_welcome_card(user, chat):
 
 
 # =========================================================
-# ADMIN CHECK
+# BUILD WELCOME MESSAGE
 # =========================================================
 
-def is_admin(message):
-    return (
-        message.from_user is not None
-        and message.from_user.id == ADMIN_ID
+def make_welcome_text(
+    user,
+    chat
+):
+
+    first_name = (
+        user.first_name
+        or "کاربر"
     )
 
+    username = (
+        "@"
+        + user.username
+        if user.username
+        else "بدون یوزرنیم"
+    )
 
-# =========================================================
-# START
-# =========================================================
+    group_name = (
+        chat.title
+        or "گپ"
+    )
 
-@bot.message_handler(
-    commands=["start"]
-)
-def start_handler(message):
-    if is_admin(message):
-        bot.send_message(
-            message.chat.id,
-            "👑 <b>ربات خوشامدگویی فعال است</b>\n\n"
-            "ربات را داخل گپ ادمین کن.\n"
-            "با ورود هر عضو جدید، کارت اختصاصی او "
-            "به‌صورت خودکار ساخته می‌شود."
+    # Escape user-controlled text
+    safe_name = html.escape(
+        first_name
+    )
+
+    safe_username = html.escape(
+        username
+    )
+
+    safe_group = html.escape(
+        group_name
+    )
+
+    mention = (
+        '<a href="tg://user?id='
+        + str(user.id)
+        + '">'
+        + safe_name
+        + '</a>'
+    )
+
+    template = settings.get(
+        "welcome_text",
+        DEFAULT_WELCOME
+    )
+
+    try:
+
+        text = template.format(
+            name=safe_name,
+            username=safe_username,
+            id=str(user.id),
+            group=safe_group,
+            mention=mention
         )
-    else:
-        bot.send_message(
-            message.chat.id,
-            "🤖 ربات فعال است."
+
+    except Exception as e:
+
+        print(
+            "WELCOME TEMPLATE ERROR:",
+            e
         )
+
+        text = (
+            "👋 "
+            + mention
+            + " عزیز، خوش اومدی به "
+            + "<b>"
+            + safe_group
+            + "</b> ❤️"
+        )
+
+    return text
 
 
 # =========================================================
@@ -703,108 +1010,291 @@ def start_handler(message):
 # =========================================================
 
 @bot.message_handler(
-    content_types=["new_chat_members"]
+    content_types=[
+        "new_chat_members"
+    ]
 )
 def new_member_handler(message):
+
+    print(
+        "NEW MEMBER EVENT:",
+        message.chat.id
+    )
+
+    if not message.new_chat_members:
+        return
+
+    try:
+
+        me = bot.get_me()
+        bot_id = me.id
+
+    except Exception as e:
+
+        print(
+            "GET BOT INFO ERROR:",
+            e
+        )
+
+        bot_id = None
+
     for user in message.new_chat_members:
 
+        # Ignore bot itself
+
+        if (
+            bot_id is not None
+            and user.id == bot_id
+        ):
+            continue
+
+        # -------------------------------------------------
+        # FIRST: TRY TO CREATE AND SEND PHOTO
+        # -------------------------------------------------
+
         try:
-            # اگر خود ربات وارد گپ شد، کارت نساز
-            me = bot.get_me()
 
-            if user.id == me.id:
-                continue
-
-            # ساخت کارت اختصاصی
             card = create_welcome_card(
                 user,
                 message.chat
             )
 
-            # ارسال عکس
             bot.send_photo(
                 message.chat.id,
                 card
             )
 
-            # ساخت تگ واقعی کاربر
-            first_name = user.first_name or "کاربر"
-
-            mention = (
-                '<a href="tg://user?id='
-                + str(user.id)
-                + '">'
-                + first_name
-                + '</a>'
+            print(
+                "WELCOME PHOTO SENT:",
+                user.id
             )
 
-            group_name = (
-                message.chat.title
-                or "گپ"
+        except Exception as e:
+
+            print(
+                "PHOTO ERROR:",
+                e
             )
 
-            # متن جداگانه، نه روی عکس
-            welcome_text = (
-                "👋 "
-                + mention
-                + " عزیز، خوش اومدی به "
-                + "<b>"
-                + group_name
-                + "</b>"
-                + " ❤️\n\n"
-                + "✨ امیدواریم اینجا بهت خوش بگذره!"
+        # -------------------------------------------------
+        # SECOND: ALWAYS SEND TEXT
+        # -------------------------------------------------
+
+        try:
+
+            welcome_text = make_welcome_text(
+                user,
+                message.chat
             )
 
             bot.send_message(
                 message.chat.id,
-                welcome_text
+                welcome_text,
+                disable_web_page_preview=True
+            )
+
+            print(
+                "WELCOME TEXT SENT:",
+                user.id
             )
 
         except Exception as e:
+
             print(
-                "NEW MEMBER ERROR:",
+                "WELCOME TEXT ERROR:",
                 e
             )
 
+            # Last fallback
+
+            try:
+
+                name = (
+                    user.first_name
+                    or "کاربر"
+                )
+
+                mention = (
+                    '<a href="tg://user?id='
+                    + str(user.id)
+                    + '">'
+                    + html.escape(name)
+                    + '</a>'
+                )
+
+                bot.send_message(
+                    message.chat.id,
+                    "👋 "
+                    + mention
+                    + " عزیز، خوش اومدی! ❤️"
+                )
+
+            except Exception as e2:
+
+                print(
+                    "FALLBACK ERROR:",
+                    e2
+                )
+
 
 # =========================================================
-# PRIVATE ADMIN MESSAGES
+# PRIVATE ADMIN CONTROL
 # =========================================================
 
 @bot.message_handler(
     func=lambda message:
         message.chat.type == "private"
+        and message.from_user is not None
+        and message.from_user.id == ADMIN_ID,
+    content_types=["text"]
 )
-def private_handler(message):
+def admin_private_handler(message):
 
-    if not is_admin(message):
+    global settings
+
+    text = (
+        message.text
+        or ""
+    ).strip()
+
+    if not text:
         return
 
-    if message.text and message.text.startswith("/start"):
+    # /start
+
+    if text.lower().startswith(
+        "/start"
+    ):
+
+        current = settings.get(
+            "welcome_text",
+            DEFAULT_WELCOME
+        )
+
+        bot.send_message(
+            message.chat.id,
+            "👑 <b>پنل تنظیم خوشامدگویی</b>\n\n"
+            "هر متنی که همینجا برای من بفرستی، "
+            "متن خوشامدگویی جدید می‌شود.\n\n"
+            "متن روی عکس قرار نمی‌گیرد؛ "
+            "جداگانه زیر عکس ارسال می‌شود.\n\n"
+            "<b>متن فعلی:</b>\n"
+            + html.escape(current)
+            + "\n\n"
+            "<b>متغیرهای قابل استفاده:</b>\n"
+            "{name} = اسم\n"
+            "{username} = یوزرنیم\n"
+            "{id} = آیدی عددی\n"
+            "{group} = اسم گپ\n"
+            "{mention} = تگ کاربر"
+        )
+
         return
+
+    # /welcome
+
+    if text.lower() == "/welcome":
+
+        current = settings.get(
+            "welcome_text",
+            DEFAULT_WELCOME
+        )
+
+        bot.send_message(
+            message.chat.id,
+            "📝 <b>متن فعلی خوشامدگویی:</b>\n\n"
+            + html.escape(current)
+            + "\n\n"
+            "برای تغییر، متن جدید را همینجا بفرست."
+        )
+
+        return
+
+    # Any other admin text = new welcome template
+
+    settings["welcome_text"] = text
+
+    if save_settings(settings):
+
+        bot.send_message(
+            message.chat.id,
+            "✅ <b>متن خوشامدگویی ذخیره شد.</b>\n\n"
+            "از این به بعد اعضای جدید با همین متن "
+            "خوشامدگویی می‌شوند.\n\n"
+            "این متن روی عکس نیست و جداگانه ارسال می‌شود."
+        )
+
+    else:
+
+        bot.send_message(
+            message.chat.id,
+            "❌ ذخیره متن انجام نشد."
+        )
+
+
+# =========================================================
+# NON-ADMIN PRIVATE USERS
+# =========================================================
+
+@bot.message_handler(
+    func=lambda message:
+        message.chat.type == "private"
+        and (
+            message.from_user is None
+            or message.from_user.id != ADMIN_ID
+        )
+)
+def other_private_handler(message):
 
     bot.send_message(
         message.chat.id,
-        "✅ ربات آماده است.\n\n"
-        "کارت خوشامدگویی به‌صورت خودکار "
-        "برای اعضای جدید ساخته می‌شود."
+        "🤖 ربات خوشامدگویی گروه است."
     )
 
 
 # =========================================================
-# RUN
+# ERROR-SAFE POLLING
 # =========================================================
 
 if __name__ == "__main__":
 
-    print("===================================")
-    print("       NEON WELCOME BOT")
-    print("===================================")
-    print("ADMIN ID:", ADMIN_ID)
-    print("BOT IS RUNNING...")
+    print(
+        "======================================"
+    )
+
+    print(
+        "       NEON WELCOME BOT"
+    )
+
+    print(
+        "======================================"
+    )
+
+    print(
+        "ADMIN ID:",
+        ADMIN_ID
+    )
+
+    print(
+        "WELCOME TEXT:",
+        settings.get(
+            "welcome_text",
+            DEFAULT_WELCOME
+        )
+    )
+
+    print(
+        "BOT IS RUNNING..."
+    )
 
     bot.infinity_polling(
         skip_pending=True,
         timeout=60,
-        long_polling_timeout=60
-                       )
+        long_polling_timeout=60,
+        allowed_updates=[
+            "message",
+            "edited_message",
+            "chat_member",
+            "my_chat_member"
+        ]
+    )
