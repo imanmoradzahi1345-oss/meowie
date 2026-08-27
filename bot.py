@@ -13,7 +13,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter
 # SETTINGS
 # =========================================================
 
-BOT_TOKEN = "توکن_جدید_ربات_را_اینجا_بگذار"
+BOT_TOKEN = "8617545814:AAFAofo_nV39gFT1-IgfXu-esnGgXol62r4"
 
 ADMIN_ID = 7530457395
 
