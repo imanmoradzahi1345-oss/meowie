@@ -2,9 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-🤖 ربات جایزه بیشترین پیام (نسخه نهایی)
-نسخه: ۳.۰
-ساخته شده برای PyDroid 3
+🤖 ربات جایزه گپ (نسخه اختصاصی - اضافه کننده محور)
+نسخه: ۴.۰
 
 نصب: pip install python-telegram-bot
 """
@@ -25,7 +24,7 @@ from telegram.ext import (
 # ✏️  تنظیمات
 # ═══════════════════════════════
 BOT_TOKEN = "8850722490:AAHjx9fjn-QGwvRff-4kzeRA_mU1B-yqtOA"
-ADMIN_ID = 7530457395
+MASTER_ADMIN = 7530457395
 DATA_FILE = "bot_data.json"
 
 STATE_CONTENT, STATE_COUNT, STATE_INTERVAL = range(3)
@@ -37,7 +36,7 @@ def load_data():
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
-    return {"groups": [], "approved": [ADMIN_ID]}
+    return {"groups": [], "bot_enabled": True}
 
 def save_data(data_dict):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
@@ -51,14 +50,16 @@ log = logging.getLogger(__name__)
 # ═══════════════════════════════
 # 🔧  توابع کمکی
 # ═══════════════════════════════
-def is_admin(user_id: int) -> bool:
-    return user_id == ADMIN_ID
+def is_master(user_id: int) -> bool:
+    return user_id == MASTER_ADMIN
 
-def is_approved(user_id: int) -> bool:
-    return user_id in db.get("approved", [])
+def get_user_groups(user_id: int):
+    """گپ‌هایی که این کاربر ربات را به آنها اضافه کرده"""
+    return [g for g in db["groups"] if g["added_by"] == user_id]
 
-def build_groups_keyboard():
-    groups = db.get("groups", [])
+def build_user_groups_keyboard(user_id: int):
+    """دکمه‌های شیشه‌ای برای گپ‌های یک کاربر"""
+    groups = get_user_groups(user_id)
     if not groups:
         return None
     buttons = [[InlineKeyboardButton(g["title"], callback_data=f"grp_{g['id']}")] for g in groups]
@@ -89,7 +90,7 @@ async def send_content_to_chat(bot, chat_id: int, content: dict):
 
 async def send_loop(update_obj, context, target_chat_id: int, content: dict,
                     total_count: int, interval: float):
-    admin_id = update_obj.effective_user.id
+    user_id = update_obj.effective_user.id
     bot = context.bot
 
     stop_keyboard = InlineKeyboardMarkup([
@@ -97,12 +98,10 @@ async def send_loop(update_obj, context, target_chat_id: int, content: dict,
     ])
 
     status_msg = await bot.send_message(
-        admin_id,
+        user_id,
         f"📤 در حال ارسال...\n0/{total_count}",
         reply_markup=stop_keyboard
     )
-
-    context.chat_data["stop_msg_id"] = status_msg.message_id
     context.chat_data["stop_sending"] = False
 
     for i in range(1, total_count + 1):
@@ -110,21 +109,15 @@ async def send_loop(update_obj, context, target_chat_id: int, content: dict,
             context.chat_data["stop_sending"] = False
             await status_msg.edit_text("⏹ متوقف شد.", reply_markup=None)
             return False
-
         try:
             await send_content_to_chat(bot, target_chat_id, content)
         except Exception as e:
-            await bot.send_message(admin_id, f"❌ خطا در ارسال: {e}")
-
+            await bot.send_message(user_id, f"❌ خطا: {e}")
         if i % 5 == 0 or i == total_count:
             try:
-                await status_msg.edit_text(
-                    f"📤 در حال ارسال...\n{i}/{total_count}",
-                    reply_markup=stop_keyboard
-                )
+                await status_msg.edit_text(f"📤 در حال ارسال...\n{i}/{total_count}", reply_markup=stop_keyboard)
             except:
                 pass
-
         if i < total_count:
             await asyncio.sleep(interval)
 
@@ -132,36 +125,74 @@ async def send_loop(update_obj, context, target_chat_id: int, content: dict,
     return True
 
 # ═══════════════════════════════
-# 👀  تشخیص اضافه شدن به گپ
+# 👀  تشخیص اضافه شدن به گپ + شناسایی اضافه کننده
 # ═══════════════════════════════
 async def on_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """وقتی ربات به گپ اضافه شد → ببین کیه اضافه کرده"""
+    
+    # چک خاموش/روشن بودن ربات
+    if not db.get("bot_enabled", True):
+        return
+
     my_chat_member = update.my_chat_member
     if my_chat_member is None:
         return
+
     new_status = my_chat_member.new_chat_member.status
     chat = my_chat_member.chat
+    who_did_it = my_chat_member.from_user  # 🎯 کسی که ربات رو اضافه کرده
 
+    # ✅ ربات به گپ اضافه شد
     if new_status in ("member", "administrator"):
+        # جلوگیری از ثبت تکراری
         if any(g["id"] == chat.id for g in db["groups"]):
             return
+
+        # ذخیره در دیتابیس
         db["groups"].append({
             "id": chat.id,
             "title": chat.title or "بدون نام",
-            "added": str(datetime.now())
+            "added_by": who_did_it.id,
+            "added_by_username": who_did_it.username,
+            "added_at": str(datetime.now())
         })
         save_data(db)
-        try:
-            groups = db["groups"]
-            if len(groups) == 1:
-                msg = f"✅ گپ تایید شد!\n{chat.title}\nID: {chat.id}"
-            else:
-                msg = "✅ گپ ها تایید شدن:\n"
-                for i, g in enumerate(groups, 1):
-                    msg += f"{i}. {g['title']} (ID: {g['id']})\n"
-            await context.bot.send_message(ADMIN_ID, msg)
-        except Exception as e:
-            log.error(f"خطا در اطلاع به ادمین: {e}")
 
+        # اطلاع به ادمین اصلی
+        try:
+            await context.bot.send_message(
+                MASTER_ADMIN,
+                f"🔔 ربات به گپ جدید اضافه شد\n"
+                f"📍 {chat.title}\n"
+                f"👤 اضافه کننده: {who_did_it.full_name} (@{who_did_it.username or 'ندارد'})\n"
+                f"🆔 {who_did_it.id}"
+            )
+        except:
+            pass
+
+        # ✅ ارسال پیام تایید به فرد اضافه کننده در پیوی خصوصی
+        try:
+            # اول بهش /start رو یادآوری می‌کنیم
+            await context.bot.send_message(
+                who_did_it.id,
+                f"✅ شما ربات را به گپ «{chat.title}» اضافه کردید.\n\n"
+                f"📍 این گپ برای شما تایید شد!\n"
+                f"حالا می‌توانید از دستور /send برای ارسال استفاده کنید."
+            )
+        except Exception as e:
+            # کاربر ربات رو استارت نکرده
+            log.warning(f"کاربر {who_did_it.id} ربات را استارت نکرده. ارسال پیام در گروه...")
+            try:
+                await context.bot.send_message(
+                    chat.id,
+                    f"@{who_did_it.username or who_did_it.first_name} "
+                    f"لطفاً ربات را در پیوی خصوصی استارت کنید.\n"
+                    f"👉 @{(await context.bot.get_me()).username}"
+                )
+            except:
+                pass
+
+    # ❌ ربات از گپ حذف شد
     elif new_status in ("left", "kicked"):
         old_count = len(db["groups"])
         db["groups"] = [g for g in db["groups"] if g["id"] != chat.id]
@@ -169,22 +200,117 @@ async def on_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
             save_data(db)
 
 # ═══════════════════════════════
+# 🚀  فرمان /start
+# ═══════════════════════════════
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    
+    # ادمین اصلی
+    if is_master(user.id):
+        status_text = "🟢 روشن" if db.get("bot_enabled", True) else "🔴 خاموش"
+        await update.message.reply_text(
+            f"👋 خوش آمدید ادمین اصلی!\n\n"
+            f"📊 وضعیت ربات: {status_text}\n"
+            f"📋 تعداد گپ‌ها: {len(db['groups'])} عدد\n\n"
+            f"🔘 /on   → روشن کردن ربات\n"
+            f"🔘 /off  → خاموش کردن ربات"
+        )
+        return
+
+    # کاربر عادی - ببین چی گپ داره
+    groups = get_user_groups(user.id)
+    if not groups:
+        await update.message.reply_text(
+            "👋 سلام!\n\n"
+            "شما هنوز ربات را به هیچ گپی اضافه نکرده‌اید.\n"
+            "ربات را به یک گپ اضافه کنید تا بتوانید از آن استفاده کنید."
+        )
+        return
+
+    keyboard = build_user_groups_keyboard(user.id)
+    await update.message.reply_text(
+        f"✅ شما {len(groups)} گپ دارید.\n"
+        f"یکی را انتخاب کنید:",
+        reply_markup=keyboard
+    )
+
+# ═══════════════════════════════
+# 🎯  فرمان /send برای کاربران عادی
+# ═══════════════════════════════
+async def cmd_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    
+    if is_master(user.id):
+        # ادمین اصلی می‌تونه به همه گپ‌ها بفرسته
+        groups = db.get("groups", [])
+        if not groups:
+            await update.message.reply_text("❌ هیچ گپی وجود ندارد.")
+            return
+        buttons = [[InlineKeyboardButton(g["title"], callback_data=f"grp_{g['id']}")] for g in groups]
+        await update.message.reply_text("📋 کدام گپ؟", reply_markup=InlineKeyboardMarkup(buttons))
+        return
+
+    # کاربر عادی - فقط گپ‌های خودش
+    groups = get_user_groups(user.id)
+    if not groups:
+        await update.message.reply_text(
+            "❌ شما گپی ندارید.\n"
+            "ربات را به یک گپ اضافه کنید."
+        )
+        return
+
+    keyboard = build_user_groups_keyboard(user.id)
+    await update.message.reply_text(
+        "📋 گپ مورد نظر را انتخاب کنید:",
+        reply_markup=keyboard
+    )
+
+# ═══════════════════════════════
+# 🔘  خاموش/روشن (فقط ادمین اصلی)
+# ═══════════════════════════════
+async def cmd_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_master(update.effective_user.id):
+        await update.message.reply_text("⛔ فقط ادمین اصلی می‌تواند ربات را روشن کند.")
+        return
+    db["bot_enabled"] = True
+    save_data(db)
+    await update.message.reply_text("✅ ربات روشن شد.")
+
+async def cmd_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_master(update.effective_user.id):
+        await update.message.reply_text("⛔ فقط ادمین اصلی می‌تواند ربات را خاموش کند.")
+        return
+    db["bot_enabled"] = False
+    save_data(db)
+    await update.message.reply_text("🔴 ربات خاموش شد.")
+
+# ═══════════════════════════════
 # 📞  کالبک‌ها
 # ═══════════════════════════════
 async def cb_group_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """کاربر یک گپ را انتخاب کرد → شروع دریافت محتوا"""
     query = update.callback_query
     await query.answer()
-    if not is_admin(query.from_user.id):
-        return
+    
+    user_id = query.from_user.id
     gid = int(query.data[4:])
+    
+    # پیدا کردن گپ
     group = next((g for g in db["groups"] if g["id"] == gid), None)
     if not group:
         await query.edit_message_text("❌ گپ یافت نشد.")
         return
+
+    # بررسی دسترسی: ادمین اصلی یا اضافه کننده گپ
+    if not is_master(user_id) and group["added_by"] != user_id:
+        await query.edit_message_text("⛔ شما به این گپ دسترسی ندارید.")
+        return
+
     context.chat_data["target_group"] = group
     context.chat_data["pending_content"] = None
     context.chat_data["pending_count"] = None
     context.chat_data["pending_interval"] = None
+
     await query.edit_message_text(
         f"✅ گپ انتخاب شد: {group['title']}\n\n"
         f"📤 لطفاً محتوای ارسالی رو تایید کنید:\n"
@@ -202,8 +328,17 @@ async def cb_stop_sending(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # 💬  مکالمه ارسال
 # ═══════════════════════════════
 async def conv_receive_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
+    user = update.effective_user
+    group = context.chat_data.get("target_group")
+    if not group:
+        await update.message.reply_text("❌ لطفاً اول /send را بزنید.")
         return ConversationHandler.END
+    
+    # بررسی دسترسی مجدد
+    if not is_master(user.id) and group["added_by"] != user.id:
+        await update.message.reply_text("⛔ شما به این گپ دسترسی ندارید.")
+        return ConversationHandler.END
+
     msg = update.message
     content = None
     if msg.text and not msg.text.startswith("/"):
@@ -225,13 +360,12 @@ async def conv_receive_content(update: Update, context: ContextTypes.DEFAULT_TYP
     else:
         await update.message.reply_text("❌ این نوع پیام پشتیبانی نمی‌شود.\nلطفاً عکس، فیلم، استیکر، متن، گیف، صدا یا فایل بفرستید.")
         return STATE_CONTENT
+
     context.chat_data["pending_content"] = content
     await update.message.reply_text("✅ محتوا دریافت شد.\n\n🔢 حالا **تعداد** را وارد کنید:\nمثال: 100")
     return STATE_COUNT
 
 async def conv_receive_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return ConversationHandler.END
     text = update.message.text.strip()
     try:
         count = int(text)
@@ -246,8 +380,6 @@ async def conv_receive_count(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return STATE_INTERVAL
 
 async def conv_receive_interval(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return ConversationHandler.END
     text = update.message.text.strip()
     try:
         interval = float(text)
@@ -260,167 +392,56 @@ async def conv_receive_interval(update: Update, context: ContextTypes.DEFAULT_TY
     except ValueError:
         await update.message.reply_text("❌ لطفاً یک عدد معتبر وارد کنید.")
         return STATE_INTERVAL
+
     content = context.chat_data.get("pending_content")
     count = context.chat_data.get("pending_count")
     group = context.chat_data.get("target_group")
+
     if not content or not count or not group:
         await update.message.reply_text("❌ خطا: اطلاعات ناقص است.")
         return ConversationHandler.END
-    await update.message.reply_text(f"✅ تنظیمات:\n📍 گپ: {group['title']}\n📦 تعداد: {count}\n⏱ فاصله: {interval} ثانیه\n\n🚀 در حال شروع ارسال...")
+
+    await update.message.reply_text(
+        f"✅ تنظیمات:\n📍 گپ: {group['title']}\n📦 تعداد: {count}\n⏱ فاصله: {interval} ثانیه\n\n🚀 در حال شروع ارسال..."
+    )
     asyncio.create_task(send_loop(update, context, group["id"], content, count, interval))
     return ConversationHandler.END
 
 async def conv_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return ConversationHandler.END
     await update.message.reply_text("❌ عملیات لغو شد.")
     return ConversationHandler.END
 
-# ═══════════════════════════════════════════════
-# 🎯  هندلر اصلی ادمین (ادغام شده)
-# ═══════════════════════════════════════════════
-async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    یک هندلر برای همه پیام‌های متنی ادمین:
-    - اگر شبیه @username یا آیدی عددی باشد ← تایید کاربر
-    - در غیر این صورت ← نمایش لیست گپ‌ها
-    """
-    text = update.message.text.strip()
-
-    # --- تشخیص تایید کاربر ---
-    is_username = text.startswith("@") and len(text) > 1
-    is_numeric = text.lstrip("-").isdigit() and len(text) >= 5
-
-    if is_username or is_numeric:
-        if is_username:
-            username = text[1:]
-            approved_usernames = db.setdefault("approved_usernames", [])
-            if username not in approved_usernames:
-                approved_usernames.append(username)
-                save_data(db)
-            await update.message.reply_text(f"✅ کاربر {text} تایید شد! می‌تواند از ربات استفاده کند.")
-        else:
-            try:
-                target_id = int(text)
-            except ValueError:
-                return
-            if target_id == ADMIN_ID:
-                await update.message.reply_text("👑 این خود شما هستید!")
-                return
-            if target_id in db["approved"]:
-                await update.message.reply_text("✅ این کاربر قبلاً تایید شده است.")
-                return
-            db["approved"].append(target_id)
-            save_data(db)
-            await update.message.reply_text(f"✅ کاربر با آیدی {target_id} تایید شد! می‌تواند از ربات استفاده کند.")
-        return
-
-    # --- در غیر این صورت: نمایش لیست گپ‌ها ---
-    groups = db.get("groups", [])
-    if not groups:
+# ═══════════════════════════════
+# 🚀  هندلر پیام‌های متنی (برای ادمین اصلی و کاربران)
+# ═══════════════════════════════
+async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """هندلر پیش‌فرض برای پیام‌های متنی"""
+    user = update.effective_user
+    
+    if is_master(user.id):
+        # ادمین اصلی: راهنمایی
         await update.message.reply_text(
-            "❌ ربات در هیچ گپی عضو نیست.\n"
-            "ربات را به یک گپ اضافه کنید تا بتوانید ارسال کنید."
+            "👋 دستورات ادمین اصلی:\n"
+            "/on  - روشن کردن ربات\n"
+            "/off - خاموش کردن ربات\n"
+            "/send - ارسال به گپ‌ها\n"
+            "/start - وضعیت"
         )
         return
 
-    keyboard = build_groups_keyboard()
+    # کاربر عادی
+    groups = get_user_groups(user.id)
+    if not groups:
+        await update.message.reply_text(
+            "👋 شما ربات را به هیچ گپی اضافه نکرده‌اید.\n"
+            "ربات را به یک گپ اضافه کنید."
+        )
+        return
+
     await update.message.reply_text(
-        "📋 لطفاً گپ مورد نظر را انتخاب کنید:",
-        reply_markup=keyboard
+        f"✅ شما {len(groups)} گپ دارید.\n"
+        "از /send برای ارسال استفاده کنید."
     )
-
-# ═══════════════════════════════
-# 🚀  فرمان‌ها
-# ═══════════════════════════════
-async def cmd_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return
-    groups = db.get("groups", [])
-    if not groups:
-        await update.message.reply_text("❌ هیچ گپی وجود ندارد.")
-        return
-    text = "📋 لیست گپ‌ها:\n"
-    for i, g in enumerate(groups, 1):
-        text += f"{i}. {g['title']} (ID: {g['id']})\n"
-    await update.message.reply_text(text, reply_markup=build_groups_keyboard())
-
-async def cmd_leave(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return
-    groups = db.get("groups", [])
-    if not groups:
-        await update.message.reply_text("❌ ربات در هیچ گپی عضو نیست.")
-        return
-    if len(groups) == 1:
-        g = groups[0]
-        try:
-            await context.bot.leave_chat(g["id"])
-            db["groups"] = []
-            save_data(db)
-            await update.message.reply_text(f"✅ از گپ {g['title']} خارج شدم.")
-        except Exception as e:
-            await update.message.reply_text(f"❌ خطا: {e}")
-    else:
-        buttons = [[InlineKeyboardButton(g["title"], callback_data=f"leave_{g['id']}")] for g in groups]
-        buttons.append([InlineKeyboardButton("❌ لغو", callback_data="cancel_leave")])
-        await update.message.reply_text("📋 کدام گپ را ترک کنم؟", reply_markup=InlineKeyboardMarkup(buttons))
-
-async def cb_leave_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    if not is_admin(query.from_user.id):
-        return
-    data = query.data
-    if data == "cancel_leave":
-        await query.edit_message_text("❌ لغو شد.")
-        return
-    if data.startswith("leave_"):
-        gid = int(data[6:])
-        group = next((g for g in db["groups"] if g["id"] == gid), None)
-        if not group:
-            await query.edit_message_text("❌ گپ یافت نشد.")
-            return
-        try:
-            await context.bot.leave_chat(gid)
-            db["groups"] = [g for g in db["groups"] if g["id"] != gid]
-            save_data(db)
-            await query.edit_message_text(f"✅ از گپ {group['title']} خارج شدم.")
-        except Exception as e:
-            await query.edit_message_text(f"❌ خطا: {e}")
-
-async def cmd_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return
-    users = db.get("approved", [])
-    if not users or users == [ADMIN_ID]:
-        await update.message.reply_text("👥 هیچ کاربر غیر از ادمین تایید نشده است.")
-        return
-    text = "👥 کاربران تایید شده:\n"
-    for u in users:
-        text += f"• {u}\n"
-    await update.message.reply_text(text)
-
-async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return
-    args = context.args
-    if not args:
-        await update.message.reply_text("❌ /remove <id>")
-        return
-    try:
-        uid = int(args[0])
-        if uid == ADMIN_ID:
-            await update.message.reply_text("❌ نمی‌توانید ادمین اصلی را حذف کنید.")
-            return
-        if uid in db["approved"]:
-            db["approved"].remove(uid)
-            save_data(db)
-            await update.message.reply_text(f"✅ دسترسی کاربر {uid} حذف شد.")
-        else:
-            await update.message.reply_text("❌ این کاربر در لیست نیست.")
-    except ValueError:
-        await update.message.reply_text("❌ آیدی نامعتبر.")
 
 # ═══════════════════════════════
 # 🚀  Main
@@ -428,23 +449,22 @@ async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # فرمان‌ها
-    app.add_handler(CommandHandler("groups", cmd_groups))
-    app.add_handler(CommandHandler("leave", cmd_leave))
-    app.add_handler(CommandHandler("users", cmd_users))
-    app.add_handler(CommandHandler("remove", cmd_remove))
+    # فرمان‌های عمومی
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("send", cmd_send))
+
+    # فرمان‌های ادمین اصلی (خاموش/روشن)
+    app.add_handler(CommandHandler("on", cmd_on))
+    app.add_handler(CommandHandler("off", cmd_off))
     app.add_handler(CommandHandler("cancel", conv_cancel))
 
-    # تشخیص اضافه/حذف شدن از گپ
+    # تشخیص اضافه شدن به گپ (با شناسایی اضافه کننده)
     app.add_handler(ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
 
-    # کالبک خروج از گپ
-    app.add_handler(CallbackQueryHandler(cb_leave_group, pattern="^leave_|^cancel_leave$"))
-
-    # کالبک توقف ارسال
+    # کالبک توقف
     app.add_handler(CallbackQueryHandler(cb_stop_sending, pattern="^stop_sending$"))
 
-    # مکالمه ارسال (ورودی: انتخاب گپ)
+    # مکالمه ارسال (entry_point: انتخاب گپ)
     send_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(cb_group_selected, pattern="^grp_")],
         states={
@@ -457,25 +477,8 @@ def main():
     )
     app.add_handler(send_conv)
 
-    # === ✅ هندلر اصلی ادمین (یک تابع واحد) ===
-    # این تنها هندلر برای متن‌های ادمین است:
-    #  - @username یا عدد → تایید کاربر
-    #  - هر چیز دیگر → لیست گپ‌ها
-    app.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND & filters.User(user_id=ADMIN_ID),
-            handle_admin_input
-        )
-    )
-
-    # هندلر کاربران عادی (غیر ادمین)
-    async def non_admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user = update.effective_user
-        if is_approved(user.id):
-            await update.message.reply_text("✅ شما تایید شده‌اید اما فقط ادمین می‌تواند ارسال کند.")
-        else:
-            await update.message.reply_text("⛔ شما دسترسی ندارید.")
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, non_admin_handler))
+    # هندلر پیام‌های متنی پیش‌فرض
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
 
     log.info("✅ ربات راه‌اندازی شد!")
     print("✅ ربات فعال است.")
