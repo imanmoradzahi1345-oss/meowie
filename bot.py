@@ -1,1862 +1,1000 @@
 # -*- coding: utf-8 -*-
-
-import io
-import os
-import json
-import html
-import traceback
+"""
+ربات مدیریت گپ چندگانه
+- خوش‌آمد با عکس رندوم + کپشن متغیر
+- پنل داخل گپ
+- سکوت/بن/اخطار/لقب/آمار/پاسخ خودکار/ضد اسپم
+"""
 
 import telebot
-
-from PIL import (
-    Image,
-    ImageDraw,
-    ImageFont,
-    ImageFilter
+from telebot.types import (
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    ChatPermissions,
 )
+import sqlite3
+import time
+import re
+import random
+import threading
+from collections import defaultdict, deque
+
+# ===================== تنظیمات =====================
+BOT_TOKEN = "8597049833:AAFnEjGLcOz09Duy6MIvOoMD9TA1-fiRhPE"
+MAIN_OWNER_ID = 7530457395
+
+DEFAULT_WELCOME = "سلام {mention} عزیز به گپ {group}\nخوش اومدی"
+
+bot = telebot.TeleBot(BOT_TOKEN, parse_mode=None)
+
+# وضعیت‌های موقت
+user_steps = {}
+flood_map = defaultdict(lambda: deque())
+msg_count_cache = defaultdict(int)  # فقط کمکی؛ آمار اصلی در DB
+
+# ===================== دیتابیس =====================
+def get_db():
+    return sqlite3.connect("group_bot.db", check_same_thread=False, timeout=30)
 
 
-# =========================================================
-# SETTINGS
-# =========================================================
+def init_db():
+    conn = get_db()
+    c = conn.cursor()
 
-BOT_TOKEN = "8617545814:AAFAofo_nV39gFT1-IgfXu-esnGgXol62r4"
-
-ADMIN_ID = 7530457395
-
-SETTINGS_FILE = "welcome_settings.json"
-
-
-DEFAULT_WELCOME = (
-    "👋 {mention} عزیز، خوش اومدی به {group} ❤️"
-)
-
-
-# =========================================================
-# BOT
-# =========================================================
-
-bot = telebot.TeleBot(
-    BOT_TOKEN,
-    parse_mode="HTML"
-)
-
-
-# =========================================================
-# COLORS
-# =========================================================
-
-WHITE = (
-    245,
-    245,
-    255,
-    255
-)
-
-SOFT_WHITE = (
-    215,
-    220,
-    245,
-    255
-)
-
-MUTED = (
-    145,
-    155,
-    195,
-    255
-)
-
-BLUE = (
-    60,
-    170,
-    255,
-    255
-)
-
-PURPLE = (
-    155,
-    70,
-    255,
-    255
-)
-
-PINK = (
-    255,
-    65,
-    190,
-    255
-)
-
-
-# =========================================================
-# LOAD SETTINGS
-# =========================================================
-
-def load_settings():
-
-    try:
-
-        if not os.path.exists(
-            SETTINGS_FILE
-        ):
-
-            return {
-                "welcome_text":
-                DEFAULT_WELCOME
-            }
-
-        with open(
-            SETTINGS_FILE,
-            "r",
-            encoding="utf-8"
-        ) as file:
-
-            data = json.load(file)
-
-        if not isinstance(
-            data,
-            dict
-        ):
-
-            return {
-                "welcome_text":
-                DEFAULT_WELCOME
-            }
-
-        text = data.get(
-            "welcome_text",
-            DEFAULT_WELCOME
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS groups (
+            chat_id INTEGER PRIMARY KEY,
+            title TEXT,
+            welcome_text TEXT,
+            welcome_enabled INTEGER DEFAULT 1,
+            lock_link INTEGER DEFAULT 0,
+            lock_forward INTEGER DEFAULT 0,
+            lock_spam INTEGER DEFAULT 1,
+            warn_limit INTEGER DEFAULT 3
         )
+        """
+    )
 
-        if not isinstance(
-            text,
-            str
-        ):
-
-            text = DEFAULT_WELCOME
-
-        if not text.strip():
-
-            text = DEFAULT_WELCOME
-
-        return {
-            "welcome_text":
-            text
-        }
-
-    except Exception as e:
-
-        print(
-            "SETTINGS LOAD ERROR:",
-            e
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS bot_admins (
+            chat_id INTEGER,
+            user_id INTEGER,
+            PRIMARY KEY (chat_id, user_id)
         )
+        """
+    )
 
-        return {
-            "welcome_text":
-            DEFAULT_WELCOME
-        }
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS nicknames (
+            chat_id INTEGER,
+            user_id INTEGER,
+            nick TEXT,
+            PRIMARY KEY (chat_id, user_id)
+        )
+        """
+    )
+
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS warns (
+            chat_id INTEGER,
+            user_id INTEGER,
+            count INTEGER DEFAULT 0,
+            PRIMARY KEY (chat_id, user_id)
+        )
+        """
+    )
+
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS mutes (
+            chat_id INTEGER,
+            user_id INTEGER,
+            until_ts INTEGER,
+            PRIMARY KEY (chat_id, user_id)
+        )
+        """
+    )
+
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS message_stats (
+            chat_id INTEGER,
+            user_id INTEGER,
+            count INTEGER DEFAULT 0,
+            PRIMARY KEY (chat_id, user_id)
+        )
+        """
+    )
+
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS autoreplies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER,
+            keyword TEXT,
+            answer TEXT,
+            exact_match INTEGER DEFAULT 1,
+            active INTEGER DEFAULT 1
+        )
+        """
+    )
+
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS welcome_photos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            file_id TEXT UNIQUE
+        )
+        """
+    )
+
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS started_users (
+            user_id INTEGER PRIMARY KEY
+        )
+        """
+    )
+
+    conn.commit()
+    conn.close()
 
 
-# =========================================================
-# SAVE SETTINGS
-# =========================================================
+init_db()
 
-def save_settings(data):
 
+# ===================== کمک‌ها =====================
+def ensure_group(chat):
+    if not chat or chat.type not in ("group", "supergroup"):
+        return
+    conn = get_db()
+    c = conn.cursor()
+    c.execute(
+        "INSERT OR IGNORE INTO groups (chat_id, title, welcome_text) VALUES (?, ?, ?)",
+        (chat.id, chat.title or "", DEFAULT_WELCOME),
+    )
+    c.execute("UPDATE groups SET title=? WHERE chat_id=?", (chat.title or "", chat.id))
+    # سازنده گپ و ادمین‌ها
     try:
-
-        with open(
-            SETTINGS_FILE,
-            "w",
-            encoding="utf-8"
-        ) as file:
-
-            json.dump(
-                data,
-                file,
-                ensure_ascii=False,
-                indent=2
+        for a in bot.get_chat_administrators(chat.id):
+            if a.user.is_bot:
+                continue
+            c.execute(
+                "INSERT OR IGNORE INTO bot_admins (chat_id, user_id) VALUES (?, ?)",
+                (chat.id, a.user.id),
             )
+    except Exception:
+        pass
+    # مالک اصلی بات در همه گپ‌ها ادمین بات
+    c.execute(
+        "INSERT OR IGNORE INTO bot_admins (chat_id, user_id) VALUES (?, ?)",
+        (chat.id, MAIN_OWNER_ID),
+    )
+    conn.commit()
+    conn.close()
 
+
+def is_main_owner(uid):
+    return int(uid) == int(MAIN_OWNER_ID)
+
+
+def is_bot_admin(chat_id, uid):
+    if is_main_owner(uid):
         return True
-
-    except Exception as e:
-
-        print(
-            "SETTINGS SAVE ERROR:",
-            e
-        )
-
-        return False
-
-
-# =========================================================
-# GLOBAL SETTINGS
-# =========================================================
-
-settings = load_settings()
-
-
-# =========================================================
-# ADMIN CHECK
-# =========================================================
-
-def is_admin(message):
-
-    try:
-
-        return (
-            message.from_user is not None
-            and
-            message.from_user.id == ADMIN_ID
-        )
-
-    except Exception:
-
-        return False
-
-
-# =========================================================
-# FONT PATHS
-# =========================================================
-
-FONT_NORMAL_PATHS = [
-
-    "/usr/share/fonts/truetype/dejavu/"
-    "DejaVuSans.ttf",
-
-    "/usr/share/fonts/truetype/liberation2/"
-    "LiberationSans-Regular.ttf",
-
-    "/data/data/com.termux/files/usr/share/"
-    "fonts/truetype/dejavu/"
-    "DejaVuSans.ttf",
-
-    "/storage/emulated/0/Fonts/"
-    "DejaVuSans.ttf"
-]
-
-
-FONT_BOLD_PATHS = [
-
-    "/usr/share/fonts/truetype/dejavu/"
-    "DejaVuSans-Bold.ttf",
-
-    "/usr/share/fonts/truetype/liberation2/"
-    "LiberationSans-Bold.ttf",
-
-    "/data/data/com.termux/files/usr/share/"
-    "fonts/truetype/dejavu/"
-    "DejaVuSans-Bold.ttf",
-
-    "/storage/emulated/0/Fonts/"
-    "DejaVuSans-Bold.ttf"
-]
-
-
-# =========================================================
-# GET FONT
-# =========================================================
-
-def get_font(
-    size,
-    bold=False
-):
-
-    paths = (
-        FONT_BOLD_PATHS
-        if bold
-        else FONT_NORMAL_PATHS
+    conn = get_db()
+    c = conn.cursor()
+    c.execute(
+        "SELECT 1 FROM bot_admins WHERE chat_id=? AND user_id=?",
+        (chat_id, uid),
     )
-
-    for path in paths:
-
-        try:
-
-            if os.path.exists(path):
-
-                return ImageFont.truetype(
-                    path,
-                    size
-                )
-
-        except Exception:
-            pass
-
-    try:
-
-        return ImageFont.truetype(
-            "DejaVuSans-Bold.ttf"
-            if bold
-            else "DejaVuSans.ttf",
-            size
-        )
-
-    except Exception:
-
-        return ImageFont.load_default()
+    row = c.fetchone()
+    conn.close()
+    return bool(row)
 
 
-# =========================================================
-# FIT FONT
-# =========================================================
+def get_group_row(chat_id):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT * FROM groups WHERE chat_id=?", (chat_id,))
+    row = c.fetchone()
+    conn.close()
+    return row
 
-def fit_font(
-    draw,
-    text,
-    max_width,
-    start_size,
-    bold=False
-):
 
-    if not text:
+def set_group_field(chat_id, field, value):
+    allowed = {
+        "welcome_text",
+        "welcome_enabled",
+        "lock_link",
+        "lock_forward",
+        "lock_spam",
+        "warn_limit",
+        "title",
+    }
+    if field not in allowed:
+        return
+    conn = get_db()
+    c = conn.cursor()
+    c.execute(f"UPDATE groups SET {field}=? WHERE chat_id=?", (value, chat_id))
+    conn.commit()
+    conn.close()
 
-        return get_font(
-            start_size,
-            bold
-        )
 
-    size = start_size
-
-    while size >= 18:
-
-        font = get_font(
-            size,
-            bold
-        )
-
-        try:
-
-            box = draw.textbbox(
-                (0, 0),
-                text,
-                font=font
-            )
-
-            width = (
-                box[2]
-                - box[0]
-            )
-
-            if width <= max_width:
-
-                return font
-
-        except Exception:
-            pass
-
-        size -= 2
-
-    return get_font(
-        18,
-        bold
+def format_welcome(template, user, chat):
+    name = user.first_name or "کاربر"
+    username = f"@{user.username}" if user.username else "ندارد"
+    mention = f'<a href="tg://user?id={user.id}">{name}</a>'
+    group = chat.title or "گپ"
+    text = template or DEFAULT_WELCOME
+    text = (
+        text.replace("{name}", name)
+        .replace("{username}", username)
+        .replace("{id}", str(user.id))
+        .replace("{group}", group)
+        .replace("{mention}", mention)
     )
-
-
-# =========================================================
-# CENTER TEXT
-# =========================================================
-
-def draw_center_text(
-    draw,
-    text,
-    center_x,
-    y,
-    font,
-    fill
-):
-
-    box = draw.textbbox(
-        (0, 0),
-        text,
-        font=font
-    )
-
-    text_width = (
-        box[2]
-        - box[0]
-    )
-
-    x = (
-        center_x
-        - text_width / 2
-    )
-
-    draw.text(
-        (x, y),
-        text,
-        font=font,
-        fill=fill
-    )
-
-
-# =========================================================
-# GLOW CIRCLE
-# =========================================================
-
-def glow_circle(
-    base,
-    x,
-    y,
-    radius,
-    color,
-    blur=35
-):
-
-    layer = Image.new(
-        "RGBA",
-        base.size,
-        (0, 0, 0, 0)
-    )
-
-    draw = ImageDraw.Draw(
-        layer
-    )
-
-    draw.ellipse(
-        (
-            x - radius,
-            y - radius,
-            x + radius,
-            y + radius
-        ),
-        fill=color
-    )
-
-    layer = layer.filter(
-        ImageFilter.GaussianBlur(
-            blur
-        )
-    )
-
-    base.alpha_composite(
-        layer
-    )
-
-
-# =========================================================
-# NEON LINE
-# =========================================================
-
-def neon_line(
-    base,
-    points,
-    color,
-    width=3
-):
-
-    glow = Image.new(
-        "RGBA",
-        base.size,
-        (0, 0, 0, 0)
-    )
-
-    gd = ImageDraw.Draw(
-        glow
-    )
-
-    gd.line(
-        points,
-        fill=color,
-        width=width + 16,
-        joint="curve"
-    )
-
-    glow = glow.filter(
-        ImageFilter.GaussianBlur(9)
-    )
-
-    base.alpha_composite(
-        glow
-    )
-
-    draw = ImageDraw.Draw(
-        base
-    )
-
-    draw.line(
-        points,
-        fill=color,
-        width=width,
-        joint="curve"
-    )
-
-
-# =========================================================
-# BACKGROUND
-# =========================================================
-
-def make_background(
-    width,
-    height
-):
-
-    image = Image.new(
-        "RGBA",
-        (width, height),
-        (7, 8, 24, 255)
-    )
-
-    pixels = image.load()
-
-    for y in range(height):
-
-        for x in range(width):
-
-            nx = x / width
-            ny = y / height
-
-            r = int(
-                7
-                + 22 * nx
-                + 12 * ny
-            )
-
-            g = int(
-                8
-                + 5 * nx
-            )
-
-            b = int(
-                28
-                + 55 * (1 - nx)
-                + 25 * (1 - ny)
-            )
-
-            pixels[x, y] = (
-                min(r, 255),
-                min(g, 255),
-                min(b, 255),
-                255
-            )
-
-    return image
-    # =========================================================
-# DEFAULT AVATAR
-# =========================================================
-
-def default_avatar(size):
-
-    avatar = Image.new(
-        "RGBA",
-        (size, size),
-        (0, 0, 0, 0)
-    )
-
-    draw = ImageDraw.Draw(
-        avatar
-    )
-
-    draw.ellipse(
-        (
-            2,
-            2,
-            size - 2,
-            size - 2
-        ),
-        fill=(
-            28,
-            30,
-            65,
-            255
-        )
-    )
-
-    cx = size // 2
-
-    head = int(
-        size * 0.30
-    )
-
-    draw.ellipse(
-        (
-            cx - head,
-            int(size * 0.15),
-            cx + head,
-            int(size * 0.15)
-            + head * 2
-        ),
-        fill=(
-            190,
-            195,
-            225,
-            255
-        )
-    )
-
-    draw.rounded_rectangle(
-        (
-            int(size * 0.18),
-            int(size * 0.55),
-            int(size * 0.82),
-            int(size * 1.02)
-        ),
-        radius=int(size * 0.18),
-        fill=(
-            105,
-            75,
-            220,
-            255
-        )
-    )
-
-    return avatar
-
-
-# =========================================================
-# GET PROFILE PHOTO
-# =========================================================
-
-def get_profile_photo(user_id):
-
-    try:
-
-        photos = (
-            bot.get_user_profile_photos(
-                user_id,
-                limit=1
-            )
-        )
-
-        if photos is None:
-            return None
-
-        if photos.total_count <= 0:
-            return None
-
-        if not photos.photos:
-            return None
-
-        photo = (
-            photos.photos[0][-1]
-        )
-
-        file_info = bot.get_file(
-            photo.file_id
-        )
-
-        data = bot.download_file(
-            file_info.file_path
-        )
-
-        if not data:
-            return None
-
-        return data
-
-    except Exception as e:
-
-        print(
-            "PROFILE PHOTO ERROR:",
-            e
-        )
-
-        return None
-
-
-# =========================================================
-# CIRCLE AVATAR
-# =========================================================
-
-def circle_avatar(
-    data,
-    size
-):
-
-    try:
-
-        original = Image.open(
-            io.BytesIO(data)
-        ).convert("RGB")
-
-        width, height = (
-            original.size
-        )
-
-        side = min(
-            width,
-            height
-        )
-
-        left = (
-            width - side
-        ) // 2
-
-        top = (
-            height - side
-        ) // 2
-
-        original = original.crop(
-            (
-                left,
-                top,
-                left + side,
-                top + side
-            )
-        )
-
-        original = original.resize(
-            (size, size),
-            Image.Resampling.LANCZOS
-        )
-
-        result = Image.new(
-            "RGBA",
-            (size, size),
-            (0, 0, 0, 0)
-        )
-
-        mask = Image.new(
-            "L",
-            (size, size),
-            0
-        )
-
-        mask_draw = ImageDraw.Draw(
-            mask
-        )
-
-        mask_draw.ellipse(
-            (
-                0,
-                0,
-                size - 1,
-                size - 1
-            ),
-            fill=255
-        )
-
-        result.paste(
-            original,
-            (0, 0),
-            mask
-        )
-
-        return result
-
-    except Exception as e:
-
-        print(
-            "CIRCLE AVATAR ERROR:",
-            e
-        )
-
-        return default_avatar(
-            size
-        )
-
-
-# =========================================================
-# AVATAR RINGS
-# =========================================================
-
-def draw_rings(
-    base,
-    cx,
-    cy,
-    avatar_size
-):
-
-    glow = Image.new(
-        "RGBA",
-        base.size,
-        (0, 0, 0, 0)
-    )
-
-    gd = ImageDraw.Draw(
-        glow
-    )
-
-    rings = [
-
-        (
-            avatar_size // 2 + 10,
-            BLUE,
-            4
-        ),
-
-        (
-            avatar_size // 2 + 18,
-            PURPLE,
-            3
-        ),
-
-        (
-            avatar_size // 2 + 26,
-            PINK,
-            2
-        )
-    ]
-
-    for radius, color, width in rings:
-
-        gd.ellipse(
-            (
-                cx - radius,
-                cy - radius,
-                cx + radius,
-                cy + radius
-            ),
-            outline=color,
-            width=width + 9
-        )
-
-    glow = glow.filter(
-        ImageFilter.GaussianBlur(9)
-    )
-
-    base.alpha_composite(
-        glow
-    )
-
-    draw = ImageDraw.Draw(
-        base
-    )
-
-    for radius, color, width in rings:
-
-        draw.ellipse(
-            (
-                cx - radius,
-                cy - radius,
-                cx + radius,
-                cy + radius
-            ),
-            outline=color,
-            width=width
-        )
-
-
-# =========================================================
-# CLEAN DISPLAY TEXT
-# =========================================================
-
-def clean_display_text(
-    text,
-    maximum
-):
-
-    if not text:
-        return ""
-
-    text = str(
-        text
-    ).strip()
-
-    if len(text) > maximum:
-
-        text = (
-            text[:maximum - 3]
-            + "..."
-        )
-
     return text
 
 
-# =========================================================
-# DRAW SIDE TEXT
-# =========================================================
-
-def draw_side_text(
-    draw,
-    text,
-    center_x,
-    y,
-    max_width,
-    size,
-    bold,
-    fill
-):
-
-    font = fit_font(
-        draw,
-        text,
-        max_width,
-        size,
-        bold
-    )
-
-    draw_center_text(
-        draw,
-        text,
-        center_x,
-        y,
-        font,
-        fill
-    )
-
-
-# =========================================================
-# CREATE WELCOME CARD
-# =========================================================
-
-def create_welcome_card(
-    user,
-    chat
-):
-
-    WIDTH = 1200
-    HEIGHT = 700
-
-    base = make_background(
-        WIDTH,
-        HEIGHT
-    )
-
-    # -----------------------------------------------------
-    # BACKGROUND GLOWS
-    # -----------------------------------------------------
-
-    glow_circle(
-        base,
-        40,
-        80,
-        180,
-        (70, 90, 255, 55),
-        70
-    )
-
-    glow_circle(
-        base,
-        1160,
-        80,
-        180,
-        (255, 50, 190, 55),
-        70
-    )
-
-    glow_circle(
-        base,
-        50,
-        630,
-        170,
-        (155, 70, 255, 45),
-        70
-    )
-
-    glow_circle(
-        base,
-        1150,
-        630,
-        170,
-        (60, 170, 255, 45),
-        70
-    )
-
-    # -----------------------------------------------------
-    # GLASS PANEL
-    # -----------------------------------------------------
-
-    panel = Image.new(
-        "RGBA",
-        (WIDTH, HEIGHT),
-        (0, 0, 0, 0)
-    )
-
-    pd = ImageDraw.Draw(
-        panel
-    )
-
-    pd.rounded_rectangle(
-        (
-            25,
-            25,
-            WIDTH - 25,
-            HEIGHT - 25
+def mute_user(chat_id, user_id, seconds):
+    seconds = max(1, int(seconds))
+    until = int(time.time()) + seconds
+    bot.restrict_chat_member(
+        chat_id,
+        user_id,
+        permissions=ChatPermissions(
+            can_send_messages=False,
+            can_send_media_messages=False,
+            can_send_other_messages=False,
+            can_add_web_page_previews=False,
         ),
-        radius=45,
-        fill=(
-            14,
-            16,
-            38,
-            242
+        until_date=until,
+    )
+    conn = get_db()
+    c = conn.cursor()
+    c.execute(
+        "INSERT OR REPLACE INTO mutes (chat_id, user_id, until_ts) VALUES (?, ?, ?)",
+        (chat_id, user_id, until),
+    )
+    conn.commit()
+    conn.close()
+
+
+def unmute_user(chat_id, user_id):
+    bot.restrict_chat_member(
+        chat_id,
+        user_id,
+        permissions=ChatPermissions(
+            can_send_messages=True,
+            can_send_media_messages=True,
+            can_send_other_messages=True,
+            can_add_web_page_previews=True,
+            can_send_polls=True,
+            can_invite_users=True,
         ),
-        outline=(
-            95,
-            110,
-            180,
-            210
-        ),
-        width=3
     )
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("DELETE FROM mutes WHERE chat_id=? AND user_id=?", (chat_id, user_id))
+    conn.commit()
+    conn.close()
 
-    base.alpha_composite(
-        panel
+
+def add_warn(chat_id, user_id):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute(
+        "INSERT OR IGNORE INTO warns (chat_id, user_id, count) VALUES (?, ?, 0)",
+        (chat_id, user_id),
     )
-
-    draw = ImageDraw.Draw(
-        base
+    c.execute(
+        "UPDATE warns SET count = count + 1 WHERE chat_id=? AND user_id=?",
+        (chat_id, user_id),
     )
-
-    # -----------------------------------------------------
-    # CORNER LINES
-    # -----------------------------------------------------
-
-    neon_line(
-        base,
-        [
-            (65, 105),
-            (225, 105)
-        ],
-        BLUE,
-        3
+    c.execute(
+        "SELECT count FROM warns WHERE chat_id=? AND user_id=?",
+        (chat_id, user_id),
     )
+    count = c.fetchone()[0]
+    conn.commit()
+    conn.close()
+    return count
 
-    neon_line(
-        base,
-        [
-            (975, 105),
-            (1135, 105)
-        ],
-        PINK,
-        3
+
+def clear_warn(chat_id, user_id):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("DELETE FROM warns WHERE chat_id=? AND user_id=?", (chat_id, user_id))
+    conn.commit()
+    conn.close()
+
+
+def inc_stat(chat_id, user_id):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute(
+        "INSERT OR IGNORE INTO message_stats (chat_id, user_id, count) VALUES (?, ?, 0)",
+        (chat_id, user_id),
     )
-
-    neon_line(
-        base,
-        [
-            (65, 595),
-            (225, 595)
-        ],
-        PURPLE,
-        3
+    c.execute(
+        "UPDATE message_stats SET count = count + 1 WHERE chat_id=? AND user_id=?",
+        (chat_id, user_id),
     )
+    conn.commit()
+    conn.close()
 
-    neon_line(
-        base,
-        [
-            (975, 595),
-            (1135, 595)
-        ],
-        BLUE,
-        3
+
+def get_nick(chat_id, user_id):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute(
+        "SELECT nick FROM nicknames WHERE chat_id=? AND user_id=?",
+        (chat_id, user_id),
     )
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else None
 
-    # -----------------------------------------------------
-    # DATA
-    # -----------------------------------------------------
 
-    name = clean_display_text(
-        user.first_name or "User",
-        18
-    )
+def extract_target(message):
+    if message.reply_to_message and message.reply_to_message.from_user:
+        return message.reply_to_message.from_user
+    return None
 
-    if user.username:
 
-        username = (
-            "@"
-            + user.username
-        )
-
-    else:
-
-        username = "@NoUsername"
-
-    username = clean_display_text(
-        username,
-        18
-    )
-
-    group_name = clean_display_text(
-        chat.title or "THE GROUP",
-        18
-    )
-
-    # -----------------------------------------------------
-    # LEFT TOP — WELCOME
-    # -----------------------------------------------------
-
-    draw_side_text(
-        draw,
-        "WELCOME",
-        200,
-        245,
-        350,
-        50,
-        True,
-        WHITE
-    )
-
-    # -----------------------------------------------------
-    # RIGHT TOP — NAME
-    # -----------------------------------------------------
-
-    draw_side_text(
-        draw,
-        name,
-        1000,
-        245,
-        350,
-        45,
-        True,
-        WHITE
-    )
-
-    # -----------------------------------------------------
-    # PROFILE PHOTO
-    # -----------------------------------------------------
-
-    AVATAR_SIZE = 210
-
-    photo_data = get_profile_photo(
-        user.id
-    )
-
-    if photo_data:
-
-        avatar = circle_avatar(
-            photo_data,
-            AVATAR_SIZE
-        )
-
-    else:
-
-        avatar = default_avatar(
-            AVATAR_SIZE
-        )
-
-    avatar_x = (
-        WIDTH - AVATAR_SIZE
-    ) // 2
-
-    avatar_y = 175
-
-    center_x = WIDTH // 2
-
-    center_y = (
-        avatar_y
-        + AVATAR_SIZE // 2
-    )
-
-    glow_circle(
-        base,
-        center_x,
-        center_y,
-        145,
-        (70, 110, 255, 65),
-        45
-    )
-
-    base.alpha_composite(
-        avatar,
-        (
-            avatar_x,
-            avatar_y
-        )
-    )
-
-    draw_rings(
-        base,
-        center_x,
-        center_y,
-        AVATAR_SIZE
-    )
-
-    # -----------------------------------------------------
-    # ID
-    # -----------------------------------------------------
-
-    id_text = (
-        "ID  •  "
-        + str(user.id)
-    )
-
-    id_font = get_font(
-        29,
-        True
-    )
-
-    draw_center_text(
-        draw,
-        id_text,
-        WIDTH // 2,
-        405,
-        id_font,
-        MUTED
-    )
-
-    # -----------------------------------------------------
-    # LEFT BOTTOM — GROUP
-    # -----------------------------------------------------
-
-    draw_side_text(
-        draw,
-        group_name,
-        200,
-        470,
-        350,
-        40,
-        True,
-        (
-            205,
-            145,
-            255,
-            255
-        )
-    )
-
-    # -----------------------------------------------------
-    # RIGHT BOTTOM — USERNAME
-    # -----------------------------------------------------
-
-    draw_side_text(
-        draw,
-        username,
-        1000,
-        470,
-        350,
-        36,
-        False,
-        SOFT_WHITE
-    )
-
-    # -----------------------------------------------------
-    # CENTER LINE
-    # -----------------------------------------------------
-
-    neon_line(
-        base,
-        [
-            (500, 505),
-            (700, 505)
-        ],
-        PURPLE,
-        2
-    )
-
-    # -----------------------------------------------------
-    # DECORATIVE DOTS
-    # -----------------------------------------------------
-
-    dots = [
-
-        (
-            80,
-            75,
-            7,
-            BLUE
-        ),
-
-        (
-            1120,
-            75,
-            7,
-            PINK
-        ),
-
-        (
-            80,
-            625,
-            7,
-            PURPLE
-        ),
-
-        (
-            1120,
-            625,
-            7,
-            BLUE
-        )
-    ]
-
-    for x, y, r, color in dots:
-
-        glow_circle(
-            base,
-            x,
-            y,
-            r,
-            color,
-            10
-        )
-
-        draw.ellipse(
-            (
-                x - r,
-                y - r,
-                x + r,
-                y + r
-            ),
-            fill=color
-        )
-
-    # -----------------------------------------------------
-    # SAVE
-    # -----------------------------------------------------
-
-    output = io.BytesIO()
-
-    output.name = (
-        "welcome_card.jpg"
-    )
-
-    base.convert(
-        "RGB"
-    ).save(
-        output,
-        format="JPEG",
-        quality=95,
-        optimize=True
-    )
-
-    output.seek(0)
-
-    return output
-    # =========================================================
-# USER MENTION
-# =========================================================
-
-def make_mention(user):
-
-    name = (
-        user.first_name
-        or "کاربر"
-    )
-
-    safe_name = html.escape(
-        name
-    )
-
-    return (
-        '<a href="tg://user?id='
-        + str(user.id)
-        + '">'
-        + safe_name
-        + '</a>'
-    )
-
-
-# =========================================================
-# MAKE CAPTION
-# =========================================================
-
-def make_welcome_caption(
-    user,
-    chat
-):
-
-    name = (
-        user.first_name
-        or "کاربر"
-    )
-
-    username = (
-        "@"
-        + user.username
-        if user.username
-        else "بدون یوزرنیم"
-    )
-
-    group = (
-        chat.title
-        or "گپ"
-    )
-
-    mention = make_mention(
-        user
-    )
-
-    safe_name = html.escape(
-        name
-    )
-
-    safe_username = html.escape(
-        username
-    )
-
-    safe_group = html.escape(
-        group
-    )
-
-    template = settings.get(
-        "welcome_text",
-        DEFAULT_WELCOME
-    )
-
-    if not isinstance(
-        template,
-        str
-    ):
-
-        template = DEFAULT_WELCOME
-
-    safe_template = html.escape(
-        template
-    )
-
-    safe_template = (
-        safe_template
-        .replace(
-            "{name}",
-            safe_name
-        )
-        .replace(
-            "{username}",
-            safe_username
-        )
-        .replace(
-            "{id}",
-            str(user.id)
-        )
-        .replace(
-            "{group}",
-            safe_group
-        )
-        .replace(
-            "{mention}",
-            mention
-        )
-    )
-
-    if len(safe_template) > 900:
-
-        safe_template = (
-            safe_template[:897]
-            + "..."
-        )
-
-    return safe_template
-
-
-# =========================================================
-# SEND WELCOME
-# =========================================================
-
-def send_welcome(
-    message,
-    user
-):
-
-    # -----------------------------------------------------
-    # IGNORE BOT
-    # -----------------------------------------------------
-
+def safe_delete(chat_id, msg_id):
     try:
+        bot.delete_message(chat_id, msg_id)
+    except Exception:
+        pass
 
-        bot_id = bot.get_me().id
 
-        if user.id == bot_id:
+def panel_kb(chat_id):
+    g = get_group_row(chat_id)
+    def m(v):
+        return "✅" if v else "❌"
+    kb = InlineKeyboardMarkup(row_width=2)
+    if not g:
+        return kb
+    # g: 0 chat_id,1 title,2 welcome_text,3 welcome_enabled,4 lock_link,5 lock_forward,6 lock_spam,7 warn_limit
+    kb.add(
+        InlineKeyboardButton(f"لینک {m(g[4])}", callback_data=f"g:{chat_id}:tog_link"),
+        InlineKeyboardButton(f"فوروارد {m(g[5])}", callback_data=f"g:{chat_id}:tog_fwd"),
+    )
+    kb.add(
+        InlineKeyboardButton(f"ضدسپم {m(g[6])}", callback_data=f"g:{chat_id}:tog_spam"),
+        InlineKeyboardButton(f"خوش‌آمد {m(g[3])}", callback_data=f"g:{chat_id}:tog_wel"),
+    )
+    kb.add(InlineKeyboardButton("متن خوش‌آمد", callback_data=f"g:{chat_id}:set_wel_text"))
+    kb.add(InlineKeyboardButton("پاسخ خودکار", callback_data=f"g:{chat_id}:auto"))
+    kb.add(InlineKeyboardButton("بستن", callback_data=f"g:{chat_id}:close"))
+    return kb
 
-            print(
-                "BOT JOINED - IGNORED"
-            )
 
+def owner_kb():
+    kb = InlineKeyboardMarkup(row_width=1)
+    kb.add(InlineKeyboardButton("📤 آپلود عکس خوش‌آمد", callback_data="own:upload"))
+    kb.add(InlineKeyboardButton("🖼 لیست/پاک عکس‌ها", callback_data="own:photos"))
+    kb.add(InlineKeyboardButton("📢 تبلیغ به گپ‌ها", callback_data="own:bc_groups"))
+    kb.add(InlineKeyboardButton("📢 تبلیغ به استارت‌کننده‌ها", callback_data="own:bc_users"))
+    return kb
+
+
+# ===================== جوین / لفت =====================
+@bot.message_handler(content_types=["new_chat_members"])
+def on_new_members(message):
+    try:
+        ensure_group(message.chat)
+        chat_id = message.chat.id
+        me = bot.get_me()
+
+        for member in message.new_chat_members:
+            if member.id == me.id:
+                ensure_group(message.chat)
+                bot.send_message(chat_id, "✅ ربات فعال شد.\nبرای پنل بنویس: پنل")
+                continue
+
+            g = get_group_row(chat_id)
+            if not g or not g[3]:
+                continue
+
+            template = g[2] or DEFAULT_WELCOME
+            caption = format_welcome(template, member, message.chat)
+
+            conn = get_db()
+            c = conn.cursor()
+            c.execute("SELECT file_id FROM welcome_photos")
+            photos = [r[0] for r in c.fetchall()]
+            conn.close()
+
+            try:
+                if photos:
+                    fid = random.choice(photos)
+                    bot.send_photo(
+                        chat_id,
+                        fid,
+                        caption=caption,
+                        parse_mode="HTML",
+                    )
+                else:
+                    bot.send_message(chat_id, caption, parse_mode="HTML")
+            except Exception:
+                try:
+                    bot.send_message(chat_id, caption, parse_mode="HTML")
+                except Exception:
+                    pass
+    except Exception as e:
+        print("new_members:", e)
+
+
+# ===================== دستورات گپ =====================
+@bot.message_handler(
+    func=lambda m: m.chat.type in ["group", "supergroup"],
+    content_types=[
+        "text",
+        "photo",
+        "video",
+        "voice",
+        "document",
+        "sticker",
+        "animation",
+        "audio",
+        "video_note",
+    ],
+)
+def on_group(message):
+    try:
+        ensure_group(message.chat)
+        chat_id = message.chat.id
+        uid = message.from_user.id
+        text = (message.text or "").strip()
+
+        # آمار پیام
+        if not message.from_user.is_bot:
+            inc_stat(chat_id, uid)
+
+        # استپ تنظیم متن خوش‌آمد
+        step = user_steps.get(uid, {})
+        if step.get("step") == "wel_text" and step.get("chat_id") == chat_id:
+            if not is_bot_admin(chat_id, uid):
+                return
+            set_group_field(chat_id, "welcome_text", text)
+            user_steps.pop(uid, None)
+            bot.reply_to(message, "✅ متن خوش‌آمد ذخیره شد.")
             return
 
+        if text:
+            # --- پنل ---
+            if text in ["پنل", "پنل مدیریت"]:
+                if not is_bot_admin(chat_id, uid):
+                    return
+                bot.reply_to(message, "🛡 پنل مدیریت گپ", reply_markup=panel_kb(chat_id))
+                return
+
+            # --- آمار کل ---
+            if text == "آمار کل":
+                conn = get_db()
+                c = conn.cursor()
+                c.execute(
+                    "SELECT user_id, count FROM message_stats WHERE chat_id=? ORDER BY count DESC LIMIT 15",
+                    (chat_id,),
+                )
+                rows = c.fetchall()
+                conn.close()
+                if not rows:
+                    bot.reply_to(message, "هنوز آماری نیست.")
+                    return
+                lines = ["📊 آمار کل گپ\n"]
+                for i, (u, cnt) in enumerate(rows, 1):
+                    nick = get_nick(chat_id, u)
+                    label = nick or str(u)
+                    lines.append(f"{i}. {label} — {cnt} پیام")
+                bot.reply_to(message, "\n".join(lines))
+                return
+
+            # --- دستورات ادمین ---
+            if is_bot_admin(chat_id, uid):
+                # سکوت 10
+                if text.startswith("سکوت"):
+                    target = extract_target(message)
+                    if not target:
+                        bot.reply_to(message, "روی پیام کاربر ریپلای کن.")
+                        return
+                    parts = text.split()
+                    sec = 60
+                    if len(parts) >= 2 and parts[1].isdigit():
+                        sec = int(parts[1])
+                    mute_user(chat_id, target.id, sec)
+                    bot.reply_to(message, f"🔇 سکوت به مدت {sec} ثانیه")
+                    return
+
+                if text == "حذف سکوت":
+                    target = extract_target(message)
+                    if not target:
+                        bot.reply_to(message, "ریپلای کن.")
+                        return
+                    unmute_user(chat_id, target.id)
+                    bot.reply_to(message, "✅ سکوت برداشته شد.")
+                    return
+
+                if text == "بن":
+                    target = extract_target(message)
+                    if not target:
+                        bot.reply_to(message, "ریپلای کن.")
+                        return
+                    bot.ban_chat_member(chat_id, target.id)
+                    bot.reply_to(message, "🚫 بن شد.")
+                    return
+
+                if text == "حذف بن":
+                    target = extract_target(message)
+                    if not target:
+                        bot.reply_to(message, "ریپلای کن.")
+                        return
+                    bot.unban_chat_member(chat_id, target.id, only_if_banned=True)
+                    bot.reply_to(message, "✅ بن برداشته شد.")
+                    return
+
+                if text == "پاکسازی لیست بن":
+                    # تلگرام API لیست کامل بن را همیشه نمی‌دهد؛ تلاش با administrators نه
+                    bot.reply_to(
+                        message,
+                        "برای آنبن همه، از تلگرام لیست بن‌شده‌ها در دسترس کامل نیست.\n"
+                        "کاربران را تکی با «حذف بن» آزاد کن.",
+                    )
+                    return
+
+                if text == "اخطار":
+                    target = extract_target(message)
+                    if not target:
+                        bot.reply_to(message, "ریپلای کن.")
+                        return
+                    cnt = add_warn(chat_id, target.id)
+                    g = get_group_row(chat_id)
+                    limit = g[7] if g else 3
+                    bot.reply_to(message, f"⚠️ اخطار {cnt}/{limit}")
+                    if cnt >= limit:
+                        mute_user(chat_id, target.id, 600)
+                        bot.reply_to(message, "به‌خاطر اخطار زیاد، ۱۰ دقیقه سکوت شد.")
+                    return
+
+                if text == "حذف اخطار":
+                    target = extract_target(message)
+                    if not target:
+                        bot.reply_to(message, "ریپلای کن.")
+                        return
+                    clear_warn(chat_id, target.id)
+                    bot.reply_to(message, "✅ اخطار پاک شد.")
+                    return
+
+                if text == "پاکسازی لیست اخطار":
+                    conn = get_db()
+                    c = conn.cursor()
+                    c.execute("DELETE FROM warns WHERE chat_id=?", (chat_id,))
+                    conn.commit()
+                    conn.close()
+                    bot.reply_to(message, "✅ همه اخطارها پاک شد.")
+                    return
+
+                if text == "پاکسازی لیست سکوت":
+                    conn = get_db()
+                    c = conn.cursor()
+                    c.execute("SELECT user_id FROM mutes WHERE chat_id=?", (chat_id,))
+                    rows = c.fetchall()
+                    c.execute("DELETE FROM mutes WHERE chat_id=?", (chat_id,))
+                    conn.commit()
+                    conn.close()
+                    for (u,) in rows:
+                        try:
+                            unmute_user(chat_id, u)
+                        except Exception:
+                            pass
+                    bot.reply_to(message, "✅ لیست سکوت پاکسازی شد.")
+                    return
+
+                if text == "تنظیم ادمین":
+                    target = extract_target(message)
+                    if not target:
+                        bot.reply_to(message, "ریپلای کن.")
+                        return
+                    conn = get_db()
+                    c = conn.cursor()
+                    c.execute(
+                        "INSERT OR IGNORE INTO bot_admins (chat_id, user_id) VALUES (?, ?)",
+                        (chat_id, target.id),
+                    )
+                    conn.commit()
+                    conn.close()
+                    bot.reply_to(message, f"✅ {target.first_name} ادمین ربات شد و می‌تواند از پنل استفاده کند.")
+                    return
+
+                if text.startswith("تنظیم لقب"):
+                    target = extract_target(message)
+                    if not target:
+                        bot.reply_to(message, "ریپلای کن.")
+                        return
+                    parts = text.split(maxsplit=2)
+                    if len(parts) < 3:
+                        bot.reply_to(message, "مثال: تنظیم لقب گرگ")
+                        return
+                    nick = parts[2].strip()
+                    conn = get_db()
+                    c = conn.cursor()
+                    c.execute(
+                        "INSERT OR REPLACE INTO nicknames (chat_id, user_id, nick) VALUES (?, ?, ?)",
+                        (chat_id, target.id, nick),
+                    )
+                    conn.commit()
+                    conn.close()
+                    bot.reply_to(message, f"✅ لقب ثبت شد: {nick}")
+                    return
+
+                if text == "حذف":
+                    if message.reply_to_message:
+                        safe_delete(chat_id, message.reply_to_message.message_id)
+                        safe_delete(chat_id, message.message_id)
+                    return
+
+                if text.startswith("حذف ") and text.split()[0] == "حذف":
+                    parts = text.split()
+                    if len(parts) == 2 and parts[1].isdigit():
+                        n = min(int(parts[1]), 100)
+                        # حذف پیام‌های اخیر تا حد ممکن
+                        safe_delete(chat_id, message.message_id)
+                        # تلگرام API مستقیم bulk delete محدود است؛ از message_id رو به عقب
+                        mid = message.message_id
+                        deleted = 0
+                        for i in range(1, n + 1):
+                            try:
+                                bot.delete_message(chat_id, mid - i)
+                                deleted += 1
+                            except Exception:
+                                pass
+                        try:
+                            bot.send_message(chat_id, f"🗑 حدود {deleted} پیام حذف شد.")
+                        except Exception:
+                            pass
+                        return
+
+        # فیلترها و پاسخ خودکار
+        apply_filters_and_auto(message)
     except Exception as e:
+        print("on_group:", e)
 
-        print(
-            "BOT ID ERROR:",
-            e
-        )
 
-    # -----------------------------------------------------
-    # CREATE CARD
-    # -----------------------------------------------------
+def apply_filters_and_auto(message):
+    chat_id = message.chat.id
+    uid = message.from_user.id
+    if is_bot_admin(chat_id, uid):
+        maybe_auto(message)
+        return
 
+    g = get_group_row(chat_id)
+    if not g:
+        return
+
+    text = message.text or message.caption or ""
+
+    # ضد اسپم ساده: بیش از ۲۵ پیام در ۱۰ ثانیه
+    if g[6]:
+        key = (chat_id, uid)
+        now = time.time()
+        q = flood_map[key]
+        q.append(now)
+        while q and now - q[0] > 10:
+            q.popleft()
+        if len(q) >= 25:
+            try:
+                safe_delete(chat_id, message.message_id)
+                mute_user(chat_id, uid, 120)
+            except Exception:
+                pass
+            return
+
+    # قفل لینک
+    if g[4] and text and re.search(r"(https?://|www\.|t\.me/)", text, re.I):
+        safe_delete(chat_id, message.message_id)
+        return
+
+    # قفل فوروارد
+    if g[5] and (message.forward_date or message.forward_from or message.forward_from_chat):
+        safe_delete(chat_id, message.message_id)
+        return
+
+    maybe_auto(message)
+
+
+def maybe_auto(message):
+    if not message.text:
+        return
+    chat_id = message.chat.id
+    text = message.text.strip()
+    conn = get_db()
+    c = conn.cursor()
+    c.execute(
+        "SELECT keyword, answer, exact_match FROM autoreplies WHERE chat_id=? AND active=1",
+        (chat_id,),
+    )
+    rows = c.fetchall()
+    conn.close()
+    for keyword, answer, exact in rows:
+        if exact and text == keyword:
+            bot.reply_to(message, answer)
+            return
+        if not exact and keyword in text:
+            bot.reply_to(message, answer)
+            return
+
+
+# ===================== کال‌بک پنل گپ =====================
+@bot.callback_query_handler(func=lambda c: c.data.startswith("g:"))
+def group_panel_cb(call):
     try:
+        parts = call.data.split(":")
+        # g:chat_id:action
+        chat_id = int(parts[1])
+        action = parts[2]
+        uid = call.from_user.id
 
-        print(
-            "CREATING CARD FOR:",
-            user.id
+        if not is_bot_admin(chat_id, uid):
+            bot.answer_callback_query(call.id, "دسترسی نداری", show_alert=True)
+            return
+
+        if action == "tog_link":
+            g = get_group_row(chat_id)
+            set_group_field(chat_id, "lock_link", 0 if g[4] else 1)
+        elif action == "tog_fwd":
+            g = get_group_row(chat_id)
+            set_group_field(chat_id, "lock_forward", 0 if g[5] else 1)
+        elif action == "tog_spam":
+            g = get_group_row(chat_id)
+            set_group_field(chat_id, "lock_spam", 0 if g[6] else 1)
+        elif action == "tog_wel":
+            g = get_group_row(chat_id)
+            set_group_field(chat_id, "welcome_enabled", 0 if g[3] else 1)
+        elif action == "set_wel_text":
+            user_steps[uid] = {"step": "wel_text", "chat_id": chat_id}
+            bot.answer_callback_query(call.id)
+            bot.send_message(
+                call.message.chat.id,
+                "متن خوش‌آمد جدید را بفرست.\n"
+                "متغیرها: {name} {username} {id} {group} {mention}",
+            )
+            return
+        elif action == "auto":
+            code = f"AUTO-{chat_id}"
+            bot.answer_callback_query(call.id)
+            bot.send_message(
+                call.message.chat.id,
+                "برای تنظیم پاسخ خودکار این کد را در پیوی ربات بفرست:\n\n"
+                f"`{code}`\n\n"
+                "کد را لمس کن تا کپی شود.",
+                parse_mode="Markdown",
+            )
+            return
+        elif action == "close":
+            safe_delete(call.message.chat.id, call.message.message_id)
+            bot.answer_callback_query(call.id)
+            return
+
+        bot.edit_message_reply_markup(
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=panel_kb(chat_id),
         )
-
-        card = create_welcome_card(
-            user,
-            message.chat
-        )
-
-        print(
-            "CARD CREATED:",
-            user.id
-        )
-
+        bot.answer_callback_query(call.id, "انجام شد")
     except Exception as e:
-
-        print(
-            "CARD CREATION ERROR:",
-            e
-        )
-
-        traceback.print_exc()
-
-        card = None
-
-    # -----------------------------------------------------
-    # CAPTION
-    # -----------------------------------------------------
-
-    try:
-
-        caption = make_welcome_caption(
-            user,
-            message.chat
-        )
-
-    except Exception as e:
-
-        print(
-            "CAPTION ERROR:",
-            e
-        )
-
-        caption = (
-            "👋 "
-            + make_mention(user)
-            + " عزیز، خوش اومدی! ❤️"
-        )
-
-    # -----------------------------------------------------
-    # SEND PHOTO + CAPTION
-    # -----------------------------------------------------
-
-    if card is not None:
-
+        print("panel cb:", e)
         try:
-
-            bot.send_photo(
-                message.chat.id,
-                card,
-                caption=caption
-            )
-
-            print(
-                "WELCOME SENT:",
-                user.id
-            )
-
-            return
-
-        except Exception as e:
-
-            print(
-                "SEND PHOTO ERROR:",
-                e
-            )
-
-            traceback.print_exc()
-
-    # -----------------------------------------------------
-    # FALLBACK
-    # -----------------------------------------------------
-
-    try:
-
-        bot.send_message(
-            message.chat.id,
-            caption
-        )
-
-        print(
-            "FALLBACK MESSAGE SENT:",
-            user.id
-        )
-
-    except Exception as e:
-
-        print(
-            "FALLBACK ERROR:",
-            e
-        )
+            bot.answer_callback_query(call.id)
+        except Exception:
+            pass
 
 
-# =========================================================
-# NEW MEMBERS
-# =========================================================
-
-@bot.message_handler(
-    content_types=[
-        "new_chat_members"
-    ]
-)
-def new_member_handler(
-    message
-):
-
-    try:
-
-        print(
-            "================================"
-        )
-
-        print(
-            "NEW MEMBER EVENT"
-        )
-
-        print(
-            "CHAT:",
-            message.chat.id
-        )
-
-        print(
-            "TITLE:",
-            message.chat.title
-        )
-
-        print(
-            "COUNT:",
-            len(
-                message.new_chat_members
-            )
-        )
-
-        for user in (
-            message.new_chat_members
-        ):
-
-            send_welcome(
-                message,
-                user
-            )
-
-    except Exception as e:
-
-        print(
-            "NEW MEMBER ERROR:",
-            e
-        )
-
-        traceback.print_exc()
-
-
-# =========================================================
-# ADMIN PRIVATE PANEL
-# =========================================================
-
-@bot.message_handler(
-    func=lambda message:
-        message.chat.type == "private"
-        and
-        message.from_user is not None
-        and
-        message.from_user.id == ADMIN_ID,
-    content_types=[
-        "text"
-    ]
-)
-def admin_private_handler(
-    message
-):
-
-    global settings
-
-    text = (
-        message.text
-        or ""
-    ).strip()
-
-    if not text:
-
+# ===================== پیوی =====================
+@bot.message_handler(commands=["start"])
+def cmd_start(message):
+    if message.chat.type != "private":
         return
+    uid = message.from_user.id
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("INSERT OR IGNORE INTO started_users (user_id) VALUES (?)", (uid,))
+    conn.commit()
+    conn.close()
 
-    # -----------------------------------------------------
-    # START
-    # -----------------------------------------------------
-
-    if text.lower().startswith(
-        "/start"
-    ):
-
-        current = settings.get(
-            "welcome_text",
-            DEFAULT_WELCOME
+    if is_main_owner(uid):
+        bot.reply_to(
+            message,
+            "👑 پنل ادمین اصلی\n\n"
+            "عکس خوش‌آمد را از دکمه آپلود کن.\n"
+            "تبلیغات را از همین‌جا بفرست.",
+            reply_markup=owner_kb(),
         )
-
-        bot.send_message(
-            message.chat.id,
-
-            "👑 <b>پنل خوشامدگویی</b>\n\n"
-
-            "هر متنی که اینجا بفرستی، "
-            "برای عضو جدید در توضیحات "
-            "همان عکس قرار می‌گیرد.\n\n"
-
-            "❌ پیام جداگانه بعد از عکس "
-            "ارسال نمی‌شود.\n\n"
-
-            "<b>متغیرها:</b>\n\n"
-
-            "<code>{name}</code> "
-            "اسم کاربر\n"
-
-            "<code>{username}</code> "
-            "یوزرنیم\n"
-
-            "<code>{id}</code> "
-            "آیدی عددی\n"
-
-            "<code>{group}</code> "
-            "اسم گپ\n"
-
-            "<code>{mention}</code> "
-            "تگ واقعی کاربر\n\n"
-
-            "<b>متن فعلی:</b>\n"
-            + html.escape(
-                current
-            )
-        )
-
-        return
-
-    # -----------------------------------------------------
-    # SHOW CURRENT
-    # -----------------------------------------------------
-
-    if text.lower() == "/welcome":
-
-        current = settings.get(
-            "welcome_text",
-            DEFAULT_WELCOME
-        )
-
-        bot.send_message(
-            message.chat.id,
-
-            "📝 <b>متن فعلی:</b>\n\n"
-            + html.escape(
-                current
-            )
-            + "\n\n"
-            "متن جدید را بفرست."
-        )
-
-        return
-
-    # -----------------------------------------------------
-    # SAVE TEXT
-    # -----------------------------------------------------
-
-    settings["welcome_text"] = text
-
-    if save_settings(
-        settings
-    ):
-
-        bot.send_message(
-            message.chat.id,
-
-            "✅ <b>متن ذخیره شد.</b>\n\n"
-
-            "از این به بعد متن تو "
-            "در توضیحات عکس خوشامدگویی "
-            "قرار می‌گیرد.\n\n"
-
-            "📸 هیچ پیام جداگانه‌ای "
-            "بعد از عکس ارسال نمی‌شود."
-        )
-
     else:
-
-        bot.send_message(
-            message.chat.id,
-            "❌ ذخیره متن انجام نشد."
+        bot.reply_to(
+            message,
+            "سلام 👋\n"
+            "ربات را ادمین گپ کن و در گپ بنویس: پنل\n\n"
+            "اگر کد پاسخ خودکار داری (مثل AUTO-100...) همین‌جا بفرست.",
         )
 
 
-# =========================================================
-# NON ADMIN PRIVATE
-# =========================================================
+@bot.callback_query_handler(func=lambda c: c.data.startswith("own:"))
+def owner_cb(call):
+    uid = call.from_user.id
+    if not is_main_owner(uid):
+        bot.answer_callback_query(call.id, "فقط ادمین اصلی", show_alert=True)
+        return
+    action = call.data.split(":")[1]
+
+    if action == "upload":
+        user_steps[uid] = {"step": "upload_photo"}
+        bot.send_message(uid, "عکس‌های خوش‌آمد را بفرست (هر پیام یک عکس).\nبرای پایان: /done")
+    elif action == "photos":
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM welcome_photos")
+        n = c.fetchone()[0]
+        conn.close()
+        kb = InlineKeyboardMarkup()
+        kb.add(InlineKeyboardButton("🗑 پاک کردن همه عکس‌ها", callback_data="own:clear_photos"))
+        bot.send_message(uid, f"تعداد عکس‌های خوش‌آمد: {n}", reply_markup=kb)
+    elif action == "clear_photos":
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("DELETE FROM welcome_photos")
+        conn.commit()
+        conn.close()
+        bot.send_message(uid, "✅ همه عکس‌ها پاک شد.")
+    elif action == "bc_groups":
+        user_steps[uid] = {"step": "bc_groups"}
+        bot.send_message(uid, "متن یا رسانه تبلیغ برای همه گپ‌ها را بفرست:")
+    elif action == "bc_users":
+        user_steps[uid] = {"step": "bc_users"}
+        bot.send_message(uid, "متن یا رسانه تبلیغ برای استارت‌کننده‌ها را بفرست:")
+
+    bot.answer_callback_query(call.id)
+
+
+@bot.message_handler(commands=["done"])
+def cmd_done(message):
+    if message.chat.type != "private":
+        return
+    uid = message.from_user.id
+    if user_steps.get(uid, {}).get("step") == "upload_photo":
+        user_steps.pop(uid, None)
+        bot.reply_to(message, "✅ آپلود تمام شد.")
+
 
 @bot.message_handler(
-    func=lambda message:
-        message.chat.type == "private"
-        and
-        (
-            message.from_user is None
-            or
-            message.from_user.id != ADMIN_ID
-        ),
-    content_types=[
-        "text"
-    ]
+    func=lambda m: m.chat.type == "private",
+    content_types=["text", "photo", "video", "animation", "document", "voice", "sticker"],
 )
-def other_private_handler(
-    message
-):
+def on_private(message):
+    uid = message.from_user.id
+    text = (message.text or "").strip()
+    step_data = user_steps.get(uid, {})
+    step = step_data.get("step")
 
-    bot.send_message(
-        message.chat.id,
-        "🤖 ربات خوشامدگویی گپ است."
-    )
+    # کد پاسخ خودکار
+    if text.startswith("AUTO-"):
+        try:
+            chat_id = int(text.replace("AUTO-", "").strip())
+        except Exception:
+            bot.reply_to(message, "کد نامعتبر است.")
+            return
+        if not is_bot_admin(chat_id, uid) and not is_main_owner(uid):
+            bot.reply_to(message, "به این گپ دسترسی نداری.")
+            return
+        user_steps[uid] = {"step": "auto_key", "chat_id": chat_id}
+        bot.reply_to(message, "کلمه کلیدی را بفرست (مثال: سلام)")
+        return
 
+    if step == "auto_key":
+        user_steps[uid] = {
+            "step": "auto_ans",
+            "chat_id": step_data["chat_id"],
+            "keyword": text,
+        }
+        bot.reply_to(message, "متن جواب خودکار را بفرست:")
+        return
 
-# =========================================================
-# START INFO
-# =========================================================
-
-def print_start_info():
-
-    print(
-        "=========================================="
-    )
-
-    print(
-        "          NEON WELCOME BOT"
-    )
-
-    print(
-        "=========================================="
-    )
-
-    print(
-        "ADMIN ID:",
-        ADMIN_ID
-    )
-
-    print(
-        "SETTINGS:",
-        SETTINGS_FILE
-    )
-
-    print(
-        "WELCOME TEXT:"
-    )
-
-    print(
-        settings.get(
-            "welcome_text",
-            DEFAULT_WELCOME
+    if step == "auto_ans":
+        user_steps[uid] = {
+            "step": "auto_mode",
+            "chat_id": step_data["chat_id"],
+            "keyword": step_data["keyword"],
+            "answer": text,
+        }
+        kb = InlineKeyboardMarkup(row_width=1)
+        kb.add(
+            InlineKeyboardButton("فقط دقیقاً همان کلمه", callback_data="auto:exact"),
+            InlineKeyboardButton("هر جا در متن بود", callback_data="auto:include"),
         )
+        bot.reply_to(message, "حالت تشخیص را انتخاب کن:", reply_markup=kb)
+        return
+
+    # آپلود عکس خوش‌آمد
+    if step == "upload_photo" and is_main_owner(uid):
+        if message.photo:
+            fid = message.photo[-1].file_id
+            conn = get_db()
+            c = conn.cursor()
+            c.execute("INSERT OR IGNORE INTO welcome_photos (file_id) VALUES (?)", (fid,))
+            conn.commit()
+            c.execute("SELECT COUNT(*) FROM welcome_photos")
+            n = c.fetchone()[0]
+            conn.close()
+            bot.reply_to(message, f"✅ ذخیره شد. تعداد کل: {n}\nادامه بده یا /done")
+        else:
+            bot.reply_to(message, "فقط عکس بفرست یا /done")
+        return
+
+    # تبلیغات
+    if step in ("bc_groups", "bc_users") and is_main_owner(uid):
+        targets = []
+        conn = get_db()
+        c = conn.cursor()
+        if step == "bc_groups":
+            c.execute("SELECT chat_id FROM groups")
+            targets = [r[0] for r in c.fetchall()]
+        else:
+            c.execute("SELECT user_id FROM started_users")
+            targets = [r[0] for r in c.fetchall()]
+        conn.close()
+
+        ok = 0
+        for t in targets:
+            try:
+                if message.photo:
+                    bot.send_photo(t, message.photo[-1].file_id, caption=message.caption or None)
+                elif message.video:
+                    bot.send_video(t, message.video.file_id, caption=message.caption or None)
+                elif message.text:
+                    bot.send_message(t, message.text)
+                elif message.animation:
+                    bot.send_animation(t, message.animation.file_id, caption=message.caption or None)
+                else:
+                    bot.copy_message(t, message.chat.id, message.message_id)
+                ok += 1
+                time.sleep(0.05)
+            except Exception:
+                pass
+        user_steps.pop(uid, None)
+        bot.reply_to(message, f"✅ ارسال شد به {ok} مقصد.")
+        return
+
+    if is_main_owner(uid) and not step:
+        bot.reply_to(message, "از منوی زیر استفاده کن:", reply_markup=owner_kb())
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("auto:"))
+def auto_mode_cb(call):
+    uid = call.from_user.id
+    data = user_steps.get(uid, {})
+    if data.get("step") != "auto_mode":
+        bot.answer_callback_query(call.id)
+        return
+    exact = 1 if call.data == "auto:exact" else 0
+    conn = get_db()
+    c = conn.cursor()
+    c.execute(
+        "INSERT INTO autoreplies (chat_id, keyword, answer, exact_match, active) VALUES (?, ?, ?, ?, 1)",
+        (data["chat_id"], data["keyword"], data["answer"], exact),
     )
+    conn.commit()
+    conn.close()
+    user_steps.pop(uid, None)
+    bot.edit_message_text("✅ پاسخ خودکار ذخیره شد.", call.message.chat.id, call.message.message_id)
+    bot.answer_callback_query(call.id)
 
-    print(
-        "=========================================="
-    )
 
-
-# =========================================================
-# RUN BOT
-# =========================================================
-
+# ===================== اجرا =====================
 if __name__ == "__main__":
-
-    print_start_info()
-
-    print(
-        "BOT IS STARTING..."
-    )
-
-    try:
-
-        bot.infinity_polling(
-            skip_pending=True,
-            timeout=60,
-            long_polling_timeout=60,
-            allowed_updates=[
-                "message"
-            ]
-        )
-
-    except Exception as e:
-
-        print(
-            "BOT CRASHED:"
-        )
-
-        print(
-            e
-        )
-
-        traceback.print_exc()
+    print("Bot started...")
+    bot.infinity_polling(none_stop=True, timeout=60, long_polling_timeout=50)
