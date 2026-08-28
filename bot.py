@@ -1,768 +1,472 @@
-# -*- coding: utf-8 -*-
 import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ChatPermissions
-import sqlite3
+from telebot import types
+import json
+import os
 import time
-import re
 import random
-from collections import defaultdict, deque
+import re
 
-BOT_TOKEN = "8617545814:AAFAofo_nV39gFT1-IgfXu-esnGgXol62r4"
-MAIN_OWNER_ID = 7530457395
-DEFAULT_WELCOME = "سلام {mention} عزیز به گپ {group}\nخوش اومدی"
+TOKEN = "8617545814:AAFAofo_nV39gFT1-IgfXu-esnGgXol62r4"
+MAIN_ADMIN_ID = 7530457395
 
-bot = telebot.TeleBot(BOT_TOKEN)
-user_steps = {}
-flood_map = defaultdict(lambda: deque())
+bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
+DB_FILE = "db.json"
 
-def db():
-    return sqlite3.connect("group_bot.db", check_same_thread=False, timeout=30)
+# --- مدیریت دیتابیس ---
+def load_db():
+    if os.path.exists(DB_FILE):
+        try:
+            with open(DB_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {
+        "photos": [],
+        "bot_users": [],
+        "bot_groups": [],
+        "groups": {}
+    }
 
-def init_db():
-    con = db()
-    c = con.cursor()
-    c.execute("""CREATE TABLE IF NOT EXISTS groups(
-        chat_id INTEGER PRIMARY KEY,
-        title TEXT,
-        welcome_text TEXT,
-        welcome_enabled INTEGER DEFAULT 1,
-        lock_link INTEGER DEFAULT 0,
-        lock_forward INTEGER DEFAULT 0,
-        lock_spam INTEGER DEFAULT 1,
-        warn_limit INTEGER DEFAULT 3
-    )""")
-    c.execute("""CREATE TABLE IF NOT EXISTS bot_admins(
-        chat_id INTEGER, user_id INTEGER,
-        PRIMARY KEY(chat_id, user_id)
-    )""")
-    c.execute("""CREATE TABLE IF NOT EXISTS nicknames(
-        chat_id INTEGER, user_id INTEGER, nick TEXT,
-        PRIMARY KEY(chat_id, user_id)
-    )""")
-    c.execute("""CREATE TABLE IF NOT EXISTS warns(
-        chat_id INTEGER, user_id INTEGER, count INTEGER DEFAULT 0,
-        PRIMARY KEY(chat_id, user_id)
-    )""")
-    c.execute("""CREATE TABLE IF NOT EXISTS mutes(
-        chat_id INTEGER, user_id INTEGER, until_ts INTEGER,
-        PRIMARY KEY(chat_id, user_id)
-    )""")
-    c.execute("""CREATE TABLE IF NOT EXISTS message_stats(
-        chat_id INTEGER, user_id INTEGER, count INTEGER DEFAULT 0,
-        PRIMARY KEY(chat_id, user_id)
-    )""")
-    c.execute("""CREATE TABLE IF NOT EXISTS autoreplies(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        chat_id INTEGER, keyword TEXT, answer TEXT,
-        exact_match INTEGER DEFAULT 1, active INTEGER DEFAULT 1
-    )""")
-    c.execute("""CREATE TABLE IF NOT EXISTS welcome_photos(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        file_id TEXT UNIQUE
-    )""")
-    c.execute("""CREATE TABLE IF NOT EXISTS started_users(
-        user_id INTEGER PRIMARY KEY
-    )""")
-    con.commit()
-    con.close()
+def save_db(data):
+    with open(DB_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
-init_db()
+db = load_db()
 
-def ensure_group(chat):
-    if not chat or chat.type not in ("group", "supergroup"):
-        return
-    con = db()
-    c = con.cursor()
-    c.execute("INSERT OR IGNORE INTO groups(chat_id,title,welcome_text) VALUES(?,?,?)",
-              (chat.id, chat.title or "", DEFAULT_WELCOME))
-    c.execute("UPDATE groups SET title=? WHERE chat_id=?", (chat.title or "", chat.id))
-    c.execute("INSERT OR IGNORE INTO bot_admins(chat_id,user_id) VALUES(?,?)",
-              (chat.id, MAIN_OWNER_ID))
-    try:
-        for a in bot.get_chat_administrators(chat.id):
-            if a.user.is_bot:
-                continue
-            c.execute("INSERT OR IGNORE INTO bot_admins(chat_id,user_id) VALUES(?,?)",
-                      (chat.id, a.user.id))
-    except Exception:
-        pass
-    con.commit()
-    con.close()
+# --- ساختار داده‌های هر گروه ---
+def get_group_data(chat_id):
+    chat_str = str(chat_id)
+    if chat_str not in db["groups"]:
+        db["groups"][chat_str] = {
+            "welcome_enabled": True,
+            "welcome_text": "سلام {mention} عزیز به گپ {group} خوش اومدی",
+            "antispam": False,
+            "admins": [],
+            "mutes": [],
+            "bans": [],
+            "warns": {},
+            "titles": {},
+            "stats": {},
+            "autoreplies": {}
+        }
+        save_db(db)
+    return db["groups"][chat_str]
 
-def is_owner(uid):
-    return int(uid) == int(MAIN_OWNER_ID)
-
-def is_admin(chat_id, uid):
-    if is_owner(uid):
+# --- بررسی دسترسی ادمین ---
+def is_bot_admin(chat_id, user_id):
+    if user_id == MAIN_ADMIN_ID:
         return True
     try:
-        st = bot.get_chat_member(chat_id, uid).status
-        if st in ("creator", "administrator"):
-            con = db()
-            c = con.cursor()
-            c.execute("INSERT OR IGNORE INTO bot_admins(chat_id,user_id) VALUES(?,?)",
-                      (chat_id, uid))
-            con.commit()
-            con.close()
+        member = bot.get_chat_member(chat_id, user_id)
+        if member.status in ['creator', 'administrator']:
             return True
     except Exception:
         pass
-    con = db()
-    c = con.cursor()
-    c.execute("SELECT 1 FROM bot_admins WHERE chat_id=? AND user_id=?", (chat_id, uid))
-    ok = c.fetchone() is not None
-    con.close()
-    return ok
+    gdata = get_group_data(chat_id)
+    return user_id in gdata.get("admins", [])
 
-def grow(chat_id):
-    con = db()
-    c = con.cursor()
-    c.execute("SELECT * FROM groups WHERE chat_id=?", (chat_id,))
-    r = c.fetchone()
-    con.close()
-    return r
+# --- فرمت متن خوشامدگویی ---
+def format_welcome_text(text, user, chat_title):
+    mention = f'<a href="tg://user?id={user.id}">{user.first_name}</a>'
+    username = f"@{user.username}" if user.username else user.first_name
+    
+    formatted = text.replace("{name}", user.first_name or "")
+    formatted = formatted.replace("{username}", username)
+    formatted = formatted.replace("{id}", str(user.id))
+    formatted = formatted.replace("{group}", chat_title or "")
+    formatted = formatted.replace("{mention}", mention)
+    return formatted
 
-def setf(chat_id, field, value):
-    con = db()
-    c = con.cursor()
-    c.execute("UPDATE groups SET {}=? WHERE chat_id=?".format(field), (value, chat_id))
-    con.commit()
-    con.close()
+# --- ثبت اعضا و گروه‌ها برای تبلیغات ---
+def register_chat(message):
+    if message.chat.type == 'private':
+        if message.from_user.id not in db["bot_users"]:
+            db["bot_users"].append(message.from_user.id)
+            save_db(db)
+    elif message.chat.type in ['group', 'supergroup']:
+        if message.chat.id not in db["bot_groups"]:
+            db["bot_groups"].append(message.chat.id)
+            save_db(db)
 
-def fmt_welcome(tpl, user, chat):
-    name = user.first_name or "کاربر"
-    un = "@"+user.username if user.username else "ندارد"
-    mention = '<a href="tg://user?id={}">{}</a>'.format(user.id, name)
-    t = tpl or DEFAULT_WELCOME
-    return (t.replace("{name}", name).replace("{username}", un)
-             .replace("{id}", str(user.id)).replace("{group}", chat.title or "گپ")
-             .replace("{mention}", mention))
+# --- سیستم قفل ضد اسپم (در حافظه) ---
+user_msg_tracker = {}
 
-def mute(chat_id, user_id, sec):
-    sec = max(1, int(sec))
-    until = int(time.time()) + sec
-    bot.restrict_chat_member(
-        chat_id, user_id,
-        permissions=ChatPermissions(
-            can_send_messages=False, can_send_media_messages=False,
-            can_send_other_messages=False, can_add_web_page_previews=False
-        ),
-        until_date=until
-    )
-    con = db()
-    c = con.cursor()
-    c.execute("INSERT OR REPLACE INTO mutes(chat_id,user_id,until_ts) VALUES(?,?,?)",
-              (chat_id, user_id, until))
-    con.commit()
-    con.close()
+def check_antispam(message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    gdata = get_group_data(chat_id)
+    
+    if not gdata.get("antispam", False) or is_bot_admin(chat_id, user_id):
+        return False
+        
+    now = time.time()
+    key = f"{chat_id}:{user_id}"
+    if key not in user_msg_tracker:
+        user_msg_tracker[key] = []
+        
+    user_msg_tracker[key] = [t for t in user_msg_tracker[key] if now - t < 4]
+    user_msg_tracker[key].append(now)
+    
+    if len(user_msg_tracker[key]) > 5:
+        try:
+            bot.delete_message(chat_id, message.message_id)
+            bot.restrict_chat_member(chat_id, user_id, until_date=int(now + 60))
+            bot.send_message(chat_id, f"کاربر <a href='tg://user?id={user_id}'>{message.from_user.first_name}</a> به دلیل اسپم ۱ دقیقه سکوت شد.")
+        except Exception:
+            pass
+        return True
+    return False
 
-def unmute(chat_id, user_id):
-    bot.restrict_chat_member(
-        chat_id, user_id,
-        permissions=ChatPermissions(
-            can_send_messages=True, can_send_media_messages=True,
-            can_send_other_messages=True, can_add_web_page_previews=True,
-            can_send_polls=True, can_invite_users=True
-        )
-    )
-    con = db()
-    c = con.cursor()
-    c.execute("DELETE FROM mutes WHERE chat_id=? AND user_id=?", (chat_id, user_id))
-    con.commit()
-    con.close()
+# --- خوشامدگویی به اعضای جدید ---
+@bot.message_handler(content_types=['new_chat_members'])
+def welcome_new_member(message):
+    register_chat(message)
+    gdata = get_group_data(message.chat.id)
+    if not gdata.get("welcome_enabled", True):
+        return
 
-def target_user(msg):
-    if msg.reply_to_message and msg.reply_to_message.from_user:
-        return msg.reply_to_message.from_user
-    return None
+    for user in message.new_chat_members:
+        text = format_welcome_text(gdata.get("welcome_text"), user, message.chat.title)
+        photos = db.get("photos", [])
+        if photos:
+            photo_id = random.choice(photos)
+            try:
+                bot.send_photo(message.chat.id, photo_id, caption=text)
+            except Exception:
+                bot.send_message(message.chat.id, text)
+        else:
+            bot.send_message(message.chat.id, text)
 
-def delmsg(chat_id, mid):
+# --- دستورات ادمین اصلی در پیوی ---
+admin_states = {}
+
+@bot.message_handler(commands=['start'], chat_types=['private'])
+def start_pv(message):
+    register_chat(message)
+    if message.from_user.id == MAIN_ADMIN_ID:
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        markup.add("📸 آپلود عکس خوشامدگویی", "📢 ارسال تبلیغات")
+        markup.add("🗑 پاکسازی عکس‌های خوشامد")
+        bot.send_message(message.chat.id, "👑 به پنل ادمین اصلی ربات خوش آمدید.", reply_markup=markup)
+    else:
+        bot.send_message(message.chat.id, "سلام! ربات را به گروه خود اضافه کنید و ادمین سازید تا فعال شود.")
+
+@bot.message_handler(func=lambda m: m.chat.type == 'private' and m.from_user.id == MAIN_ADMIN_ID, content_types=['text', 'photo'])
+def handle_pv_admin(message):
+    user_id = message.from_user.id
+    state = admin_states.get(user_id)
+    
+    if message.text == "📸 آپلود عکس خوشامدگویی":
+        admin_states[user_id] = "waiting_photo"
+        bot.send_message(user_id, "لطفاً عکس مورد نظر را ارسال کنید (حداکثر ۱۰۰ عکس ذخیره می‌شود):")
+        return
+        
+    if message.text == "🗑 پاکسازی عکس‌های خوشامد":
+        db["photos"] = []
+        save_db(db)
+        bot.send_message(user_id, "تمام عکس‌های خوشامدگویی حذف شدند.")
+        return
+
+    if message.text == "📢 ارسال تبلیغات":
+        admin_states[user_id] = "waiting_broadcast"
+        bot.send_message(user_id, "پیام یا تبلیغ خود را ارسال کنید تا به تمام گروه‌ها و پیوی‌ها فرستاده شود:")
+        return
+
+    if state == "waiting_photo" and message.photo:
+        photo_id = message.photo[-1].file_id
+        if len(db["photos"]) >= 100:
+            db["photos"].pop(0)
+        db["photos"].append(photo_id)
+        save_db(db)
+        admin_states[user_id] = None
+        bot.send_message(user_id, f"✅ عکس با موفقیت ذخیره شد. تعداد عکس‌های فعلی: {len(db['photos'])}")
+        return
+
+    if state == "waiting_broadcast" and message.text:
+        admin_states[user_id] = None
+        sent_users = 0
+        sent_groups = 0
+        for u in db.get("bot_users", []):
+            try:
+                bot.send_message(u, message.text)
+                sent_users += 1
+            except Exception:
+                pass
+        for g in db.get("bot_groups", []):
+            try:
+                bot.send_message(g, message.text)
+                sent_groups += 1
+            except Exception:
+                pass
+        bot.send_message(user_id, f"✅ تبلیغات ارسال شد.\nپیوی: {sent_users}\nگروه‌ها: {sent_groups}")
+        return
+
+# --- سیستم پاسخ خودکار و کد تنظیمات ---
+@bot.message_handler(func=lambda m: m.chat.type == 'private' and m.text and m.text.startswith("SETCFG_"))
+def handle_config_code(message):
     try:
-        bot.delete_message(chat_id, mid)
+        raw = message.text.replace("SETCFG_", "")
+        data = json.loads(raw)
+        chat_id = data.get("chat_id")
+        word = data.get("word")
+        reply = data.get("reply")
+        
+        if chat_id and is_bot_admin(chat_id, message.from_user.id):
+            gdata = get_group_data(chat_id)
+            gdata["autoreplies"][word] = reply
+            save_db(db)
+            bot.send_message(message.chat.id, f"✅ پاسخ خودکار برای کلمه «{word}» با موفقیت در گروه ثبت شد.")
+        else:
+            bot.send_message(message.chat.id, "❌ شما دسترسی ادمین در این گروه را ندارید.")
+    except Exception:
+        bot.send_message(message.chat.id, "❌ کد تنظیمات نامعتبر است.")
+
+# --- مدیریت دستورات گروه ---
+@bot.message_handler(func=lambda m: m.chat.type in ['group', 'supergroup'])
+def handle_group_messages(message):
+    register_chat(message)
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    text = message.text or ""
+    gdata = get_group_data(chat_id)
+
+    # سیستم ضد اسپم
+    if check_antispam(message):
+        return
+
+    # ثبت آمار کل
+    user_str = str(user_id)
+    gdata["stats"][user_str] = gdata["stats"].get(user_str, 0) + 1
+    save_db(db)
+
+    # 1. تنظیم ادمین ربات
+    if text == "تنظیم ادمین" and message.reply_to_message:
+        if is_bot_admin(chat_id, user_id):
+            target_id = message.reply_to_message.from_user.id
+            if target_id not in gdata["admins"]:
+                gdata["admins"].append(target_id)
+                save_db(db)
+                bot.reply_to(message, f"کاربر <a href='tg://user?id={target_id}'>{message.reply_to_message.from_user.first_name}</a> به‌عنوان ادمین ربات ثبت شد.")
+            else:
+                bot.reply_to(message, "این کاربر از قبل ادمین ربات می‌باشد.")
+        return
+
+    # 2. پنل تنظیمات گروه
+    if text == "پنل":
+        if is_bot_admin(chat_id, user_id):
+            markup = types.InlineKeyboardMarkup(row_width=2)
+            w_status = "✅ فعال" if gdata.get("welcome_enabled", True) else "❌ غیرفعال"
+            s_status = "✅ فعال" if gdata.get("antispam", False) else "❌ غیرفعال"
+            
+            btn_welcome = types.InlineKeyboardButton(f"خوشامدگویی: {w_status}", callback_data=f"toggle_w_{chat_id}")
+            btn_antispam = types.InlineKeyboardButton(f"ضد اسپم: {s_status}", callback_data=f"toggle_s_{chat_id}")
+            btn_auto = types.InlineKeyboardButton("➕ افزودن پاسخ خودکار", callback_data=f"add_auto_{chat_id}")
+            
+            markup.add(btn_welcome, btn_antispam)
+            markup.add(btn_auto)
+            bot.send_message(chat_id, "⚙️ **پنل مدیریت تنظیمات گروه**", reply_markup=markup)
+        return
+
+    # 3. آمار کل
+    if text == "آمار کل":
+        stats = gdata.get("stats", {})
+        sorted_stats = sorted(stats.items(), key=lambda x: x[1], reverse=True)[:10]
+        msg = "📊 **آمار فعال‌ترین کاربران گروه:**\n\n"
+        for idx, (u_id, count) in enumerate(sorted_stats, 1):
+            try:
+                m = bot.get_chat_member(chat_id, int(u_id))
+                name = m.user.first_name
+            except Exception:
+                name = f"کاربر {u_id}"
+            msg += f"{idx}. {name} — {count} پیام\n"
+        bot.reply_to(message, msg)
+        return
+
+    # 4. تنظیم لقب
+    if text.startswith("تنظیم لقب ") and message.reply_to_message:
+        if is_bot_admin(chat_id, user_id):
+            title = text.replace("تنظیم لقب ", "").strip()
+            target_id = message.reply_to_message.from_user.id
+            gdata["titles"][str(target_id)] = title
+            save_db(db)
+            bot.reply_to(message, f"لقب «{title}» برای کاربر ثبت شد.")
+        return
+
+    # 5. حذف پیام (پاکسازی)
+    if text == "حذف" and message.reply_to_message:
+        if is_bot_admin(chat_id, user_id):
+            try:
+                bot.delete_message(chat_id, message.reply_to_message.message_id)
+                bot.delete_message(chat_id, message.message_id)
+            except Exception:
+                pass
+        return
+
+    if text.startswith("حذف "):
+        if is_bot_admin(chat_id, user_id):
+            parts = text.split()
+            if len(parts) == 2 and parts[1].isdigit():
+                count = min(int(parts[1]), 100)
+                current_id = message.message_id
+                for i in range(count + 1):
+                    try:
+                        bot.delete_message(chat_id, current_id - i)
+                    except Exception:
+                        pass
+        return
+
+    # 6. سکوت و حذف سکوت
+    if text.startswith("سکوت"):
+        if is_bot_admin(chat_id, user_id):
+            target_id = message.reply_to_message.from_user.id if message.reply_to_message else None
+            if target_id:
+                parts = text.split()
+                duration = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 300
+                until = int(time.time() + duration)
+                bot.restrict_chat_member(chat_id, target_id, until_date=until)
+                if target_id not in gdata["mutes"]:
+                    gdata["mutes"].append(target_id)
+                    save_db(db)
+                bot.reply_to(message, f"کاربر به مدت {duration} ثانیه سکوت شد.")
+        return
+
+    if text == "حذف سکوت" and message.reply_to_message:
+        if is_bot_admin(chat_id, user_id):
+            target_id = message.reply_to_message.from_user.id
+            bot.restrict_chat_member(chat_id, target_id, can_send_messages=True, can_send_media_messages=True, can_send_other_messages=True, can_add_web_page_previews=True)
+            if target_id in gdata["mutes"]:
+                gdata["mutes"].remove(target_id)
+                save_db(db)
+            bot.reply_to(message, "سکوت کاربر برداشته شد.")
+        return
+
+    # 7. بن و حذف بن
+    if text == "بن" and message.reply_to_message:
+        if is_bot_admin(chat_id, user_id):
+            target_id = message.reply_to_message.from_user.id
+            bot.ban_chat_member(chat_id, target_id)
+            if target_id not in gdata["bans"]:
+                gdata["bans"].append(target_id)
+                save_db(db)
+            bot.reply_to(message, "کاربر از گروه بن شد.")
+        return
+
+    if text == "حذف بن" and message.reply_to_message:
+        if is_bot_admin(chat_id, user_id):
+            target_id = message.reply_to_message.from_user.id
+            bot.unban_chat_member(chat_id, target_id)
+            if target_id in gdata["bans"]:
+                gdata["bans"].remove(target_id)
+                save_db(db)
+            bot.reply_to(message, "بن کاربر برداشته شد.")
+        return
+
+    # 8. اخطار و حذف اخطار
+    if text == "اخطار" and message.reply_to_message:
+        if is_bot_admin(chat_id, user_id):
+            target_id = str(message.reply_to_message.from_user.id)
+            gdata["warns"][target_id] = gdata["warns"].get(target_id, 0) + 1
+            save_db(db)
+            warn_count = gdata["warns"][target_id]
+            if warn_count >= 3:
+                bot.ban_chat_member(chat_id, int(target_id))
+                gdata["warns"][target_id] = 0
+                save_db(db)
+                bot.reply_to(message, "کاربر به دلیل دریافت ۳ اخطار بن شد.")
+            else:
+                bot.reply_to(message, f"اخطار به کاربر ثبت شد. تعداد اخطارها: {warn_count}/3")
+        return
+
+    if text == "حذف اخطار" and message.reply_to_message:
+        if is_bot_admin(chat_id, user_id):
+            target_id = str(message.reply_to_message.from_user.id)
+            if target_id in gdata["warns"] and gdata["warns"][target_id] > 0:
+                gdata["warns"][target_id] -= 1
+                save_db(db)
+                bot.reply_to(message, f"یک اخطار کسر شد. اخطارهای فعلی: {gdata['warns'][target_id]}")
+        return
+
+    # 9. پاکسازی‌های کلی
+    if text == "پاکسازی لیست سکوت" and is_bot_admin(chat_id, user_id):
+        for u in gdata.get("mutes", []):
+            try:
+                bot.restrict_chat_member(chat_id, u, can_send_messages=True, can_send_media_messages=True, can_send_other_messages=True)
+            except Exception:
+                pass
+        gdata["mutes"] = []
+        save_db(db)
+        bot.reply_to(message, "لیست سکوت پاکسازی شد.")
+        return
+
+    if text == "پاکسازی لیست بن" and is_bot_admin(chat_id, user_id):
+        for u in gdata.get("bans", []):
+            try:
+                bot.unban_chat_member(chat_id, u)
+            except Exception:
+                pass
+        gdata["bans"] = []
+        save_db(db)
+        bot.reply_to(message, "لیست اعضای بن شده پاکسازی شد.")
+        return
+
+    if text == "پاکسازی لیست اخطار" and is_bot_admin(chat_id, user_id):
+        gdata["warns"] = {}
+        save_db(db)
+        bot.reply_to(message, "تمام اخطارها پاکسازی شدند.")
+        return
+
+    # 10. بررسی پاسخ‌های خودکار
+    autoreplies = gdata.get("autoreplies", {})
+    for trigger, resp in autoreplies.items():
+        if trigger in text:
+            bot.reply_to(message, resp)
+            break
+
+# --- مدیریت کلیک روی دکمه‌های شیشه‌ای (Callback) ---
+@bot.callback_query_handler(func=lambda call: True)
+def handle_callbacks(call):
+    chat_id = call.message.chat.id
+    user_id = call.from_user.id
+    data = call.data
+
+    if not is_bot_admin(chat_id, user_id):
+        bot.answer_callback_query(call.id, "شما دسترسی ادمین ندارید.", show_alert=True)
+        return
+
+    gdata = get_group_data(chat_id)
+
+    if data.startswith("toggle_w_"):
+        gdata["welcome_enabled"] = not gdata.get("welcome_enabled", True)
+        save_db(db)
+        bot.answer_callback_query(call.id, "تنظیمات خوشامد تغییر کرد.")
+    elif data.startswith("toggle_s_"):
+        gdata["antispam"] = not gdata.get("antispam", False)
+        save_db(db)
+        bot.answer_callback_query(call.id, "تنظیمات ضد اسپم تغییر کرد.")
+    elif data.startswith("add_auto_"):
+        code_data = json.dumps({"chat_id": chat_id, "word": "سلام", "reply": "سلام رفیق! خوش اومدی."})
+        msg = f"لطفاً کد زیر را کپی کرده و در پیوی ربات ارسال کنید تا پاسخ خودکار ثبت شود:\n\n<code>SETCFG_{code_data}</code>"
+        bot.send_message(user_id, msg)
+        bot.answer_callback_query(call.id, "کد به پیوی شما ارسال شد.")
+        return
+
+    # بروزرسانی پنل
+    w_status = "✅ فعال" if gdata.get("welcome_enabled", True) else "❌ غیرفعال"
+    s_status = "✅ فعال" if gdata.get("antispam", False) else "❌ غیرفعال"
+    
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    btn_welcome = types.InlineKeyboardButton(f"خوشامدگویی: {w_status}", callback_data=f"toggle_w_{chat_id}")
+    btn_antispam = types.InlineKeyboardButton(f"ضد اسپم: {s_status}", callback_data=f"toggle_s_{chat_id}")
+    btn_auto = types.InlineKeyboardButton("➕ افزودن پاسخ خودکار", callback_data=f"add_auto_{chat_id}")
+    
+    markup.add(btn_welcome, btn_antispam)
+    markup.add(btn_auto)
+
+    try:
+        bot.edit_message_reply_markup(chat_id, call.message.message_id, reply_markup=markup)
     except Exception:
         pass
 
-def panel_kb(chat_id):
-    g = grow(chat_id)
-    def m(v):
-        return "✅" if v else "❌"
-    kb = InlineKeyboardMarkup(row_width=2)
-    if not g:
-        return kb
-    # g: 0id 1title 2wtext 3wen 4link 5fwd 6spam 7warn
-    kb.add(
-        InlineKeyboardButton("لینک "+m(g[4]), callback_data="p_link"),
-        InlineKeyboardButton("فوروارد "+m(g[5]), callback_data="p_fwd")
-    )
-    kb.add(
-        InlineKeyboardButton("ضدسپم "+m(g[6]), callback_data="p_spam"),
-        InlineKeyboardButton("خوش‌آمد "+m(g[3]), callback_data="p_wel")
-    )
-    kb.add(InlineKeyboardButton("📝 متن خوش‌آمد", callback_data="p_weltext"))
-    kb.add(InlineKeyboardButton("🤖 پاسخ خودکار", callback_data="p_auto"))
-    kb.add(InlineKeyboardButton("📖 راهنما", callback_data="p_help"))
-    kb.add(InlineKeyboardButton("❌ بستن", callback_data="p_close"))
-    return kb
-
-def owner_kb():
-    kb = InlineKeyboardMarkup(row_width=1)
-    kb.add(InlineKeyboardButton("📤 آپلود عکس خوش‌آمد", callback_data="o_upload"))
-    kb.add(InlineKeyboardButton("🖼 عکس‌ها / پاک کردن", callback_data="o_photos"))
-    kb.add(InlineKeyboardButton("📢 تبلیغ گپ‌ها", callback_data="o_bcg"))
-    kb.add(InlineKeyboardButton("📢 تبلیغ کاربران", callback_data="o_bcu"))
-    return kb
-
-print("part1 ok")
-@bot.message_handler(content_types=["new_chat_members"])
-def on_join(message):
-    try:
-        ensure_group(message.chat)
-        chat_id = message.chat.id
-        me = bot.get_me()
-        for u in message.new_chat_members:
-            if u.id == me.id:
-                ensure_group(message.chat)
-                bot.send_message(chat_id, "✅ ربات فعال شد\nبنویس: پنل")
-                continue
-            g = grow(chat_id)
-            if not g or not g[3]:
-                continue
-            cap = fmt_welcome(g[2], u, message.chat)
-            con = db()
-            c = con.cursor()
-            c.execute("SELECT file_id FROM welcome_photos")
-            photos = [r[0] for r in c.fetchall()]
-            con.close()
-            try:
-                if photos:
-                    bot.send_photo(chat_id, random.choice(photos), caption=cap, parse_mode="HTML")
-                else:
-                    bot.send_message(chat_id, cap, parse_mode="HTML")
-            except Exception:
-                bot.send_message(chat_id, cap, parse_mode="HTML")
-    except Exception as e:
-        print("join", e)
-
-def inc_stat(chat_id, uid):
-    con = db()
-    c = con.cursor()
-    c.execute("INSERT OR IGNORE INTO message_stats(chat_id,user_id,count) VALUES(?,?,0)", (chat_id, uid))
-    c.execute("UPDATE message_stats SET count=count+1 WHERE chat_id=? AND user_id=?", (chat_id, uid))
-    con.commit()
-    con.close()
-
-def add_warn(chat_id, uid):
-    con = db()
-    c = con.cursor()
-    c.execute("INSERT OR IGNORE INTO warns(chat_id,user_id,count) VALUES(?,?,0)", (chat_id, uid))
-    c.execute("UPDATE warns SET count=count+1 WHERE chat_id=? AND user_id=?", (chat_id, uid))
-    c.execute("SELECT count FROM warns WHERE chat_id=? AND user_id=?", (chat_id, uid))
-    n = c.fetchone()[0]
-    con.commit()
-    con.close()
-    return n
-
-def maybe_auto(message):
-    if not message.text:
-        return
-    con = db()
-    c = con.cursor()
-    c.execute("SELECT keyword,answer,exact_match FROM autoreplies WHERE chat_id=? AND active=1",
-              (message.chat.id,))
-    rows = c.fetchall()
-    con.close()
-    t = message.text.strip()
-    for kw, ans, exact in rows:
-        if exact and t == kw:
-            bot.reply_to(message, ans)
-            return
-        if not exact and kw in t:
-            bot.reply_to(message, ans)
-            return
-
-def filters(message):
-    chat_id = message.chat.id
-    uid = message.from_user.id
-    if is_admin(chat_id, uid):
-        maybe_auto(message)
-        return
-    g = grow(chat_id)
-    if not g:
-        return
-    text = message.text or message.caption or ""
-    if g[6]:
-        key = (chat_id, uid)
-        now = time.time()
-        q = flood_map[key]
-        q.append(now)
-        while q and now - q[0] > 10:
-            q.popleft()
-        if len(q) >= 25:
-            delmsg(chat_id, message.message_id)
-            try:
-                mute(chat_id, uid, 120)
-            except Exception:
-                pass
-            return
-    if g[4] and text and re.search(r"(https?://|www\.|t\.me/)", text, re.I):
-        delmsg(chat_id, message.message_id)
-        return
-    if g[5] and (message.forward_date or message.forward_from or message.forward_from_chat):
-        delmsg(chat_id, message.message_id)
-        return
-    maybe_auto(message)
-
-@bot.message_handler(func=lambda m: m.chat.type in ("group", "supergroup"),
-                     content_types=["text","photo","video","voice","document","sticker","animation","audio","video_note"])
-def on_group(message):
-    try:
-        ensure_group(message.chat)
-        chat_id = message.chat.id
-        uid = message.from_user.id
-        text = (message.text or "").strip()
-        if not message.from_user.is_bot:
-            inc_stat(chat_id, uid)
-
-        st = user_steps.get(uid, {})
-        if st.get("step") == "wel_text" and st.get("chat_id") == chat_id:
-            if is_admin(chat_id, uid):
-                setf(chat_id, "welcome_text", text)
-                user_steps.pop(uid, None)
-                bot.reply_to(message, "✅ متن خوش‌آمد ذخیره شد")
-            return
-
-        if not text:
-            filters(message)
-            return
-
-        if text in ("پنل", "پنل مدیریت"):
-            if not is_admin(chat_id, uid):
-                bot.reply_to(message, "فقط ادمین")
-                return
-            bot.reply_to(message, "🛡 پنل مدیریت", reply_markup=panel_kb(chat_id))
-            return
-
-        if text == "آمار کل":
-            con = db()
-            c = con.cursor()
-            c.execute("SELECT user_id,count FROM message_stats WHERE chat_id=? ORDER BY count DESC LIMIT 15",
-                      (chat_id,))
-            rows = c.fetchall()
-            con.close()
-            if not rows:
-                bot.reply_to(message, "آماری نیست")
-                return
-            lines = ["📊 آمار کل\n"]
-            for i,(u,cnt) in enumerate(rows,1):
-                con = db()
-                c = con.cursor()
-                c.execute("SELECT nick FROM nicknames WHERE chat_id=? AND user_id=?", (chat_id,u))
-                n = c.fetchone()
-                con.close()
-                label = n[0] if n else str(u)
-                lines.append("{}. {} — {}".format(i, label, cnt))
-            bot.reply_to(message, "\n".join(lines))
-            return
-
-        if not is_admin(chat_id, uid):
-            filters(message)
-            return
-
-        if text.startswith("سکوت"):
-            t = target_user(message)
-            if not t:
-                bot.reply_to(message, "ریپلای کن")
-                return
-            parts = text.split()
-            sec = 60
-            if len(parts) >= 2 and parts[1].isdigit():
-                sec = int(parts[1])
-            try:
-                mute(chat_id, t.id, sec)
-                bot.reply_to(message, "🔇 سکوت {} ثانیه".format(sec))
-            except Exception as e:
-                bot.reply_to(message, "خطا دسترسی: {}".format(e))
-            return
-
-        if text == "حذف سکوت":
-            t = target_user(message)
-            if not t:
-                bot.reply_to(message, "ریپلای کن")
-                return
-            try:
-                unmute(chat_id, t.id)
-                bot.reply_to(message, "✅ حذف سکوت")
-            except Exception as e:
-                bot.reply_to(message, str(e))
-            return
-
-        if text == "بن":
-            t = target_user(message)
-            if not t:
-                bot.reply_to(message, "ریپلای کن")
-                return
-            try:
-                bot.ban_chat_member(chat_id, t.id)
-                bot.reply_to(message, "🚫 بن شد")
-            except Exception as e:
-                bot.reply_to(message, str(e))
-            return
-
-        if text == "حذف بن":
-            t = target_user(message)
-            if not t:
-                bot.reply_to(message, "ریپلای کن")
-                return
-            try:
-                bot.unban_chat_member(chat_id, t.id, only_if_banned=True)
-                bot.reply_to(message, "✅ حذف بن")
-            except Exception as e:
-                bot.reply_to(message, str(e))
-            return
-
-        if text == "اخطار":
-            t = target_user(message)
-            if not t:
-                bot.reply_to(message, "ریپلای کن")
-                return
-            n = add_warn(chat_id, t.id)
-            g = grow(chat_id)
-            lim = g[7] if g else 3
-            bot.reply_to(message, "⚠️ اخطار {}/{}".format(n, lim))
-            if n >= lim:
-                try:
-                    mute(chat_id, t.id, 600)
-                    bot.reply_to(message, "سقف اخطار — ۱۰ دقیقه سکوت")
-                except Exception:
-                    pass
-            return
-
-        if text == "حذف اخطار":
-            t = target_user(message)
-            if not t:
-                bot.reply_to(message, "ریپلای کن")
-                return
-            con = db()
-            c = con.cursor()
-            c.execute("DELETE FROM warns WHERE chat_id=? AND user_id=?", (chat_id, t.id))
-            con.commit()
-            con.close()
-            bot.reply_to(message, "✅ حذف اخطار")
-            return
-
-        if text == "پاکسازی لیست اخطار":
-            con = db()
-            c = con.cursor()
-            c.execute("DELETE FROM warns WHERE chat_id=?", (chat_id,))
-            con.commit()
-            con.close()
-            bot.reply_to(message, "✅ لیست اخطار پاک شد")
-            return
-
-        if text == "پاکسازی لیست سکوت":
-            con = db()
-            c = con.cursor()
-            c.execute("SELECT user_id FROM mutes WHERE chat_id=?", (chat_id,))
-            rows = c.fetchall()
-            c.execute("DELETE FROM mutes WHERE chat_id=?", (chat_id,))
-            con.commit()
-            con.close()
-            for (u,) in rows:
-                try:
-                    unmute(chat_id, u)
-                except Exception:
-                    pass
-            bot.reply_to(message, "✅ لیست سکوت پاک شد")
-            return
-
-        if text == "پاکسازی لیست بن":
-            bot.reply_to(message, "API تلگرام لیست بن کامل نمی‌دهد. تکی حذف بن کن.")
-            return
-
-        if text == "تنظیم ادمین":
-            t = target_user(message)
-            if not t:
-                bot.reply_to(message, "ریپلای کن")
-                return
-            con = db()
-            c = con.cursor()
-            c.execute("INSERT OR IGNORE INTO bot_admins(chat_id,user_id) VALUES(?,?)", (chat_id, t.id))
-            con.commit()
-            con.close()
-            bot.reply_to(message, "✅ ادمین ربات شد")
-            return
-
-        if text.startswith("تنظیم لقب"):
-            t = target_user(message)
-            if not t:
-                bot.reply_to(message, "ریپلای کن")
-                return
-            parts = text.split(maxsplit=2)
-            if len(parts) < 3:
-                bot.reply_to(message, "مثال: تنظیم لقب گرگ")
-                return
-            nick = parts[2].strip()
-            con = db()
-            c = con.cursor()
-            c.execute("INSERT OR REPLACE INTO nicknames(chat_id,user_id,nick) VALUES(?,?,?)",
-                      (chat_id, t.id, nick))
-            con.commit()
-            con.close()
-            bot.reply_to(message, "✅ لقب: "+nick)
-            return
-
-        if text == "حذف":
-            if message.reply_to_message:
-                delmsg(chat_id, message.reply_to_message.message_id)
-                delmsg(chat_id, message.message_id)
-            return
-
-        if text.startswith("حذف "):
-            parts = text.split()
-            if len(parts)==2 and parts[1].isdigit():
-                n = min(int(parts[1]), 100)
-                mid = message.message_id
-                delmsg(chat_id, mid)
-                d = 0
-                for i in range(1, n+1):
-                    try:
-                        bot.delete_message(chat_id, mid-i)
-                        d += 1
-                    except Exception:
-                        pass
-                bot.send_message(chat_id, "🗑 {} پیام حذف شد".format(d))
-                return
-
-        filters(message)
-    except Exception as e:
-        print("group", e)
-
-print("part2 ok")
-@bot.callback_query_handler(func=lambda call: True)
-def cb(call):
-    try:
-        uid = call.from_user.id
-        data = call.data or ""
-        chat = call.message.chat
-        chat_id = chat.id
-
-        # همیشه اول جواب بده تا دکمه گیر نکند
-        try:
-            bot.answer_callback_query(call.id)
-        except Exception:
-            pass
-
-        # ----- پنل گپ (آیدی از خود پیام گپ) -----
-        if data.startswith("p_"):
-            if chat.type not in ("group", "supergroup"):
-                bot.send_message(uid, "این دکمه فقط داخل گپ کار می‌کند")
-                return
-            if not is_admin(chat_id, uid):
-                bot.send_message(chat_id, "دسترسی نداری")
-                return
-
-            g = grow(chat_id)
-            if not g:
-                bot.send_message(chat_id, "گپ ثبت نشده. یک پیام بفرست و دوباره پنل بزن")
-                return
-
-            if data == "p_link":
-                setf(chat_id, "lock_link", 0 if g[4] else 1)
-                bot.send_message(chat_id, "لینک: "+("خاموش" if g[4] else "روشن"))
-            elif data == "p_fwd":
-                setf(chat_id, "lock_forward", 0 if g[5] else 1)
-                bot.send_message(chat_id, "فوروارد: "+("خاموش" if g[5] else "روشن"))
-            elif data == "p_spam":
-                setf(chat_id, "lock_spam", 0 if g[6] else 1)
-                bot.send_message(chat_id, "ضدسپم: "+("خاموش" if g[6] else "روشن"))
-            elif data == "p_wel":
-                setf(chat_id, "welcome_enabled", 0 if g[3] else 1)
-                bot.send_message(chat_id, "خوش‌آمد: "+("خاموش" if g[3] else "روشن"))
-            elif data == "p_weltext":
-                user_steps[uid] = {"step": "wel_text", "chat_id": chat_id}
-                bot.send_message(chat_id, "متن خوش‌آمد را بفرست\n{name} {username} {id} {group} {mention}")
-                return
-            elif data == "p_auto":
-                code = "AUTO-{}".format(chat_id)
-                bot.send_message(chat_id, "کد را کپی کن و در پیوی ربات بفرست:\n\n`{}`".format(code),
-                                 parse_mode="Markdown")
-                return
-            elif data == "p_help":
-                bot.send_message(chat_id,
-                    "دستورات با ریپلای:\n"
-                    "سکوت 30 | حذف سکوت\nبن | حذف بن\n"
-                    "اخطار | حذف اخطار\n"
-                    "پاکسازی لیست اخطار | پاکسازی لیست سکوت\n"
-                    "تنظیم ادمین | تنظیم لقب گرگ\n"
-                    "حذف | حذف 50\nآمار کل | پنل")
-                return
-            elif data == "p_close":
-                delmsg(chat_id, call.message.message_id)
-                return
-
-            # رفرش پنل
-            try:
-                bot.edit_message_reply_markup(chat_id, call.message.message_id,
-                                              reply_markup=panel_kb(chat_id))
-            except Exception:
-                bot.send_message(chat_id, "پنل:", reply_markup=panel_kb(chat_id))
-            return
-
-        # ----- پنل پیوی ادمین اصلی -----
-        if data.startswith("o_"):
-            if not is_owner(uid):
-                bot.send_message(uid, "فقط ادمین اصلی")
-                return
-            if data == "o_upload":
-                user_steps[uid] = {"step": "upload_photo"}
-                bot.send_message(uid, "عکس بفرست. پایان: /done")
-            elif data == "o_photos":
-                con = db()
-                c = con.cursor()
-                c.execute("SELECT COUNT(*) FROM welcome_photos")
-                n = c.fetchone()[0]
-                con.close()
-                kb = InlineKeyboardMarkup()
-                kb.add(InlineKeyboardButton("پاک کردن همه عکس‌ها", callback_data="o_clear"))
-                bot.send_message(uid, "تعداد عکس: {}".format(n), reply_markup=kb)
-            elif data == "o_clear":
-                con = db()
-                c = con.cursor()
-                c.execute("DELETE FROM welcome_photos")
-                con.commit()
-                con.close()
-                bot.send_message(uid, "✅ همه عکس‌ها پاک شد")
-            elif data == "o_bcg":
-                user_steps[uid] = {"step": "bc_groups"}
-                bot.send_message(uid, "محتوای تبلیغ برای گپ‌ها را بفرست")
-            elif data == "o_bcu":
-                user_steps[uid] = {"step": "bc_users"}
-                bot.send_message(uid, "محتوای تبلیغ برای کاربران را بفرست")
-            return
-
-        if data in ("auto_exact", "auto_include"):
-            d = user_steps.get(uid, {})
-            if d.get("step") != "auto_mode":
-                return
-            exact = 1 if data == "auto_exact" else 0
-            con = db()
-            c = con.cursor()
-            c.execute("INSERT INTO autoreplies(chat_id,keyword,answer,exact_match,active) VALUES(?,?,?,?,1)",
-                      (d["chat_id"], d["keyword"], d["answer"], exact))
-            con.commit()
-            con.close()
-            user_steps.pop(uid, None)
-            bot.send_message(uid, "✅ پاسخ خودکار ذخیره شد")
-            return
-    except Exception as e:
-        print("cb", e)
-        try:
-            bot.answer_callback_query(call.id, "خطا")
-        except Exception:
-            pass
-
-print("part3 ok")
-@bot.message_handler(commands=["start"])
-def start(message):
-    if message.chat.type != "private":
-        return
-    uid = message.from_user.id
-    con = db()
-    c = con.cursor()
-    c.execute("INSERT OR IGNORE INTO started_users(user_id) VALUES(?)", (uid,))
-    con.commit()
-    con.close()
-    if is_owner(uid):
-        bot.reply_to(message, "👑 پنل ادمین اصلی\nدکمه‌ها را بزن:", reply_markup=owner_kb())
-    else:
-        bot.reply_to(message, "ربات را ادمین گپ کن و بنویس: پنل\nکد AUTO-... را هم اینجا بفرست.")
-
-@bot.message_handler(commands=["done"])
-def done(message):
-    if message.chat.type != "private":
-        return
-    uid = message.from_user.id
-    if user_steps.get(uid, {}).get("step") == "upload_photo":
-        user_steps.pop(uid, None)
-        bot.reply_to(message, "✅ آپلود تمام")
-
-@bot.message_handler(func=lambda m: m.chat.type == "private",
-                     content_types=["text","photo","video","animation","document","voice","sticker"])
-def on_pv(message):
-    uid = message.from_user.id
-    text = (message.text or "").strip()
-    st = user_steps.get(uid, {})
-    step = st.get("step")
-
-    if text.startswith("AUTO-"):
-        try:
-            cid = int(text.replace("AUTO-", "").strip())
-        except Exception:
-            bot.reply_to(message, "کد نامعتبر")
-            return
-        if not (is_admin(cid, uid) or is_owner(uid)):
-            bot.reply_to(message, "دسترسی نداری")
-            return
-        user_steps[uid] = {"step": "auto_key", "chat_id": cid}
-        bot.reply_to(message, "کلمه کلیدی:")
-        return
-
-    if step == "auto_key":
-        user_steps[uid] = {"step": "auto_ans", "chat_id": st["chat_id"], "keyword": text}
-        bot.reply_to(message, "متن جواب:")
-        return
-
-    if step == "auto_ans":
-        user_steps[uid] = {
-            "step": "auto_mode",
-            "chat_id": st["chat_id"],
-            "keyword": st["keyword"],
-            "answer": text
-        }
-        kb = InlineKeyboardMarkup(row_width=1)
-        kb.add(InlineKeyboardButton("فقط دقیقاً همان", callback_data="auto_exact"))
-        kb.add(InlineKeyboardButton("هر جا در متن", callback_data="auto_include"))
-        bot.reply_to(message, "حالت:", reply_markup=kb)
-        return
-
-    if step == "upload_photo" and is_owner(uid):
-        if message.photo:
-            fid = message.photo[-1].file_id
-            con = db()
-            c = con.cursor()
-            c.execute("INSERT OR IGNORE INTO welcome_photos(file_id) VALUES(?)", (fid,))
-            con.commit()
-            c.execute("SELECT COUNT(*) FROM welcome_photos")
-            n = c.fetchone()[0]
-            con.close()
-            bot.reply_to(message, "✅ ذخیره | کل {}\n/done".format(n))
-        else:
-            bot.reply_to(message, "فقط عکس یا /done")
-        return
-
-    if step in ("bc_groups", "bc_users") and is_owner(uid):
-        con = db()
-        c = con.cursor()
-        if step == "bc_groups":
-            c.execute("SELECT chat_id FROM groups")
-        else:
-            c.execute("SELECT user_id FROM started_users")
-        targets = [r[0] for r in c.fetchall()]
-        con.close()
-        ok = 0
-        for t in targets:
-            try:
-                bot.copy_message(t, message.chat.id, message.message_id)
-                ok += 1
-                time.sleep(0.05)
-            except Exception:
-                pass
-        user_steps.pop(uid, None)
-        bot.reply_to(message, "✅ به {} نفر/گپ ارسال شد".format(ok))
-        return
-
-    if is_owner(uid) and not step:
-        bot.reply_to(message, "منو:", reply_markup=owner_kb())
-
-print("Bot started")
-bot.infinity_polling(none_stop=True, timeout=60, long_polling_timeout=50)
+if __name__ == "__main__":
+    bot.infinity_polling(skip_pending=True)
+    
