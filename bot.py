@@ -31,7 +31,7 @@ from telegram.ext import (
 #   where it has the required admin permissions.
 # ============================================================
 
-TOKEN = os.getenv("BOT_TOKEN", "").strip()
+TOKEN = os.getenv("8699716698:AAHWtpFpC_GRmCTRgU0hvVVyebJaMtG1CqE", "").strip()
 DB_FILE = "bot.db"
 
 if not TOKEN:
