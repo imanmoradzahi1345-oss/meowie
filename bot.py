@@ -4,7 +4,6 @@ import json
 import os
 import time
 import random
-import re
 
 TOKEN = "8617545814:AAFAofo_nV39gFT1-IgfXu-esnGgXol62r4"
 MAIN_ADMIN_ID = 7530457395
@@ -32,6 +31,9 @@ def save_db(data):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 db = load_db()
+
+# --- وضعیت کاربران (States) ---
+user_states = {}
 
 # --- ساختار داده‌های هر گروه ---
 def get_group_data(chat_id):
@@ -77,7 +79,7 @@ def format_welcome_text(text, user, chat_title):
     formatted = formatted.replace("{mention}", mention)
     return formatted
 
-# --- ثبت اعضا و گروه‌ها برای تبلیغات ---
+# --- ثبت اعضا و گروه‌ها ---
 def register_chat(message):
     if message.chat.type == 'private':
         if message.from_user.id not in db["bot_users"]:
@@ -88,7 +90,7 @@ def register_chat(message):
             db["bot_groups"].append(message.chat.id)
             save_db(db)
 
-# --- سیستم قفل ضد اسپم (در حافظه) ---
+# --- سیستم قفل ضد اسپم ---
 user_msg_tracker = {}
 
 def check_antispam(message):
@@ -111,13 +113,13 @@ def check_antispam(message):
         try:
             bot.delete_message(chat_id, message.message_id)
             bot.restrict_chat_member(chat_id, user_id, until_date=int(now + 60))
-            bot.send_message(chat_id, f"کاربر <a href='tg://user?id={user_id}'>{message.from_user.first_name}</a> به دلیل اسپم ۱ دقیقه سکوت شد.")
+            bot.send_message(chat_id, f"🚫 کاربر <a href='tg://user?id={user_id}'>{message.from_user.first_name}</a> به دلیل اسپم ۱ دقیقه سکوت شد.")
         except Exception:
             pass
         return True
     return False
 
-# --- خوشامدگویی به اعضای جدید ---
+# --- سیستم خوشامدگویی (ارسال عکس با کپشن بدون پیام جدا) ---
 @bot.message_handler(content_types=['new_chat_members'])
 def welcome_new_member(message):
     register_chat(message)
@@ -126,20 +128,18 @@ def welcome_new_member(message):
         return
 
     for user in message.new_chat_members:
-        text = format_welcome_text(gdata.get("welcome_text"), user, message.chat.title)
+        caption_text = format_welcome_text(gdata.get("welcome_text"), user, message.chat.title)
         photos = db.get("photos", [])
         if photos:
             photo_id = random.choice(photos)
             try:
-                bot.send_photo(message.chat.id, photo_id, caption=text)
+                bot.send_photo(message.chat.id, photo_id, caption=caption_text)
             except Exception:
-                bot.send_message(message.chat.id, text)
+                bot.send_message(message.chat.id, caption_text)
         else:
-            bot.send_message(message.chat.id, text)
+            bot.send_message(message.chat.id, caption_text)
 
-# --- دستورات ادمین اصلی در پیوی ---
-admin_states = {}
-
+# --- پنل پیوی ادمین اصلی ---
 @bot.message_handler(commands=['start'], chat_types=['private'])
 def start_pv(message):
     register_chat(message)
@@ -147,29 +147,29 @@ def start_pv(message):
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
         markup.add("📸 آپلود عکس خوشامدگویی", "📢 ارسال تبلیغات")
         markup.add("🗑 پاکسازی عکس‌های خوشامد")
-        bot.send_message(message.chat.id, "👑 به پنل ادمین اصلی ربات خوش آمدید.", reply_markup=markup)
+        bot.send_message(message.chat.id, "👑 **به پنل ادمین اصلی ربات خوش آمدید.**", reply_markup=markup)
     else:
-        bot.send_message(message.chat.id, "سلام! ربات را به گروه خود اضافه کنید و ادمین سازید تا فعال شود.")
+        bot.send_message(message.chat.id, "سلام! ربات را به گروه خود اضافه کرده و ادمین کنید تا فعال شود.")
 
 @bot.message_handler(func=lambda m: m.chat.type == 'private' and m.from_user.id == MAIN_ADMIN_ID, content_types=['text', 'photo'])
 def handle_pv_admin(message):
     user_id = message.from_user.id
-    state = admin_states.get(user_id)
+    state = user_states.get(user_id)
     
     if message.text == "📸 آپلود عکس خوشامدگویی":
-        admin_states[user_id] = "waiting_photo"
-        bot.send_message(user_id, "لطفاً عکس مورد نظر را ارسال کنید (حداکثر ۱۰۰ عکس ذخیره می‌شود):")
+        user_states[user_id] = "waiting_photo"
+        bot.send_message(user_id, "لطفاً عکس خوشامدگویی را ارسال کنید (حداکثر ۱۰0 عکس قابل ذخیره است):")
         return
         
     if message.text == "🗑 پاکسازی عکس‌های خوشامد":
         db["photos"] = []
         save_db(db)
-        bot.send_message(user_id, "تمام عکس‌های خوشامدگویی حذف شدند.")
+        bot.send_message(user_id, "تمام عکس‌های ذخیره‌شده خوشامدگویی پاکسازی شدند.")
         return
 
     if message.text == "📢 ارسال تبلیغات":
-        admin_states[user_id] = "waiting_broadcast"
-        bot.send_message(user_id, "پیام یا تبلیغ خود را ارسال کنید تا به تمام گروه‌ها و پیوی‌ها فرستاده شود:")
+        user_states[user_id] = "waiting_broadcast"
+        bot.send_message(user_id, "پیام یا تبلیغ خود را بفرستید تا به تمام کاربران و گروه‌ها فرستاده شود:")
         return
 
     if state == "waiting_photo" and message.photo:
@@ -178,30 +178,27 @@ def handle_pv_admin(message):
             db["photos"].pop(0)
         db["photos"].append(photo_id)
         save_db(db)
-        admin_states[user_id] = None
-        bot.send_message(user_id, f"✅ عکس با موفقیت ذخیره شد. تعداد عکس‌های فعلی: {len(db['photos'])}")
+        user_states[user_id] = None
+        bot.send_message(user_id, f"✅ عکس خوشامد با موفقیت ذخیره شد. تعداد کل عکس‌ها: {len(db['photos'])}")
         return
 
     if state == "waiting_broadcast" and message.text:
-        admin_states[user_id] = None
-        sent_users = 0
-        sent_groups = 0
+        user_states[user_id] = None
+        sent_users, sent_groups = 0, 0
         for u in db.get("bot_users", []):
             try:
                 bot.send_message(u, message.text)
                 sent_users += 1
-            except Exception:
-                pass
+            except Exception: pass
         for g in db.get("bot_groups", []):
             try:
                 bot.send_message(g, message.text)
                 sent_groups += 1
-            except Exception:
-                pass
-        bot.send_message(user_id, f"✅ تبلیغات ارسال شد.\nپیوی: {sent_users}\nگروه‌ها: {sent_groups}")
+            except Exception: pass
+        bot.send_message(user_id, f"✅ تبلیغات ارسال شد.\nپیوی‌ها: {sent_users}\nگروه‌ها: {sent_groups}")
         return
 
-# --- سیستم پاسخ خودکار و کد تنظیمات ---
+# --- دریافت کد تنظیمات پاسخ خودکار در پیوی ---
 @bot.message_handler(func=lambda m: m.chat.type == 'private' and m.text and m.text.startswith("SETCFG_"))
 def handle_config_code(message):
     try:
@@ -215,14 +212,14 @@ def handle_config_code(message):
             gdata = get_group_data(chat_id)
             gdata["autoreplies"][word] = reply
             save_db(db)
-            bot.send_message(message.chat.id, f"✅ پاسخ خودکار برای کلمه «{word}» با موفقیت در گروه ثبت شد.")
+            bot.send_message(message.chat.id, f"✅ پاسخ خودکار برای کلمه «{word}» در گروه تنظیم شد.")
         else:
             bot.send_message(message.chat.id, "❌ شما دسترسی ادمین در این گروه را ندارید.")
     except Exception:
         bot.send_message(message.chat.id, "❌ کد تنظیمات نامعتبر است.")
 
-# --- مدیریت دستورات گروه ---
-@bot.message_handler(func=lambda m: m.chat.type in ['group', 'supergroup'])
+# --- مدیریت پنل و دستورات داخل گروه ---
+@bot.message_handler(func=lambda m: m.chat.type in ['group', 'supergroup'], content_types=['text'])
 def handle_group_messages(message):
     register_chat(message)
     chat_id = message.chat.id
@@ -230,55 +227,67 @@ def handle_group_messages(message):
     text = message.text or ""
     gdata = get_group_data(chat_id)
 
-    # سیستم ضد اسپم
+    # بررسی قفل ضد اسپم
     if check_antispam(message):
         return
 
-    # ثبت آمار کل
+    # ثبت آمار تعداد پیام‌ها
     user_str = str(user_id)
     gdata["stats"][user_str] = gdata["stats"].get(user_str, 0) + 1
     save_db(db)
 
-    # 1. تنظیم ادمین ربات
+    # دریافت متن جدید خوشامدگویی در گروه
+    if user_states.get(f"{chat_id}:{user_id}") == "waiting_welcome_text":
+        gdata["welcome_text"] = text
+        save_db(db)
+        user_states[f"{chat_id}:{user_id}"] = None
+        bot.reply_to(message, "✅ متن خوشامدگویی گروه به‌روزرسانی شد.")
+        return
+
+    # دریافت پاسخ خودکار مستقیم در گروه (کلمه::پاسخ)
+    if user_states.get(f"{chat_id}:{user_id}") == "waiting_autoreply":
+        if "::" in text:
+            word, reply = text.split("::", 1)
+            gdata["autoreplies"][word.strip()] = reply.strip()
+            save_db(db)
+            user_states[f"{chat_id}:{user_id}"] = None
+            bot.reply_to(message, f"✅ پاسخ خودکار برای «{word.strip()}» ثبت گردید.")
+        else:
+            bot.reply_to(message, "❌ فرمت نادرست است. مثال: `سلام::سلام عزیزم`")
+        return
+
+    # 1. ارتقا و تنظیم ادمین ربات
     if text == "تنظیم ادمین" and message.reply_to_message:
         if is_bot_admin(chat_id, user_id):
             target_id = message.reply_to_message.from_user.id
             if target_id not in gdata["admins"]:
                 gdata["admins"].append(target_id)
                 save_db(db)
-                bot.reply_to(message, f"کاربر <a href='tg://user?id={target_id}'>{message.reply_to_message.from_user.first_name}</a> به‌عنوان ادمین ربات ثبت شد.")
+                bot.reply_to(message, f"👤 کاربر <a href='tg://user?id={target_id}'>{message.reply_to_message.from_user.first_name}</a> به‌عنوانی ادمین ربات ثبت شد.")
             else:
-                bot.reply_to(message, "این کاربر از قبل ادمین ربات می‌باشد.")
+                bot.reply_to(message, "این کاربر از قبل ادمین ربات است.")
         return
 
-    # 2. پنل تنظیمات گروه
+    # 2. باز کردن پنل مدیریت گروه
     if text == "پنل":
         if is_bot_admin(chat_id, user_id):
-            markup = types.InlineKeyboardMarkup(row_width=2)
-            w_status = "✅ فعال" if gdata.get("welcome_enabled", True) else "❌ غیرفعال"
-            s_status = "✅ فعال" if gdata.get("antispam", False) else "❌ غیرفعال"
-            
-            btn_welcome = types.InlineKeyboardButton(f"خوشامدگویی: {w_status}", callback_data=f"toggle_w_{chat_id}")
-            btn_antispam = types.InlineKeyboardButton(f"ضد اسپم: {s_status}", callback_data=f"toggle_s_{chat_id}")
-            btn_auto = types.InlineKeyboardButton("➕ افزودن پاسخ خودکار", callback_data=f"add_auto_{chat_id}")
-            
-            markup.add(btn_welcome, btn_antispam)
-            markup.add(btn_auto)
-            bot.send_message(chat_id, "⚙️ **پنل مدیریت تنظیمات گروه**", reply_markup=markup)
+            send_group_panel_msg(chat_id)
         return
 
-    # 3. آمار کل
+    # 3. مشاهده آمار کل
     if text == "آمار کل":
         stats = gdata.get("stats", {})
         sorted_stats = sorted(stats.items(), key=lambda x: x[1], reverse=True)[:10]
-        msg = "📊 **آمار فعال‌ترین کاربران گروه:**\n\n"
+        msg = "📊 **آمار ۱۰ کاربر برتر گروه:**\n\n"
         for idx, (u_id, count) in enumerate(sorted_stats, 1):
             try:
                 m = bot.get_chat_member(chat_id, int(u_id))
                 name = m.user.first_name
             except Exception:
                 name = f"کاربر {u_id}"
-            msg += f"{idx}. {name} — {count} پیام\n"
+            title = gdata["titles"].get(str(u_id), "")
+            title_str = f" [{title}]" if title else ""
+            msg += f"{idx}. {name}{title_str} — {count} پیام\n"
         bot.reply_to(message, msg)
         return
 
@@ -289,17 +298,16 @@ def handle_group_messages(message):
             target_id = message.reply_to_message.from_user.id
             gdata["titles"][str(target_id)] = title
             save_db(db)
-            bot.reply_to(message, f"لقب «{title}» برای کاربر ثبت شد.")
+            bot.reply_to(message, f"🏷 لقب «{title}» برای کاربر ثبت شد.")
         return
 
-    # 5. حذف پیام (پاکسازی)
+    # 5. حذف پیام (تکی و تعدادی)
     if text == "حذف" and message.reply_to_message:
         if is_bot_admin(chat_id, user_id):
             try:
                 bot.delete_message(chat_id, message.reply_to_message.message_id)
                 bot.delete_message(chat_id, message.message_id)
-            except Exception:
-                pass
+            except Exception: pass
         return
 
     if text.startswith("حذف "):
@@ -309,10 +317,8 @@ def handle_group_messages(message):
                 count = min(int(parts[1]), 100)
                 current_id = message.message_id
                 for i in range(count + 1):
-                    try:
-                        bot.delete_message(chat_id, current_id - i)
-                    except Exception:
-                        pass
+                    try: bot.delete_message(chat_id, current_id - i)
+                    except Exception: pass
         return
 
     # 6. سکوت و حذف سکوت
@@ -322,22 +328,21 @@ def handle_group_messages(message):
             if target_id:
                 parts = text.split()
                 duration = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 300
-                until = int(time.time() + duration)
-                bot.restrict_chat_member(chat_id, target_id, until_date=until)
+                bot.restrict_chat_member(chat_id, target_id, until_date=int(time.time() + duration))
                 if target_id not in gdata["mutes"]:
                     gdata["mutes"].append(target_id)
                     save_db(db)
-                bot.reply_to(message, f"کاربر به مدت {duration} ثانیه سکوت شد.")
+                bot.reply_to(message, f"🔇 کاربر سکوت شد ({duration} ثانیه).")
         return
 
     if text == "حذف سکوت" and message.reply_to_message:
         if is_bot_admin(chat_id, user_id):
             target_id = message.reply_to_message.from_user.id
-            bot.restrict_chat_member(chat_id, target_id, can_send_messages=True, can_send_media_messages=True, can_send_other_messages=True, can_add_web_page_previews=True)
+            bot.restrict_chat_member(chat_id, target_id, can_send_messages=True, can_send_media_messages=True, can_send_other_messages=True)
             if target_id in gdata["mutes"]:
                 gdata["mutes"].remove(target_id)
                 save_db(db)
-            bot.reply_to(message, "سکوت کاربر برداشته شد.")
+            bot.reply_to(message, "🔊 سکوت کاربر برداشته شد.")
         return
 
     # 7. بن و حذف بن
@@ -348,7 +353,7 @@ def handle_group_messages(message):
             if target_id not in gdata["bans"]:
                 gdata["bans"].append(target_id)
                 save_db(db)
-            bot.reply_to(message, "کاربر از گروه بن شد.")
+            bot.reply_to(message, "🚫 کاربر از گروه بن شد.")
         return
 
     if text == "حذف بن" and message.reply_to_message:
@@ -358,7 +363,7 @@ def handle_group_messages(message):
             if target_id in gdata["bans"]:
                 gdata["bans"].remove(target_id)
                 save_db(db)
-            bot.reply_to(message, "بن کاربر برداشته شد.")
+            bot.reply_to(message, "✅ بن کاربر برداشته شد.")
         return
 
     # 8. اخطار و حذف اخطار
@@ -372,9 +377,9 @@ def handle_group_messages(message):
                 bot.ban_chat_member(chat_id, int(target_id))
                 gdata["warns"][target_id] = 0
                 save_db(db)
-                bot.reply_to(message, "کاربر به دلیل دریافت ۳ اخطار بن شد.")
+                bot.reply_to(message, "🚫 کاربر به دلیل دریافت ۳ اخطار بن شد.")
             else:
-                bot.reply_to(message, f"اخطار به کاربر ثبت شد. تعداد اخطارها: {warn_count}/3")
+                bot.reply_to(message, f"⚠️ اخطار ثبت شد ({warn_count}/3).")
         return
 
     if text == "حذف اخطار" and message.reply_to_message:
@@ -383,46 +388,69 @@ def handle_group_messages(message):
             if target_id in gdata["warns"] and gdata["warns"][target_id] > 0:
                 gdata["warns"][target_id] -= 1
                 save_db(db)
-                bot.reply_to(message, f"یک اخطار کسر شد. اخطارهای فعلی: {gdata['warns'][target_id]}")
+                bot.reply_to(message, f"✅ یک اخطار کسر شد ({gdata['warns'][target_id]}/3).")
         return
 
-    # 9. پاکسازی‌های کلی
+    # 9. پاکسازی لیست‌ها
     if text == "پاکسازی لیست سکوت" and is_bot_admin(chat_id, user_id):
         for u in gdata.get("mutes", []):
-            try:
-                bot.restrict_chat_member(chat_id, u, can_send_messages=True, can_send_media_messages=True, can_send_other_messages=True)
-            except Exception:
-                pass
+            try: bot.restrict_chat_member(chat_id, u, can_send_messages=True, can_send_media_messages=True, can_send_other_messages=True)
+            except Exception: pass
         gdata["mutes"] = []
         save_db(db)
-        bot.reply_to(message, "لیست سکوت پاکسازی شد.")
+        bot.reply_to(message, "🧹 لیست سکوت پاکسازی شد.")
         return
 
     if text == "پاکسازی لیست بن" and is_bot_admin(chat_id, user_id):
         for u in gdata.get("bans", []):
-            try:
-                bot.unban_chat_member(chat_id, u)
-            except Exception:
-                pass
+            try: bot.unban_chat_member(chat_id, u)
+            except Exception: pass
         gdata["bans"] = []
         save_db(db)
-        bot.reply_to(message, "لیست اعضای بن شده پاکسازی شد.")
+        bot.reply_to(message, "🧹 لیست بن پاکسازی شد.")
         return
 
     if text == "پاکسازی لیست اخطار" and is_bot_admin(chat_id, user_id):
         gdata["warns"] = {}
         save_db(db)
-        bot.reply_to(message, "تمام اخطارها پاکسازی شدند.")
+        bot.reply_to(message, "🧹 تمام اخطارها پاکسازی شدند.")
         return
 
-    # 10. بررسی پاسخ‌های خودکار
+    # 10. سیستم پاسخ خودکار
     autoreplies = gdata.get("autoreplies", {})
     for trigger, resp in autoreplies.items():
         if trigger in text:
             bot.reply_to(message, resp)
             break
 
-# --- مدیریت کلیک روی دکمه‌های شیشه‌ای (Callback) ---
+# --- ارسال پنل شیشه‌ای تنظیمات در گروه ---
+def send_group_panel_msg(chat_id):
+    gdata = get_group_data(chat_id)
+    w_status = "✅ فعال" if gdata.get("welcome_enabled", True) else "❌ غیرفعال"
+    s_status = "✅ فعال" if gdata.get("antispam", False) else "❌ غیرفعال"
+
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    btn_welcome = types.InlineKeyboardButton(f"خوشامد: {w_status}", callback_data=f"toggle_w_{chat_id}")
+    btn_antispam = types.InlineKeyboardButton(f"ضد اسپم: {s_status}", callback_data=f"toggle_s_{chat_id}")
+    btn_change_w = types.InlineKeyboardButton("📝 تنظیم متن خوشامد", callback_data=f"set_w_text_{chat_id}")
+    btn_add_auto = types.InlineKeyboardButton("➕ افزودن پاسخ خودکار", callback_data=f"add_auto_{chat_id}")
+    btn_code_auto = types.InlineKeyboardButton("🔑 کد تنظیمات پیوی", callback_data=f"code_auto_{chat_id}")
+
+    markup.add(btn_welcome, btn_antispam)
+    markup.add(btn_change_w)
+    markup.add(btn_add_auto, btn_code_auto)
+
+    msg_text = (
+        "⚙️ **پنل مدیریت گروه**\n\n"
+        "متغیرهای قابل استفاده در خوشامدگویی:\n"
+        "`{name}` اسم کاربر | `{username}` یوزرنیم\n"
+        "`{id}` آیدی عددی | `{group}` اسم گپ\n"
+        "`{mention}` تگ واقعی کاربر\n\n"
+        f"**متن خوشامد فعلی:**\n{gdata.get('welcome_text')}"
+    )
+    bot.send_message(chat_id, msg_text, reply_markup=markup)
+
+# --- دکمه‌های شیشه‌ای پنل ---
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callbacks(call):
     chat_id = call.message.chat.id
@@ -430,7 +458,7 @@ def handle_callbacks(call):
     data = call.data
 
     if not is_bot_admin(chat_id, user_id):
-        bot.answer_callback_query(call.id, "شما دسترسی ادمین ندارید.", show_alert=True)
+        bot.answer_callback_query(call.id, "❌ شما دسترسی ادمین ندارید.", show_alert=True)
         return
 
     gdata = get_group_data(chat_id)
@@ -438,35 +466,40 @@ def handle_callbacks(call):
     if data.startswith("toggle_w_"):
         gdata["welcome_enabled"] = not gdata.get("welcome_enabled", True)
         save_db(db)
-        bot.answer_callback_query(call.id, "تنظیمات خوشامد تغییر کرد.")
+        bot.answer_callback_query(call.id, "وضعیت خوشامد تغییر کرد.")
+
     elif data.startswith("toggle_s_"):
         gdata["antispam"] = not gdata.get("antispam", False)
         save_db(db)
-        bot.answer_callback_query(call.id, "تنظیمات ضد اسپم تغییر کرد.")
-    elif data.startswith("add_auto_"):
-        code_data = json.dumps({"chat_id": chat_id, "word": "سلام", "reply": "سلام رفیق! خوش اومدی."})
-        msg = f"لطفاً کد زیر را کپی کرده و در پیوی ربات ارسال کنید تا پاسخ خودکار ثبت شود:\n\n<code>SETCFG_{code_data}</code>"
-        bot.send_message(user_id, msg)
-        bot.answer_callback_query(call.id, "کد به پیوی شما ارسال شد.")
+        bot.answer_callback_query(call.id, "وضعیت ضد اسپم تغییر کرد.")
+
+    elif data.startswith("set_w_text_"):
+        user_states[f"{chat_id}:{user_id}"] = "waiting_welcome_text"
+        bot.send_message(chat_id, "لطفاً متن جدید خوشامدگویی را بفرستید (از متغیرهای {mention}، {group}، {name}، {username} و {id} استفاده کنید):")
+        bot.answer_callback_query(call.id, "منتظر ارسال متن...")
         return
 
-    # بروزرسانی پنل
+    elif data.startswith("add_auto_"):
+        user_states[f"{chat_id}:{user_id}"] = "waiting_autoreply"
+        bot.send_message(chat_id, "لطفاً کلمه و پاسخ خودکار را به شکل زیر بفرستید:\n\n`کلمه::پاسخ`\n\nمثال:\n`سلام::سلام عزیزم خوش اومدی`")
+        bot.answer_callback_query(call.id, "منتظر ارسال پاسخ خودکار...")
+        return
+
+    elif data.startswith("code_auto_"):
+        code_data = json.dumps({"chat_id": chat_id, "word": "سلام", "reply": "سلام رفیق! خوش اومدی."})
+        msg = f"لطفاً کد زیر را کپی کرده و در پیوی ربات ارسال کنید تا پاسخ خودکار ثبت شود:\n\n<code>SETCFG_{code_data}</code>"
+        try:
+            bot.send_message(user_id, msg)
+            bot.answer_callback_query(call.id, "کد به پیوی شما فرستاده شد.", show_alert=True)
+        except Exception:
+            bot.answer_callback_query(call.id, "ابتدا ربات را در پیوی استارت کنید.", show_alert=True)
+        return
+
+    # بروزرسانی UI دکمه‌های شیشه‌ای
     w_status = "✅ فعال" if gdata.get("welcome_enabled", True) else "❌ غیرفعال"
     s_status = "✅ فعال" if gdata.get("antispam", False) else "❌ غیرفعال"
-    
+
     markup = types.InlineKeyboardMarkup(row_width=2)
-    btn_welcome = types.InlineKeyboardButton(f"خوشامدگویی: {w_status}", callback_data=f"toggle_w_{chat_id}")
+    btn_welcome = types.InlineKeyboardButton(f"خوشامد: {w_status}", callback_data=f"toggle_w_{chat_id}")
     btn_antispam = types.InlineKeyboardButton(f"ضد اسپم: {s_status}", callback_data=f"toggle_s_{chat_id}")
-    btn_auto = types.InlineKeyboardButton("➕ افزودن پاسخ خودکار", callback_data=f"add_auto_{chat_id}")
-    
-    markup.add(btn_welcome, btn_antispam)
-    markup.add(btn_auto)
-
-    try:
-        bot.edit_message_reply_markup(chat_id, call.message.message_id, reply_markup=markup)
-    except Exception:
-        pass
-
-if __name__ == "__main__":
-    bot.infinity_polling(skip_pending=True)
-    
+    btn_change_w = types.InlineKeyboardButton("📝 تنظیم متن خوشامد",
