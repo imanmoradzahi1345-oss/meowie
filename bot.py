@@ -20,7 +20,7 @@ import threading
 from collections import defaultdict, deque
 
 # ===================== تنظیمات =====================
-BOT_TOKEN = "8597049833:AAFnEjGLcOz09Duy6MIvOoMD9TA1-fiRhPE"
+BOT_TOKEN = "8617545814:AAFAofo_nV39gFT1-IgfXu-esnGgXol62r4"
 MAIN_OWNER_ID = 7530457395
 
 DEFAULT_WELCOME = "سلام {mention} عزیز به گپ {group}\nخوش اومدی"
