@@ -1,1590 +1,630 @@
-# -*- coding: utf-8 -*-
-
+import os
+import io
 import sqlite3
-import random
-import time
-import html
-import threading
-import telebot
-from telebot import types
+import asyncio
+from datetime import datetime, timedelta, timezone
 
-BOT_TOKEN = "8699716698:AAHWtpFpC_GRmCTRgU0hvVVyebJaMtG1CqE"
-ADMIN_ID = 7530457395
-DB_NAME = "kian_bot.db"
-
-bot = telebot.TeleBot(
-    BOT_TOKEN,
-    parse_mode="HTML",
-    threaded=True
+from PIL import Image, ImageDraw, ImageFont, ImageOps
+from telegram import (
+    Update, InlineKeyboardButton, InlineKeyboardMarkup,
+    ChatPermissions
+)
+from telegram.constants import ChatMemberStatus
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler, CallbackQueryHandler,
+    ContextTypes, ChatMemberHandler, filters
 )
 
-db = sqlite3.connect(
-    DB_NAME,
-    check_same_thread=False
-)
+# ============================================================
+# Telegram Group Management Bot
+# Python 3.10+
+# Install:
+#   pip install python-telegram-bot==22.2 Pillow
+#
+# Set BOT_TOKEN as an environment variable, then:
+#   python bot.py
+#
+# IMPORTANT:
+# - The bot must be an ADMIN in each group it manages.
+# - Group admins configure their own group from the bot's private chat.
+# - Telegram's privacy/API rules mean the bot can only act on chats
+#   where it has the required admin permissions.
+# ============================================================
+
+TOKEN = os.getenv("BOT_TOKEN", "").strip()
+DB_FILE = "bot.db"
+
+if not TOKEN:
+    raise RuntimeError("BOT_TOKEN is not set.")
+
+# ---------- Database ----------
+
+db = sqlite3.connect(DB_FILE, check_same_thread=False)
 db.row_factory = sqlite3.Row
-lock = threading.Lock()
+db.execute("""
+CREATE TABLE IF NOT EXISTS settings (
+    chat_id INTEGER PRIMARY KEY,
+    welcome_text TEXT NOT NULL DEFAULT 'خوش آمدید {name} 🌷',
+    welcome_caption TEXT NOT NULL DEFAULT 'سلام {name} عزیز! به گروه خوش آمدی ❤️',
+    auto_text TEXT NOT NULL DEFAULT '',
+    auto_enabled INTEGER NOT NULL DEFAULT 0,
+    locked INTEGER NOT NULL DEFAULT 0,
+    mute_seconds INTEGER NOT NULL DEFAULT 0
+)
+""")
+db.execute("""
+CREATE TABLE IF NOT EXISTS stats (
+    chat_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    username TEXT,
+    messages INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (chat_id, user_id)
+)
+""")
+db.commit()
 
-admin_state = {}
+def ensure_settings(chat_id: int):
+    db.execute("INSERT OR IGNORE INTO settings(chat_id) VALUES (?)", (chat_id,))
+    db.commit()
 
+def get_settings(chat_id: int):
+    ensure_settings(chat_id)
+    return db.execute("SELECT * FROM settings WHERE chat_id=?", (chat_id,)).fetchone()
 
-# =========================
-# DATABASE
-# =========================
+def set_setting(chat_id: int, field: str, value):
+    allowed = {
+        "welcome_text", "welcome_caption", "auto_text",
+        "auto_enabled", "locked", "mute_seconds"
+    }
+    if field not in allowed:
+        raise ValueError("invalid setting")
+    ensure_settings(chat_id)
+    db.execute(f"UPDATE settings SET {field}=? WHERE chat_id=?", (value, chat_id))
+    db.commit()
 
-def init_db():
+# ---------- Helpers ----------
 
-    with lock:
-        c = db.cursor()
+def display_name(user):
+    return (user.full_name or user.first_name or "کاربر").strip()
 
-        c.execute("""
-        CREATE TABLE IF NOT EXISTS triggers(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            keyword TEXT UNIQUE
-        )
-        """)
+def mention_html(user):
+    # Telegram HTML mention without needing a username.
+    from html import escape
+    return f'<a href="tg://user?id={user.id}">{escape(display_name(user))}</a>'
 
-        c.execute("""
-        CREATE TABLE IF NOT EXISTS photos(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            trigger_id INTEGER,
-            file_id TEXT,
-            used INTEGER DEFAULT 0
-        )
-        """)
+def render(text: str, user) -> str:
+    from html import escape
+    return (text or "").replace("{name}", escape(display_name(user))) \
+                       .replace("{mention}", mention_html(user)) \
+                       .replace("{username}", escape(user.username or ""))
 
-        c.execute("""
-        CREATE TABLE IF NOT EXISTS users(
-            id INTEGER PRIMARY KEY,
-            username TEXT,
-            first_name TEXT,
-            last_name TEXT
-        )
-        """)
-
-        c.execute("""
-        CREATE TABLE IF NOT EXISTS groups_table(
-            id INTEGER PRIMARY KEY,
-            title TEXT
-        )
-        """)
-
-        c.execute("""
-        CREATE TABLE IF NOT EXISTS settings(
-            key TEXT PRIMARY KEY,
-            value TEXT
-        )
-        """)
-
-        db.commit()
-
-
-init_db()
-
-
-# =========================
-# HELPERS
-# =========================
-
-def is_admin(uid):
+async def is_group_admin(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int) -> bool:
     try:
-        return int(uid) == ADMIN_ID
-    except:
+        member = await context.bot.get_chat_member(chat_id, user_id)
+        return member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER)
+    except Exception:
         return False
 
-
-def clean(text):
-    return (text or "").strip().lower()
-
-
-def esc(text):
-    return html.escape(str(text or ""))
-
-
-def tag(user):
-    return (
-        f'<a href="tg://user?id={user.id}">'
-        f'{esc(user.first_name or "کاربر")}'
-        f'</a>'
-    )
-
-
-def save_user(user):
-
-    if not user:
-        return
-
-    with lock:
-        c = db.cursor()
-
-        c.execute("""
-        INSERT INTO users
-        (id,username,first_name,last_name)
-        VALUES(?,?,?,?)
-        ON CONFLICT(id) DO UPDATE SET
-        username=excluded.username,
-        first_name=excluded.first_name,
-        last_name=excluded.last_name
-        """, (
-            user.id,
-            user.username or "",
-            user.first_name or "",
-            user.last_name or ""
-        ))
-
-        db.commit()
-
-
-def save_group(chat):
-
-    if chat.type not in ("group", "supergroup"):
-        return
-
-    with lock:
-        c = db.cursor()
-
-        c.execute("""
-        INSERT INTO groups_table(id,title)
-        VALUES(?,?)
-        ON CONFLICT(id) DO UPDATE SET
-        title=excluded.title
-        """, (
-            chat.id,
-            chat.title or ""
-        ))
-
-        db.commit()
-
-
-def set_setting(key, value):
-
-    with lock:
-        c = db.cursor()
-
-        c.execute("""
-        INSERT INTO settings(key,value)
-        VALUES(?,?)
-        ON CONFLICT(key) DO UPDATE SET
-        value=excluded.value
-        """, (key, str(value)))
-
-        db.commit()
-
-
-def get_setting(key, default=""):
-
-    with lock:
-        c = db.cursor()
-
-        c.execute(
-            "SELECT value FROM settings WHERE key=?",
-            (key,)
-        )
-
-        row = c.fetchone()
-
-    return row["value"] if row else default
-
-
-# =========================
-# AUTO RESPONSES
-# =========================
-
-def get_trigger(keyword):
-
-    with lock:
-        c = db.cursor()
-
-        c.execute(
-            "SELECT * FROM triggers WHERE keyword=?",
-            (clean(keyword),)
-        )
-
-        return c.fetchone()
-
-
-def create_trigger(keyword):
-
-    keyword = clean(keyword)
-
-    if not keyword:
-        return False
-
-    with lock:
-        c = db.cursor()
-
-        c.execute(
-            "INSERT OR IGNORE INTO triggers(keyword) VALUES(?)",
-            (keyword,)
-        )
-
-        db.commit()
-
-    return True
-
-
-def add_photo(keyword, file_id):
-
-    create_trigger(keyword)
-
-    trigger = get_trigger(keyword)
-
-    if not trigger:
-        return False
-
-    with lock:
-        c = db.cursor()
-
-        c.execute("""
-        INSERT INTO photos(trigger_id,file_id,used)
-        VALUES(?,?,0)
-        """, (
-            trigger["id"],
-            file_id
-        ))
-
-        db.commit()
-
-    return True
-
-
-def get_random_photo(keyword):
-
-    trigger = get_trigger(keyword)
-
-    if not trigger:
-        return None
-
-    tid = trigger["id"]
-
-    with lock:
-        c = db.cursor()
-
-        c.execute("""
-        SELECT * FROM photos
-        WHERE trigger_id=? AND used=0
-        ORDER BY RANDOM()
-        LIMIT 1
-        """, (tid,))
-
-        row = c.fetchone()
-
-        if not row:
-
-            c.execute("""
-            SELECT COUNT(*) FROM photos
-            WHERE trigger_id=?
-            """, (tid,))
-
-            if c.fetchone()[0] == 0:
-                return None
-
-            c.execute("""
-            UPDATE photos SET used=0
-            WHERE trigger_id=?
-            """, (tid,))
-
-            db.commit()
-
-            c.execute("""
-            SELECT * FROM photos
-            WHERE trigger_id=?
-            ORDER BY RANDOM()
-            LIMIT 1
-            """, (tid,))
-
-            row = c.fetchone()
-
-        if not row:
-            return None
-
-        c.execute(
-            "UPDATE photos SET used=1 WHERE id=?",
-            (row["id"],)
-        )
-
-        db.commit()
-
-        return row["file_id"]
-
-
-def photo_count(keyword):
-
-    trigger = get_trigger(keyword)
-
-    if not trigger:
-        return 0
-
-    with lock:
-        c = db.cursor()
-
-        c.execute("""
-        SELECT COUNT(*) FROM photos
-        WHERE trigger_id=?
-        """, (trigger["id"],))
-
-        return c.fetchone()[0]
-
-
-def delete_trigger(keyword):
-
-    trigger = get_trigger(keyword)
-
-    if not trigger:
-        return False
-
-    with lock:
-        c = db.cursor()
-
-        c.execute(
-            "DELETE FROM photos WHERE trigger_id=?",
-            (trigger["id"],)
-        )
-
-        c.execute(
-            "DELETE FROM triggers WHERE id=?",
-            (trigger["id"],)
-        )
-
-        db.commit()
-
-    return True
-    # =========================
-# INLINE PANELS
-# =========================
-
-def main_keyboard():
-
-    kb = types.InlineKeyboardMarkup(row_width=2)
-
-    kb.add(
-        types.InlineKeyboardButton(
-            "📸 پاسخ خودکار",
-            callback_data="auto"
-        ),
-        types.InlineKeyboardButton(
-            "👋 خوشامدگویی",
-            callback_data="welcome"
-        )
-    )
-
-    kb.add(
-        types.InlineKeyboardButton(
-            "📊 آمار",
-            callback_data="stats"
-        )
-    )
-
-    return kb
-
-
-def auto_keyboard():
-
-    kb = types.InlineKeyboardMarkup(row_width=2)
-
-    kb.add(
-        types.InlineKeyboardButton(
-            "➕ ساخت پاسخ",
-            callback_data="add_auto"
-        ),
-        types.InlineKeyboardButton(
-            "📋 لیست پاسخ‌ها",
-            callback_data="list_auto"
-        )
-    )
-
-    kb.add(
-        types.InlineKeyboardButton(
-            "🔢 تعداد عکس",
-            callback_data="count_auto"
-        ),
-        types.InlineKeyboardButton(
-            "🗑 حذف پاسخ",
-            callback_data="delete_auto"
-        )
-    )
-
-    kb.add(
-        types.InlineKeyboardButton(
-            "🔙 برگشت",
-            callback_data="home"
-        )
-    )
-
-    return kb
-
-
-def welcome_keyboard():
-
-    status = get_setting(
-        "welcome_enabled",
-        "0"
-    )
-
-    status_text = (
-        "🟢 فعال"
-        if status == "1"
-        else
-        "🔴 غیرفعال"
-    )
-
-    kb = types.InlineKeyboardMarkup(row_width=2)
-
-    kb.add(
-        types.InlineKeyboardButton(
-            status_text,
-            callback_data="welcome_toggle"
-        )
-    )
-
-    kb.add(
-        types.InlineKeyboardButton(
-            "🖼 عکس",
-            callback_data="welcome_photo"
-        ),
-        types.InlineKeyboardButton(
-            "📝 متن",
-            callback_data="welcome_text"
-        )
-    )
-
-    kb.add(
-        types.InlineKeyboardButton(
-            "👀 پیش‌نمایش",
-            callback_data="welcome_preview"
-        )
-    )
-
-    kb.add(
-        types.InlineKeyboardButton(
-            "🔙 برگشت",
-            callback_data="home"
-        )
-    )
-
-    return kb
-
-
-# =========================
-# START
-# =========================
-
-@bot.message_handler(commands=["start"])
-def start(message):
-
-    save_user(message.from_user)
-
-    if (
-        message.chat.type == "private"
-        and is_admin(message.from_user.id)
-    ):
-
-        bot.send_message(
-            message.chat.id,
-            """
-<b>👑 پنل مدیریت</b>
-
-همه تنظیمات ربات را از دکمه‌های زیر مدیریت کن.
-""",
-            reply_markup=main_keyboard()
-        )
-
-    elif message.chat.type == "private":
-
-        bot.send_message(
-            message.chat.id,
-            "سلام 👋"
-        )
-
-
-# =========================
-# CALLBACKS
-# =========================
-
-@bot.callback_query_handler(
-    func=lambda call: True
-)
-def callbacks(call):
-
-    if not is_admin(call.from_user.id):
-
-        bot.answer_callback_query(
-            call.id,
-            "❌ دسترسی ندارید.",
-            show_alert=True
-        )
-
-        return
-
-    data = call.data
-
+async def bot_is_admin(context, chat_id: int) -> bool:
     try:
-        bot.answer_callback_query(call.id)
-    except:
-        pass
+        me = await context.bot.get_me()
+        member = await context.bot.get_chat_member(chat_id, me.id)
+        return member.status == ChatMemberStatus.ADMINISTRATOR
+    except Exception:
+        return False
 
-    if data == "home":
+async def require_admin(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> bool:
+    uid = update.effective_user.id
+    if not await is_group_admin(context, chat_id, uid):
+        await update.effective_message.reply_text("⛔ فقط ادمین‌های همین گروه می‌توانند تنظیماتش را تغییر دهند.")
+        return False
+    if not await bot_is_admin(context, chat_id):
+        await update.effective_message.reply_text("⚠️ اول من را داخل گروه ادمین کنید تا بتوانم این قابلیت را اجرا کنم.")
+        return False
+    return True
 
-        bot.edit_message_text(
-            "<b>👑 پنل مدیریت</b>\n\nیک بخش را انتخاب کن:",
-            call.message.chat.id,
-            call.message.message_id,
-            reply_markup=main_keyboard()
+def admin_keyboard(chat_id: int):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🖼 متن خوشامدگویی", callback_data=f"cfg:welcome:{chat_id}")],
+        [InlineKeyboardButton("📝 کپشن عکس", callback_data=f"cfg:caption:{chat_id}")],
+        [InlineKeyboardButton("🤖 پیام خودکار", callback_data=f"cfg:auto:{chat_id}")],
+        [InlineKeyboardButton("🔒 قفل گروه", callback_data=f"cfg:lock:{chat_id}")],
+        [InlineKeyboardButton("🔓 باز کردن گروه", callback_data=f"cfg:unlock:{chat_id}")],
+        [InlineKeyboardButton("🔇 سکوت موقت", callback_data=f"cfg:mute:{chat_id}")],
+        [InlineKeyboardButton("🚫 بن", callback_data=f"cfg:ban:{chat_id}")],
+        [InlineKeyboardButton("♾️ بن دائمی", callback_data=f"cfg:banperm:{chat_id}")],
+        [InlineKeyboardButton("📊 آمار", callback_data=f"cfg:stats:{chat_id}")],
+        [InlineKeyboardButton("🏷 تگ کاربران", callback_data=f"cfg:tag:{chat_id}")],
+    ])
+
+async def send_welcome_photo(context, chat_id, user):
+    """Create a personalized welcome image with the user's avatar and LARGE name."""
+    settings = get_settings(chat_id)
+    text = render(settings["welcome_text"], user)
+    caption = render(settings["welcome_caption"], user)
+
+    # Download Telegram profile photo; fallback to a generated avatar.
+    avatar = None
+    try:
+        photos = await context.bot.get_user_profile_photos(user.id, limit=1)
+        if photos.total_count:
+            f = await context.bot.get_file(photos.photos[0][-1].file_id)
+            data = await f.download_as_bytearray()
+            avatar = Image.open(io.BytesIO(data)).convert("RGB")
+    except Exception:
+        avatar = None
+
+    W, H = 1200, 700
+    img = Image.new("RGB", (W, H), "white")
+    draw = ImageDraw.Draw(img)
+
+    # Fonts: DejaVu supports Latin/numbers. If a Persian font exists, use it.
+    font_paths = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ]
+    bold_path = next((p for p in font_paths if "Bold" in p), font_paths[0])
+    regular_path = font_paths[-1]
+
+    # Look for common Persian fonts.
+    for p in [
+        "/usr/share/fonts/truetype/noto/NotoNaskhArabic-Bold.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansArabic-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    ]:
+        if os.path.exists(p):
+            bold_path = p
+            break
+
+    for p in [
+        "/usr/share/fonts/truetype/noto/NotoNaskhArabic-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ]:
+        if os.path.exists(p):
+            regular_path = p
+            break
+
+    name_font = ImageFont.truetype(bold_path, 72)
+    title_font = ImageFont.truetype(bold_path, 48)
+    small_font = ImageFont.truetype(regular_path, 34)
+
+    # Avatar circle.
+    cx, cy, r = 220, 350, 145
+    if avatar:
+        avatar = ImageOps.fit(avatar, (r * 2, r * 2), method=Image.Resampling.LANCZOS)
+    else:
+        avatar = Image.new("RGB", (r * 2, r * 2), "gray")
+        ad = ImageDraw.Draw(avatar)
+        initials = "".join(x[0] for x in display_name(user).split()[:2]).upper() or "?"
+        f = ImageFont.truetype(bold_path, 72)
+        box = ad.textbbox((0, 0), initials, font=f)
+        ad.text(((2*r-(box[2]-box[0]))/2, (2*r-(box[3]-box[1]))/2-8), initials, font=f, fill="white")
+    mask = Image.new("L", (r*2, r*2), 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, r*2, r*2), fill=255)
+    img.paste(avatar, (cx-r, cy-r), mask)
+
+    # Text area.
+    title = text or f"خوش آمدید {display_name(user)}"
+    name = display_name(user)
+    draw.text((430, 150), title, font=title_font, fill="black")
+    draw.text((430, 280), name, font=name_font, fill="black")
+    draw.text((430, 390), "به گروه خوش آمدی ❤️", font=small_font, fill="black")
+
+    out = io.BytesIO()
+    out.name = "welcome.jpg"
+    img.save(out, format="JPEG", quality=92)
+    out.seek(0)
+
+    await context.bot.send_photo(
+        chat_id=chat_id,
+        photo=out,
+        caption=caption,
+        parse_mode="HTML"
+    )
+
+# ---------- Private panel ----------
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != "private":
+        await update.message.reply_text("پنل مدیریت را در PV ربات باز کنید.")
+        return
+    await update.message.reply_text(
+        "🛠 پنل مدیریت گروه\n\n"
+        "ادمین گروه را از PV تنظیم کنید. ابتدا /groups را بزنید.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("📋 گروه‌های من", callback_data="groups")]
+        ])
+    )
+
+async def groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    # Telegram does not provide a universal list of all groups where a user is admin.
+    # We keep groups that the bot has seen, then verify admin status live.
+    rows = db.execute("SELECT chat_id FROM settings").fetchall()
+    buttons = []
+    for row in rows:
+        cid = row["chat_id"]
+        if await is_group_admin(context, cid, user.id):
+            try:
+                chat = await context.bot.get_chat(cid)
+                buttons.append([InlineKeyboardButton(
+                    f"⚙️ {chat.title}", callback_data=f"panel:{cid}"
+                )])
+            except Exception:
+                pass
+
+    if not buttons:
+        await update.effective_message.reply_text(
+            "هیچ گروهی پیدا نشد.\n"
+            "ربات باید داخل گروه باشد و شما ادمین همان گروه باشید."
         )
-
         return
 
-    if data == "auto":
+    await update.effective_message.reply_text(
+        "گروه موردنظر را انتخاب کنید:",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
 
-        bot.edit_message_text(
-            "<b>📸 مدیریت پاسخ‌های خودکار</b>",
-            call.message.chat.id,
-            call.message.message_id,
-            reply_markup=auto_keyboard()
-        )
-
+async def panel(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    if not await is_group_admin(context, chat_id, update.effective_user.id):
+        await update.effective_message.reply_text("⛔ شما ادمین این گروه نیستید.")
+        return
+    if not await bot_is_admin(context, chat_id):
+        await update.effective_message.reply_text("⚠️ ربات باید در این گروه ادمین باشد.")
         return
 
-    if data == "welcome":
+    chat = await context.bot.get_chat(chat_id)
+    s = get_settings(chat_id)
+    await update.effective_message.reply_text(
+        f"⚙️ پنل: {chat.title}\n\n"
+        f"خوشامد: {s['welcome_text']}\n"
+        f"کپشن: {s['welcome_caption']}\n"
+        f"پیام خودکار: {'فعال' if s['auto_enabled'] else 'خاموش'}\n"
+        f"قفل: {'فعال' if s['locked'] else 'خاموش'}",
+        reply_markup=admin_keyboard(chat_id)
+    )
 
-        bot.edit_message_text(
-            """
-<b>👋 تنظیمات خوشامدگویی</b>
+# ---------- Callback actions ----------
 
-می‌توانی عکس و متن خوشامدگویی را تنظیم کنی.
-""",
-            call.message.chat.id,
-            call.message.message_id,
-            reply_markup=welcome_keyboard()
-        )
+async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    data = q.data
 
+    if data == "groups":
+        await groups(update, context)
         return
 
-    if data == "welcome_toggle":
-
-        old = get_setting(
-            "welcome_enabled",
-            "0"
-        )
-
-        new = "0" if old == "1" else "1"
-
-        set_setting(
-            "welcome_enabled",
-            new
-        )
-
-        bot.edit_message_reply_markup(
-            call.message.chat.id,
-            call.message.message_id,
-            reply_markup=welcome_keyboard()
-        )
-
+    if data.startswith("panel:"):
+        await panel(update, context, int(data.split(":")[1]))
         return
 
-    if data == "welcome_photo":
+    if not data.startswith("cfg:"):
+        return
 
-        admin_state[
-            call.from_user.id
-        ] = {
-            "mode": "welcome_photo"
+    _, action, cid = data.split(":")
+    cid = int(cid)
+
+    if not await is_group_admin(context, cid, update.effective_user.id):
+        await q.message.reply_text("⛔ فقط ادمین همان گروه اجازه دارد.")
+        return
+    if not await bot_is_admin(context, cid):
+        await q.message.reply_text("⚠️ ربات باید ادمین گروه باشد.")
+        return
+
+    if action in ("welcome", "caption", "auto", "mute"):
+        prompts = {
+            "welcome": "متن خوشامدگویی را بفرست.\nمی‌توانی از {name}، {mention} و {username} استفاده کنی.",
+            "caption": "کپشن عکس خوشامدگویی را بفرست.\nمی‌توانی از {name} و {mention} استفاده کنی.",
+            "auto": "متن پیام خودکار را بفرست. برای خاموش‌کردن، /off را بفرست.",
+            "mute": "مدت سکوت را به دقیقه بفرست؛ مثلا 10 یا 60.",
         }
-
-        bot.send_message(
-            call.message.chat.id,
-            "🖼 عکس خوشامدگویی را بفرست."
-        )
-
+        context.user_data["pending"] = {"action": action, "chat_id": cid}
+        await q.message.reply_text(prompts[action])
         return
 
-    if data == "welcome_text":
-
-        admin_state[
-            call.from_user.id
-        ] = {
-            "mode": "welcome_text"
-        }
-
-        bot.send_message(
-            call.message.chat.id,
-            """
-📝 <b>متن خوشامدگویی را بفرست.</b>
-
-متغیرهای قابل استفاده:
-
-<code>{name}</code>
-اسم کاربر
-
-<code>{username}</code>
-یوزرنیم
-
-<code>{id}</code>
-آیدی کاربر
-
-<code>{group}</code>
-اسم گپ
-
-<code>{tag}</code>
-تگ قابل کلیک کاربر
-
-مثال:
-
-<code>سلام {tag} 👋
-به {group} خوش اومدی ❤️</code>
-"""
-        )
-
-        return
-
-    if data == "welcome_preview":
-
-        text = get_setting(
-            "welcome_text",
-            "سلام {tag} 👋\nبه {group} خوش اومدی ❤️"
-        )
-
-        text = text.replace(
-            "{name}", "کاربر"
-        ).replace(
-            "{username}", "@username"
-        ).replace(
-            "{id}", "123456"
-        ).replace(
-            "{group}", "گپ نمونه"
-        ).replace(
-            "{tag}",
-            '<a href="tg://user?id=123456">کاربر</a>'
-        )
-
-        photo = get_setting(
-            "welcome_photo",
-            ""
-        )
-
-        if photo:
-
-            bot.send_photo(
-                call.message.chat.id,
-                photo,
-                caption=text
-            )
-
-        else:
-
-            bot.send_message(
-                call.message.chat.id,
-                text
-            )
-
-        return
-
-    if data == "add_auto":
-
-        admin_state[
-            call.from_user.id
-        ] = {
-            "mode": "keyword"
-        }
-
-        bot.send_message(
-            call.message.chat.id,
-            """
-➕ <b>ساخت پاسخ خودکار</b>
-
-عبارتی که کاربر باید بگوید را بفرست.
-
-مثال:
-
-<code>عکس بفرست</code>
-"""
-        )
-
-        return
-
-    if data == "count_auto":
-
-        admin_state[
-            call.from_user.id
-        ] = {
-            "mode": "count"
-        }
-
-        bot.send_message(
-            call.message.chat.id,
-            "🔢 عبارت پاسخ را بفرست."
-        )
-
-        return
-
-    if data == "delete_auto":
-
-        admin_state[
-            call.from_user.id
-        ] = {
-            "mode": "delete"
-        }
-
-        bot.send_message(
-            call.message.chat.id,
-            "🗑 عبارت پاسخ را برای حذف بفرست."
-        )
-
-        return
-
-    if data == "list_auto":
-
-        with lock:
-            c = db.cursor()
-
-            c.execute("""
-            SELECT t.keyword,COUNT(p.id) total
-            FROM triggers t
-            LEFT JOIN photos p
-            ON p.trigger_id=t.id
-            GROUP BY t.id
-            """)
-
-            rows = c.fetchall()
-
-        if not rows:
-
-            text = "📭 هنوز پاسخی ساخته نشده."
-
-        else:
-
-            text = "<b>📋 پاسخ‌های خودکار</b>\n\n"
-
-            for row in rows:
-
-                text += (
-                    f"🔹 <code>{esc(row['keyword'])}</code>"
-                    f" — {row['total']} عکس\n"
-                )
-
-        bot.send_message(
-            call.message.chat.id,
-            text,
-            reply_markup=auto_keyboard()
-        )
-
-        return
-
-    if data == "stats":
-
-        with lock:
-            c = db.cursor()
-
-            c.execute(
-                "SELECT COUNT(*) FROM users"
-            )
-            users = c.fetchone()[0]
-
-            c.execute(
-                "SELECT COUNT(*) FROM groups_table"
-            )
-            groups = c.fetchone()[0]
-
-            c.execute(
-                "SELECT COUNT(*) FROM triggers"
-            )
-            triggers = c.fetchone()[0]
-
-            c.execute(
-                "SELECT COUNT(*) FROM photos"
-            )
-            photos = c.fetchone()[0]
-
-        bot.send_message(
-            call.message.chat.id,
-            f"""
-📊 <b>آمار ربات</b>
-
-👤 کاربران: <b>{users}</b>
-👥 گپ‌ها: <b>{groups}</b>
-⚡ پاسخ‌ها: <b>{triggers}</b>
-🖼 عکس‌ها: <b>{photos}</b>
-""",
-            reply_markup=main_keyboard()
-        )
-
-        return
-
-
-# =========================
-# ADMIN TEXT
-# =========================
-
-@bot.message_handler(
-    func=lambda m:
-        m.chat.type == "private"
-        and is_admin(m.from_user.id)
-        and m.from_user.id in admin_state
-        and m.content_type == "text"
-)
-def admin_text(message):
-
-    state = admin_state.get(
-        message.from_user.id
-    )
-
-    if not state:
-        return
-
-    mode = state["mode"]
-
-    if mode == "keyword":
-
-        keyword = clean(message.text)
-
-        if not keyword:
-            bot.send_message(
-                message.chat.id,
-                "❌ عبارت خالی است."
-            )
-            return
-
-        create_trigger(keyword)
-
-        admin_state[
-            message.from_user.id
-        ] = {
-            "mode": "photos",
-            "keyword": keyword
-        }
-
-        bot.send_message(
-            message.chat.id,
-            f"""
-✅ عبارت ثبت شد:
-
-<code>{esc(keyword)}</code>
-
-حالا عکس‌ها را بفرست.
-
-برای پایان بنویس:
-
-<code>پایان</code>
-"""
-        )
-
-        return
-
-    if mode == "count":
-
-        count = photo_count(
-            message.text
-        )
-
-        bot.send_message(
-            message.chat.id,
-            f"🖼 تعداد عکس‌ها: <b>{count}</b>"
-        )
-
-        admin_state.pop(
-            message.from_user.id,
-            None
-        )
-
-        return
-
-    if mode == "delete":
-
-        if delete_trigger(message.text):
-
-            bot.send_message(
-                message.chat.id,
-                "✅ پاسخ خودکار حذف شد."
-            )
-
-        else:
-
-            bot.send_message(
-                message.chat.id,
-                "❌ چنین پاسخی پیدا نشد."
-            )
-
-        admin_state.pop(
-            message.from_user.id,
-            None
-        )
-
-        return
-
-    if mode == "welcome_text":
-
-        set_setting(
-            "welcome_text",
-            message.text
-        )
-
-        bot.send_message(
-            message.chat.id,
-            "✅ متن خوشامدگویی ذخیره شد."
-        )
-
-        admin_state.pop(
-            message.from_user.id,
-            None
-        )
-
-        return
-        # =========================
-# ADMIN PHOTOS
-# =========================
-
-@bot.message_handler(
-    content_types=["photo"]
-)
-def admin_photo(message):
-
-    if message.chat.type != "private":
-        return
-
-    if not is_admin(
-        message.from_user.id
-    ):
-        return
-
-    state = admin_state.get(
-        message.from_user.id
-    )
-
-    if not state:
-        return
-
-    mode = state["mode"]
-
-    if mode == "photos":
-
-        keyword = state["keyword"]
-
-        add_photo(
-            keyword,
-            message.photo[-1].file_id
-        )
-
-        count = photo_count(keyword)
-
-        bot.send_message(
-            message.chat.id,
-            f"✅ عکس ذخیره شد.\nتعداد: <b>{count}</b>"
-        )
-
-        return
-
-    if mode == "welcome_photo":
-
-        set_setting(
-            "welcome_photo",
-            message.photo[-1].file_id
-        )
-
-        bot.send_message(
-            message.chat.id,
-            "✅ عکس خوشامدگویی ذخیره شد."
-        )
-
-        admin_state.pop(
-            message.from_user.id,
-            None
-        )
-
-
-# =========================
-# FINISH UPLOAD
-# =========================
-
-@bot.message_handler(
-    func=lambda m:
-        m.chat.type == "private"
-        and is_admin(m.from_user.id)
-        and clean(m.text) == "پایان"
-)
-def finish_upload(message):
-
-    state = admin_state.get(
-        message.from_user.id
-    )
-
-    if not state:
-        return
-
-    if state["mode"] != "photos":
-        return
-
-    keyword = state["keyword"]
-
-    count = photo_count(keyword)
-
-    admin_state.pop(
-        message.from_user.id,
-        None
-    )
-
-    bot.send_message(
-        message.chat.id,
-        f"""
-✅ <b>آپلود تمام شد.</b>
-
-عبارت:
-<code>{esc(keyword)}</code>
-
-تعداد عکس:
-<b>{count}</b>
-"""
-    )
-
-
-# =========================
-# WELCOME
-# =========================
-
-@bot.message_handler(
-    content_types=["new_chat_members"]
-)
-def welcome(message):
-
-    save_group(message.chat)
-
-    if get_setting(
-        "welcome_enabled",
-        "0"
-    ) != "1":
-        return
-
-    template = get_setting(
-        "welcome_text",
-        "سلام {tag} 👋\nبه {group} خوش اومدی ❤️"
-    )
-
-    photo = get_setting(
-        "welcome_photo",
-        ""
-    )
-
-    for user in message.new_chat_members:
-
-        save_user(user)
-
+    if action == "lock":
         try:
+            await context.bot.set_chat_permissions(
+                cid,
+                ChatPermissions(can_send_messages=False)
+            )
+            set_setting(cid, "locked", 1)
+            await q.message.reply_text("🔒 گروه قفل شد.")
+        except Exception as e:
+            await q.message.reply_text(f"خطا در قفل گروه: {e}")
+        return
 
-            if user.id == bot.get_me().id:
-                continue
+    if action == "unlock":
+        try:
+            await context.bot.set_chat_permissions(
+                cid,
+                ChatPermissions(can_send_messages=True)
+            )
+            set_setting(cid, "locked", 0)
+            await q.message.reply_text("🔓 گروه باز شد.")
+        except Exception as e:
+            await q.message.reply_text(f"خطا در باز کردن گروه: {e}")
+        return
 
-        except:
+    if action in ("ban", "banperm"):
+        context.user_data["pending"] = {"action": "ban", "chat_id": cid}
+        await q.message.reply_text(
+            "حالا پیام کاربر را در گروه reply کن و دستور /ban بزن، یا شناسه کاربر را با /ban USER_ID بده."
+        )
+        return
+
+    if action == "stats":
+        rows = db.execute(
+            "SELECT name, username, messages FROM stats WHERE chat_id=? ORDER BY messages DESC LIMIT 10",
+            (cid,)
+        ).fetchall()
+        if not rows:
+            await q.message.reply_text("هنوز آماری ثبت نشده.")
+            return
+        text = "📊 بیشترین کاربران از نظر تعداد پیام:\n\n"
+        for i, r in enumerate(rows, 1):
+            uname = f"@{r['username']}" if r["username"] else ""
+            text += f"{i}. {r['name']} {uname} — {r['messages']} پیام\n"
+        await q.message.reply_text(text)
+        return
+
+    if action == "tag":
+        rows = db.execute(
+            "SELECT user_id, name FROM stats WHERE chat_id=? ORDER BY messages DESC LIMIT 20",
+            (cid,)
+        ).fetchall()
+        if not rows:
+            await q.message.reply_text("هنوز کاربری برای تگ ثبت نشده.")
+            return
+        text = "🏷 کاربران فعال:\n\n"
+        for r in rows:
+            text += f'<a href="tg://user?id={r["user_id"]}">{r["name"]}</a>\n'
+        await q.message.reply_text(text, parse_mode="HTML")
+        return
+
+# ---------- Private text input ----------
+
+async def private_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != "private":
+        return
+
+    pending = context.user_data.get("pending")
+    if not pending:
+        return
+
+    action = pending["action"]
+    cid = pending["chat_id"]
+    user = update.effective_user
+
+    if not await is_group_admin(context, cid, user.id):
+        await update.message.reply_text("⛔ شما دیگر ادمین این گروه نیستید.")
+        context.user_data.pop("pending", None)
+        return
+
+    value = update.message.text.strip()
+
+    if action == "welcome":
+        set_setting(cid, "welcome_text", value)
+        await update.message.reply_text("✅ متن خوشامدگویی ذخیره شد.")
+    elif action == "caption":
+        set_setting(cid, "welcome_caption", value)
+        await update.message.reply_text("✅ کپشن عکس ذخیره شد.")
+    elif action == "auto":
+        if value == "/off":
+            set_setting(cid, "auto_enabled", 0)
+            set_setting(cid, "auto_text", "")
+            await update.message.reply_text("✅ پیام خودکار خاموش شد.")
+        else:
+            set_setting(cid, "auto_text", value)
+            set_setting(cid, "auto_enabled", 1)
+            await update.message.reply_text("✅ پیام خودکار فعال و ذخیره شد.")
+    elif action == "mute":
+        try:
+            minutes = int(value)
+            if minutes < 1 or minutes > 10080:
+                raise ValueError
+            set_setting(cid, "mute_seconds", minutes * 60)
+            await update.message.reply_text(f"✅ سکوت موقت روی {minutes} دقیقه تنظیم شد.")
+        except ValueError:
+            await update.message.reply_text("❌ یک عدد بین 1 تا 10080 بفرست.")
+
+    context.user_data.pop("pending", None)
+
+# ---------- Group commands ----------
+
+async def cmd_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type not in ("group", "supergroup"):
+        return
+    cid = update.effective_chat.id
+    if not await require_admin(update, context, cid):
+        return
+
+    target_id = None
+    if update.message.reply_to_message:
+        target_id = update.message.reply_to_message.from_user.id
+    elif context.args:
+        try:
+            target_id = int(context.args[0])
+        except ValueError:
             pass
 
-        username = (
-            "@" + user.username
-            if user.username
-            else "ندارد"
-        )
-
-        text = template
-
-        text = text.replace(
-            "{name}",
-            esc(user.first_name or "کاربر")
-        )
-
-        text = text.replace(
-            "{username}",
-            esc(username)
-        )
-
-        text = text.replace(
-            "{id}",
-            str(user.id)
-        )
-
-        text = text.replace(
-            "{group}",
-            esc(message.chat.title or "گپ")
-        )
-
-        text = text.replace(
-            "{tag}",
-            tag(user)
-        )
-
-        try:
-
-            if photo:
-
-                bot.send_photo(
-                    message.chat.id,
-                    photo,
-                    caption=text
-                )
-
-            else:
-
-                bot.send_message(
-                    message.chat.id,
-                    text
-                )
-
-        except Exception as e:
-
-            print(
-                "WELCOME ERROR:",
-                e
-            )
-
-
-# =========================
-# GROUP ADMIN CHECK
-# =========================
-
-def group_admin(message):
-
-    if message.chat.type not in (
-        "group",
-        "supergroup"
-    ):
-        return False
-
-    if is_admin(
-        message.from_user.id
-    ):
-        return True
-
-    try:
-
-        member = bot.get_chat_member(
-            message.chat.id,
-            message.from_user.id
-        )
-
-        return member.status in (
-            "administrator",
-            "creator"
-        )
-
-    except:
-
-        return False
-
-
-def target(message):
-
-    if not message.reply_to_message:
-        return None
-
-    return message.reply_to_message.from_user
-
-
-def target_admin(message):
-
-    user = target(message)
-
-    if not user:
-        return False
-
-    if is_admin(user.id):
-        return True
-
-    try:
-
-        member = bot.get_chat_member(
-            message.chat.id,
-            user.id
-        )
-
-        return member.status in (
-            "administrator",
-            "creator"
-        )
-
-    except:
-
-        return False
-
-
-# =========================
-# BAN
-# =========================
-
-@bot.message_handler(
-    func=lambda m: clean(m.text) == "بن"
-)
-def ban(message):
-
-    if not group_admin(message):
-        return
-
-    user = target(message)
-
-    if not user:
-
-        bot.reply_to(
-            message,
-            "❌ روی پیام فرد ریپلای کن."
-        )
-
-        return
-
-    if target_admin(message):
-
-        bot.reply_to(
-            message,
-            "🛡 این فرد ادمینه."
-        )
-
+    if not target_id:
+        await update.message.reply_text("روی پیام کاربر reply کن و /ban بزن.")
         return
 
     try:
-
-        bot.ban_chat_member(
-            message.chat.id,
-            user.id
-        )
-
-        bot.reply_to(
-            message,
-            f"🚫 {tag(user)} بن شد."
-        )
-
+        await context.bot.ban_chat_member(cid, target_id)
+        await update.message.reply_text("🚫 کاربر بن شد.")
     except Exception as e:
+        await update.message.reply_text(f"خطا در بن: {e}")
 
-        print(e)
-
-        bot.reply_to(
-            message,
-            "❌ ربات دسترسی بن کردن ندارد."
-        )
-
-
-# =========================
-# UNBAN
-# =========================
-
-@bot.message_handler(
-    func=lambda m: clean(m.text) == "حذف بن"
-)
-def unban(message):
-
-    if not group_admin(message):
+async def cmd_mute(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type not in ("group", "supergroup"):
+        return
+    cid = update.effective_chat.id
+    if not await require_admin(update, context, cid):
+        return
+    if not update.message.reply_to_message:
+        await update.message.reply_text("روی پیام کاربر reply کن.")
         return
 
-    user = target(message)
-
-    if not user:
-
-        bot.reply_to(
-            message,
-            "❌ روی پیام فرد ریپلای کن."
-        )
-
-        return
+    s = get_settings(cid)
+    seconds = s["mute_seconds"] or 600
+    until = datetime.now(timezone.utc) + timedelta(seconds=seconds)
+    target = update.message.reply_to_message.from_user
 
     try:
-
-        bot.unban_chat_member(
-            message.chat.id,
-            user.id,
-            only_if_banned=True
+        await context.bot.restrict_chat_member(
+            cid, target.id,
+            permissions=ChatPermissions(can_send_messages=False),
+            until_date=until
         )
-
-        bot.reply_to(
-            message,
-            f"✅ {tag(user)} حذف بن شد."
-        )
-
-    except:
-
-        bot.reply_to(
-            message,
-            "❌ حذف بن انجام نشد."
-        )
-
-
-# =========================
-# MUTE
-# =========================
-
-@bot.message_handler(
-    func=lambda m: clean(m.text) == "سکوت"
-)
-def mute(message):
-
-    if not group_admin(message):
-        return
-
-    user = target(message)
-
-    if not user:
-
-        bot.reply_to(
-            message,
-            "❌ روی پیام فرد ریپلای کن."
-        )
-
-        return
-
-    if target_admin(message):
-
-        bot.reply_to(
-            message,
-            "🛡 این فرد ادمینه."
-        )
-
-        return
-
-    try:
-
-        bot.restrict_chat_member(
-            message.chat.id,
-            user.id,
-            permissions=types.ChatPermissions(
-                can_send_messages=False
-            )
-        )
-
-        bot.reply_to(
-            message,
-            f"🔇 {tag(user)} سکوت شد."
-        )
-
-    except:
-
-        bot.reply_to(
-            message,
-            "❌ ربات دسترسی سکوت کردن ندارد."
-        )
-
-
-# =========================
-# UNMUTE
-# =========================
-
-@bot.message_handler(
-    func=lambda m: clean(m.text) == "حذف سکوت"
-)
-def unmute(message):
-
-    if not group_admin(message):
-        return
-
-    user = target(message)
-
-    if not user:
-
-        bot.reply_to(
-            message,
-            "❌ روی پیام فرد ریپلای کن."
-        )
-
-        return
-
-    try:
-
-        bot.restrict_chat_member(
-            message.chat.id,
-            user.id,
-            permissions=types.ChatPermissions(
-                can_send_messages=True,
-                can_send_audios=True,
-                can_send_documents=True,
-                can_send_photos=True,
-                can_send_videos=True,
-                can_send_video_notes=True,
-                can_send_voice_notes=True,
-                can_send_polls=True,
-                can_send_other_messages=True,
-                can_add_web_page_previews=True
-            )
-        )
-
-        bot.reply_to(
-            message,
-            f"🔊 {tag(user)} حذف سکوت شد."
-        )
-
-    except:
-
-        bot.reply_to(
-            message,
-            "❌ حذف سکوت انجام نشد."
-        )
-
-
-# =========================
-# DELETE
-# =========================
-
-@bot.message_handler(
-    func=lambda m: clean(m.text) == "حذف"
-)
-def delete_message(message):
-
-    if not group_admin(message):
-        return
-
-    if not message.reply_to_message:
-
-        bot.reply_to(
-            message,
-            "❌ روی پیام موردنظر ریپلای کن."
-        )
-
-        return
-
-    try:
-
-        bot.delete_message(
-            message.chat.id,
-            message.reply_to_message.message_id
-        )
-
-        bot.delete_message(
-            message.chat.id,
-            message.message_id
-        )
-
-    except:
-
-        bot.reply_to(
-            message,
-            "❌ حذف پیام انجام نشد."
-        )
-
-
-# =========================
-# STATS
-# =========================
-
-@bot.message_handler(
-    func=lambda m: clean(m.text) == "آمار"
-)
-def stats(message):
-
-    if not group_admin(message):
-        return
-
-    with lock:
-
-        c = db.cursor()
-
-        c.execute(
-            "SELECT COUNT(*) FROM users"
-        )
-        users = c.fetchone()[0]
-
-        c.execute(
-            "SELECT COUNT(*) FROM groups_table"
-        )
-        groups = c.fetchone()[0]
-
-        c.execute(
-            "SELECT COUNT(*) FROM photos"
-        )
-        photos = c.fetchone()[0]
-
-        c.execute(
-            "SELECT COUNT(*) FROM triggers"
-        )
-        triggers = c.fetchone()[0]
-
-    bot.reply_to(
-        message,
-        f"""
-📊 <b>آمار ربات</b>
-
-👤 کاربران: <b>{users}</b>
-👥 گپ‌ها: <b>{groups}</b>
-⚡ پاسخ‌ها: <b>{triggers}</b>
-🖼 عکس‌ها: <b>{photos}</b>
-"""
-    )
-
-
-# =========================
-# AUTO RESPONSE
-# =========================
-
-@bot.message_handler(
-    content_types=["text"]
-)
-def auto_response(message):
-
-    save_user(
-        message.from_user
-    )
-
-    save_group(
-        message.chat
-    )
-
-    if message.chat.type not in (
-        "group",
-        "supergroup"
-    ):
-        return
-
-    text = clean(message.text)
-
-    if text in (
-        "بن",
-        "حذف بن",
-        "سکوت",
-        "حذف سکوت",
-        "حذف",
-        "آمار"
-    ):
-        return
-
-    photo = get_random_photo(text)
-
-    if not photo:
-        return
-
-    try:
-
-        bot.send_photo(
-            message.chat.id,
-            photo,
-            reply_to_message_id=message.message_id
-        )
-
+        await update.message.reply_text(f"🔇 {display_name(target)} برای {seconds//60} دقیقه ساکت شد.")
     except Exception as e:
+        await update.message.reply_text(f"خطا در سکوت: {e}")
 
-        print(
-            "AUTO ERROR:",
-            e
-        )
+async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type not in ("group", "supergroup"):
+        return
+    cid = update.effective_chat.id
+    rows = db.execute(
+        "SELECT name, username, messages FROM stats WHERE chat_id=? ORDER BY messages DESC LIMIT 10",
+        (cid,)
+    ).fetchall()
+    if not rows:
+        await update.message.reply_text("هنوز آماری ندارم.")
+        return
+    text = "📊 آمار برتر:\n\n"
+    for i, r in enumerate(rows, 1):
+        u = f"@{r['username']}" if r["username"] else ""
+        text += f"{i}. {r['name']} {u} — {r['messages']}\n"
+    await update.message.reply_text(text)
 
+async def cmd_tag(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type not in ("group", "supergroup"):
+        return
+    cid = update.effective_chat.id
+    if not await require_admin(update, context, cid):
+        return
+    rows = db.execute(
+        "SELECT user_id, name FROM stats WHERE chat_id=? ORDER BY messages DESC LIMIT 20",
+        (cid,)
+    ).fetchall()
+    if not rows:
+        await update.message.reply_text("هنوز کاربری ثبت نشده.")
+        return
+    text = "🏷 تگ کاربران فعال:\n\n" + "\n".join(
+        f'<a href="tg://user?id={r["user_id"]}">{r["name"]}</a>' for r in rows
+    )
+    await update.message.reply_text(text, parse_mode="HTML")
 
-# =========================
-# RUN
-# =========================
+async def cmd_auto(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type not in ("group", "supergroup"):
+        return
+    cid = update.effective_chat.id
+    if not await require_admin(update, context, cid):
+        return
+    s = get_settings(cid)
+    if not s["auto_enabled"] or not s["auto_text"]:
+        await update.message.reply_text("پیام خودکار فعال نیست.")
+        return
+    await update.message.reply_text(s["auto_text"], parse_mode="HTML")
 
-def run():
+# ---------- Events ----------
 
-    print("=" * 45)
-    print("KIAN BOT STARTING")
-    print("ADMIN:", ADMIN_ID)
-    print("=" * 45)
+async def new_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type not in ("group", "supergroup"):
+        return
+    cid = update.effective_chat.id
+    ensure_settings(cid)
 
-    while True:
-
+    for user in update.message.new_chat_members:
         try:
-
-            bot.infinity_polling(
-                skip_pending=True,
-                timeout=30,
-                long_polling_timeout=30
-            )
-
+            await send_welcome_photo(context, cid, user)
         except Exception as e:
-
-            print(
-                "POLLING ERROR:",
-                e
+            await update.message.reply_text(
+                f'خوش آمدی {mention_html(user)} 🌷',
+                parse_mode="HTML"
             )
 
-            time.sleep(5)
+async def track_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_message or not update.effective_user:
+        return
+    if update.effective_chat.type not in ("group", "supergroup"):
+        return
+    if update.effective_user.is_bot:
+        return
 
+    cid = update.effective_chat.id
+    user = update.effective_user
+    ensure_settings(cid)
+
+    db.execute("""
+        INSERT INTO stats(chat_id,user_id,name,username,messages)
+        VALUES(?,?,?,?,1)
+        ON CONFLICT(chat_id,user_id) DO UPDATE SET
+          name=excluded.name,
+          username=excluded.username,
+          messages=messages+1
+    """, (cid, user.id, display_name(user), user.username))
+    db.commit()
+
+    s = get_settings(cid)
+    # Optional auto reply: reply only to the first tracked message after activation
+    # is intentionally kept simple and reliable.
+    if s["auto_enabled"] and s["auto_text"]:
+        now = datetime.now().timestamp()
+        last = context.chat_data.get("last_auto_reply", 0)
+        if now - last >= 300:
+            context.chat_data["last_auto_reply"] = now
+            try:
+                await update.effective_message.reply_text(s["auto_text"], parse_mode="HTML")
+            except Exception:
+                pass
+
+async def my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Create settings when bot is added to a group."""
+    chat = update.effective_chat
+    if chat and chat.type in ("group", "supergroup"):
+        ensure_settings(chat.id)
+
+# ---------- Main ----------
+
+def main():
+    app = Application.builder().token(TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start, filters.ChatType.PRIVATE))
+    app.add_handler(CommandHandler("groups", groups, filters.ChatType.PRIVATE))
+    app.add_handler(CallbackQueryHandler(callbacks))
+    app.add_handler(MessageHandler(
+        filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND,
+        private_input
+    ))
+
+    app.add_handler(CommandHandler("ban", cmd_ban))
+    app.add_handler(CommandHandler("mute", cmd_mute))
+    app.add_handler(CommandHandler("stats", cmd_stats))
+    app.add_handler(CommandHandler("tag", cmd_tag))
+    app.add_handler(CommandHandler("auto", cmd_auto))
+
+    app.add_handler(MessageHandler(
+        filters.StatusUpdate.NEW_CHAT_MEMBERS,
+        new_members
+    ))
+    app.add_handler(ChatMemberHandler(
+        my_chat_member,
+        ChatMemberHandler.MY_CHAT_MEMBER
+    ))
+    app.add_handler(MessageHandler(
+        filters.ChatType.GROUPS & ~filters.COMMAND,
+        track_messages
+    ))
+
+    print("Bot is running...")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
-    run()
+    main()
