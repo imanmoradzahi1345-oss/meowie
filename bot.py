@@ -1,38 +1,26 @@
 # -*- coding: utf-8 -*-
 """
-ربات مدیریت گپ چندگانه
-- خوش‌آمد با عکس رندوم + کپشن متغیر
-- پنل داخل گپ
-- سکوت/بن/اخطار/لقب/آمار/پاسخ خودکار/ضد اسپم
+ربات مدیریت گپ - نسخه اصلاح‌شده
+دکمه‌های پنل + دستورات متنی + خوش‌آمد رندوم
 """
 
 import telebot
-from telebot.types import (
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
-    ChatPermissions,
-)
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ChatPermissions
 import sqlite3
 import time
 import re
 import random
-import threading
 from collections import defaultdict, deque
 
-# ===================== تنظیمات =====================
-BOT_TOKEN = "8617545814:AAFAofo_nV39gFT1-IgfXu-esnGgXol62r4"
+BOT_TOKEN = "8597049833:AAFnEjGLcOz09Duy6MIvOoMD9TA1-fiRhPE"
 MAIN_OWNER_ID = 7530457395
-
 DEFAULT_WELCOME = "سلام {mention} عزیز به گپ {group}\nخوش اومدی"
 
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode=None)
-
-# وضعیت‌های موقت
 user_steps = {}
 flood_map = defaultdict(lambda: deque())
-msg_count_cache = defaultdict(int)  # فقط کمکی؛ آمار اصلی در DB
 
-# ===================== دیتابیس =====================
+
 def get_db():
     return sqlite3.connect("group_bot.db", check_same_thread=False, timeout=30)
 
@@ -40,106 +28,66 @@ def get_db():
 def init_db():
     conn = get_db()
     c = conn.cursor()
-
     c.execute(
-        """
-        CREATE TABLE IF NOT EXISTS groups (
-            chat_id INTEGER PRIMARY KEY,
-            title TEXT,
-            welcome_text TEXT,
-            welcome_enabled INTEGER DEFAULT 1,
-            lock_link INTEGER DEFAULT 0,
-            lock_forward INTEGER DEFAULT 0,
-            lock_spam INTEGER DEFAULT 1,
-            warn_limit INTEGER DEFAULT 3
-        )
-        """
+        """CREATE TABLE IF NOT EXISTS groups (
+        chat_id INTEGER PRIMARY KEY,
+        title TEXT,
+        welcome_text TEXT,
+        welcome_enabled INTEGER DEFAULT 1,
+        lock_link INTEGER DEFAULT 0,
+        lock_forward INTEGER DEFAULT 0,
+        lock_spam INTEGER DEFAULT 1,
+        warn_limit INTEGER DEFAULT 3
+    )"""
     )
-
     c.execute(
-        """
-        CREATE TABLE IF NOT EXISTS bot_admins (
-            chat_id INTEGER,
-            user_id INTEGER,
-            PRIMARY KEY (chat_id, user_id)
-        )
-        """
+        """CREATE TABLE IF NOT EXISTS bot_admins (
+        chat_id INTEGER, user_id INTEGER,
+        PRIMARY KEY (chat_id, user_id)
+    )"""
     )
-
     c.execute(
-        """
-        CREATE TABLE IF NOT EXISTS nicknames (
-            chat_id INTEGER,
-            user_id INTEGER,
-            nick TEXT,
-            PRIMARY KEY (chat_id, user_id)
-        )
-        """
+        """CREATE TABLE IF NOT EXISTS nicknames (
+        chat_id INTEGER, user_id INTEGER, nick TEXT,
+        PRIMARY KEY (chat_id, user_id)
+    )"""
     )
-
     c.execute(
-        """
-        CREATE TABLE IF NOT EXISTS warns (
-            chat_id INTEGER,
-            user_id INTEGER,
-            count INTEGER DEFAULT 0,
-            PRIMARY KEY (chat_id, user_id)
-        )
-        """
+        """CREATE TABLE IF NOT EXISTS warns (
+        chat_id INTEGER, user_id INTEGER, count INTEGER DEFAULT 0,
+        PRIMARY KEY (chat_id, user_id)
+    )"""
     )
-
     c.execute(
-        """
-        CREATE TABLE IF NOT EXISTS mutes (
-            chat_id INTEGER,
-            user_id INTEGER,
-            until_ts INTEGER,
-            PRIMARY KEY (chat_id, user_id)
-        )
-        """
+        """CREATE TABLE IF NOT EXISTS mutes (
+        chat_id INTEGER, user_id INTEGER, until_ts INTEGER,
+        PRIMARY KEY (chat_id, user_id)
+    )"""
     )
-
     c.execute(
-        """
-        CREATE TABLE IF NOT EXISTS message_stats (
-            chat_id INTEGER,
-            user_id INTEGER,
-            count INTEGER DEFAULT 0,
-            PRIMARY KEY (chat_id, user_id)
-        )
-        """
+        """CREATE TABLE IF NOT EXISTS message_stats (
+        chat_id INTEGER, user_id INTEGER, count INTEGER DEFAULT 0,
+        PRIMARY KEY (chat_id, user_id)
+    )"""
     )
-
     c.execute(
-        """
-        CREATE TABLE IF NOT EXISTS autoreplies (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id INTEGER,
-            keyword TEXT,
-            answer TEXT,
-            exact_match INTEGER DEFAULT 1,
-            active INTEGER DEFAULT 1
-        )
-        """
+        """CREATE TABLE IF NOT EXISTS autoreplies (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id INTEGER, keyword TEXT, answer TEXT,
+        exact_match INTEGER DEFAULT 1, active INTEGER DEFAULT 1
+    )"""
     )
-
     c.execute(
-        """
-        CREATE TABLE IF NOT EXISTS welcome_photos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            file_id TEXT UNIQUE
-        )
-        """
+        """CREATE TABLE IF NOT EXISTS welcome_photos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        file_id TEXT UNIQUE
+    )"""
     )
-
     c.execute(
-        """
-        CREATE TABLE IF NOT EXISTS started_users (
-            user_id INTEGER PRIMARY KEY
-        )
-        """
+        """CREATE TABLE IF NOT EXISTS started_users (
+        user_id INTEGER PRIMARY KEY
+    )"""
     )
-
     conn.commit()
     conn.close()
 
@@ -147,44 +95,58 @@ def init_db():
 init_db()
 
 
-# ===================== کمک‌ها =====================
 def ensure_group(chat):
     if not chat or chat.type not in ("group", "supergroup"):
         return
     conn = get_db()
     c = conn.cursor()
     c.execute(
-        "INSERT OR IGNORE INTO groups (chat_id, title, welcome_text) VALUES (?, ?, ?)",
+        "INSERT OR IGNORE INTO groups (chat_id, title, welcome_text) VALUES (?,?,?)",
         (chat.id, chat.title or "", DEFAULT_WELCOME),
     )
     c.execute("UPDATE groups SET title=? WHERE chat_id=?", (chat.title or "", chat.id))
-    # سازنده گپ و ادمین‌ها
-    try:
-        for a in bot.get_chat_administrators(chat.id):
-            if a.user.is_bot:
-                continue
-            c.execute(
-                "INSERT OR IGNORE INTO bot_admins (chat_id, user_id) VALUES (?, ?)",
-                (chat.id, a.user.id),
-            )
-    except Exception:
-        pass
-    # مالک اصلی بات در همه گپ‌ها ادمین بات
     c.execute(
-        "INSERT OR IGNORE INTO bot_admins (chat_id, user_id) VALUES (?, ?)",
+        "INSERT OR IGNORE INTO bot_admins (chat_id, user_id) VALUES (?,?)",
         (chat.id, MAIN_OWNER_ID),
     )
+    try:
+        for a in bot.get_chat_administrators(chat.id):
+            if getattr(a.user, "is_bot", False):
+                continue
+            c.execute(
+                "INSERT OR IGNORE INTO bot_admins (chat_id, user_id) VALUES (?,?)",
+                (chat.id, a.user.id),
+            )
+    except Exception as e:
+        print("admin sync:", e)
     conn.commit()
     conn.close()
 
 
 def is_main_owner(uid):
-    return int(uid) == int(MAIN_OWNER_ID)
+    try:
+        return int(uid) == int(MAIN_OWNER_ID)
+    except Exception:
+        return False
 
 
 def is_bot_admin(chat_id, uid):
     if is_main_owner(uid):
         return True
+    try:
+        m = bot.get_chat_member(chat_id, uid)
+        if m.status in ("creator", "administrator"):
+            conn = get_db()
+            c = conn.cursor()
+            c.execute(
+                "INSERT OR IGNORE INTO bot_admins (chat_id, user_id) VALUES (?,?)",
+                (chat_id, uid),
+            )
+            conn.commit()
+            conn.close()
+            return True
+    except Exception:
+        pass
     conn = get_db()
     c = conn.cursor()
     c.execute(
@@ -219,25 +181,24 @@ def set_group_field(chat_id, field, value):
         return
     conn = get_db()
     c = conn.cursor()
-    c.execute(f"UPDATE groups SET {field}=? WHERE chat_id=?", (value, chat_id))
+    c.execute("UPDATE groups SET {}=? WHERE chat_id=?".format(field), (value, chat_id))
     conn.commit()
     conn.close()
 
 
 def format_welcome(template, user, chat):
     name = user.first_name or "کاربر"
-    username = f"@{user.username}" if user.username else "ندارد"
-    mention = f'<a href="tg://user?id={user.id}">{name}</a>'
+    username = "@{}".format(user.username) if user.username else "ندارد"
+    mention = '<a href="tg://user?id={}">{}</a>'.format(user.id, name)
     group = chat.title or "گپ"
     text = template or DEFAULT_WELCOME
-    text = (
+    return (
         text.replace("{name}", name)
         .replace("{username}", username)
         .replace("{id}", str(user.id))
         .replace("{group}", group)
         .replace("{mention}", mention)
     )
-    return text
 
 
 def mute_user(chat_id, user_id, seconds):
@@ -257,7 +218,7 @@ def mute_user(chat_id, user_id, seconds):
     conn = get_db()
     c = conn.cursor()
     c.execute(
-        "INSERT OR REPLACE INTO mutes (chat_id, user_id, until_ts) VALUES (?, ?, ?)",
+        "INSERT OR REPLACE INTO mutes (chat_id, user_id, until_ts) VALUES (?,?,?)",
         (chat_id, user_id, until),
     )
     conn.commit()
@@ -288,7 +249,7 @@ def add_warn(chat_id, user_id):
     conn = get_db()
     c = conn.cursor()
     c.execute(
-        "INSERT OR IGNORE INTO warns (chat_id, user_id, count) VALUES (?, ?, 0)",
+        "INSERT OR IGNORE INTO warns (chat_id, user_id, count) VALUES (?,?,0)",
         (chat_id, user_id),
     )
     c.execute(
@@ -317,7 +278,7 @@ def inc_stat(chat_id, user_id):
     conn = get_db()
     c = conn.cursor()
     c.execute(
-        "INSERT OR IGNORE INTO message_stats (chat_id, user_id, count) VALUES (?, ?, 0)",
+        "INSERT OR IGNORE INTO message_stats (chat_id, user_id, count) VALUES (?,?,0)",
         (chat_id, user_id),
     )
     c.execute(
@@ -355,68 +316,66 @@ def safe_delete(chat_id, msg_id):
 
 def panel_kb(chat_id):
     g = get_group_row(chat_id)
-    def m(v):
+
+    def mark(v):
         return "✅" if v else "❌"
+
     kb = InlineKeyboardMarkup(row_width=2)
     if not g:
         return kb
-    # g: 0 chat_id,1 title,2 welcome_text,3 welcome_enabled,4 lock_link,5 lock_forward,6 lock_spam,7 warn_limit
+    cid = str(chat_id)
     kb.add(
-        InlineKeyboardButton(f"لینک {m(g[4])}", callback_data=f"g:{chat_id}:tog_link"),
-        InlineKeyboardButton(f"فوروارد {m(g[5])}", callback_data=f"g:{chat_id}:tog_fwd"),
+        InlineKeyboardButton("لینک " + mark(g[4]), callback_data="tog|{}|link".format(cid)),
+        InlineKeyboardButton("فوروارد " + mark(g[5]), callback_data="tog|{}|fwd".format(cid)),
     )
     kb.add(
-        InlineKeyboardButton(f"ضدسپم {m(g[6])}", callback_data=f"g:{chat_id}:tog_spam"),
-        InlineKeyboardButton(f"خوش‌آمد {m(g[3])}", callback_data=f"g:{chat_id}:tog_wel"),
+        InlineKeyboardButton("ضدسپم " + mark(g[6]), callback_data="tog|{}|spam".format(cid)),
+        InlineKeyboardButton("خوش‌آمد " + mark(g[3]), callback_data="tog|{}|wel".format(cid)),
     )
-    kb.add(InlineKeyboardButton("متن خوش‌آمد", callback_data=f"g:{chat_id}:set_wel_text"))
-    kb.add(InlineKeyboardButton("پاسخ خودکار", callback_data=f"g:{chat_id}:auto"))
-    kb.add(InlineKeyboardButton("بستن", callback_data=f"g:{chat_id}:close"))
+    kb.add(InlineKeyboardButton("📝 متن خوش‌آمد", callback_data="act|{}|weltext".format(cid)))
+    kb.add(InlineKeyboardButton("🤖 پاسخ خودکار", callback_data="act|{}|auto".format(cid)))
+    kb.add(InlineKeyboardButton("📖 راهنمای دستورات", callback_data="act|{}|help".format(cid)))
+    kb.add(InlineKeyboardButton("بستن", callback_data="act|{}|close".format(cid)))
     return kb
 
 
 def owner_kb():
     kb = InlineKeyboardMarkup(row_width=1)
-    kb.add(InlineKeyboardButton("📤 آپلود عکس خوش‌آمد", callback_data="own:upload"))
-    kb.add(InlineKeyboardButton("🖼 لیست/پاک عکس‌ها", callback_data="own:photos"))
-    kb.add(InlineKeyboardButton("📢 تبلیغ به گپ‌ها", callback_data="own:bc_groups"))
-    kb.add(InlineKeyboardButton("📢 تبلیغ به استارت‌کننده‌ها", callback_data="own:bc_users"))
+    kb.add(InlineKeyboardButton("📤 آپلود عکس خوش‌آمد", callback_data="own|upload"))
+    kb.add(InlineKeyboardButton("🖼 تعداد / پاک عکس‌ها", callback_data="own|photos"))
+    kb.add(InlineKeyboardButton("📢 تبلیغ به گپ‌ها", callback_data="own|bcg"))
+    kb.add(InlineKeyboardButton("📢 تبلیغ به کاربران استارت", callback_data="own|bcu"))
     return kb
 
 
-# ===================== جوین / لفت =====================
 @bot.message_handler(content_types=["new_chat_members"])
 def on_new_members(message):
     try:
         ensure_group(message.chat)
         chat_id = message.chat.id
         me = bot.get_me()
-
         for member in message.new_chat_members:
             if member.id == me.id:
                 ensure_group(message.chat)
-                bot.send_message(chat_id, "✅ ربات فعال شد.\nبرای پنل بنویس: پنل")
+                bot.send_message(
+                    chat_id,
+                    "✅ ربات فعال شد.\nادمین‌های گپ می‌توانند بنویسند: پنل",
+                )
                 continue
-
             g = get_group_row(chat_id)
             if not g or not g[3]:
                 continue
-
-            template = g[2] or DEFAULT_WELCOME
-            caption = format_welcome(template, member, message.chat)
-
+            caption = format_welcome(g[2] or DEFAULT_WELCOME, member, message.chat)
             conn = get_db()
             c = conn.cursor()
             c.execute("SELECT file_id FROM welcome_photos")
             photos = [r[0] for r in c.fetchall()]
             conn.close()
-
             try:
                 if photos:
-                    fid = random.choice(photos)
                     bot.send_photo(
                         chat_id,
-                        fid,
+                        random.choice(photos),
                         caption=caption,
                         parse_mode="HTML",
                     )
@@ -431,9 +390,8 @@ def on_new_members(message):
         print("new_members:", e)
 
 
-# ===================== دستورات گپ =====================
 @bot.message_handler(
-    func=lambda m: m.chat.type in ["group", "supergroup"],
+    func=lambda m: m.chat.type in ("group", "supergroup"),
     content_types=[
         "text",
         "photo",
@@ -453,29 +411,25 @@ def on_group(message):
         uid = message.from_user.id
         text = (message.text or "").strip()
 
-        # آمار پیام
         if not message.from_user.is_bot:
             inc_stat(chat_id, uid)
 
-        # استپ تنظیم متن خوش‌آمد
-        step = user_steps.get(uid, {})
-        if step.get("step") == "wel_text" and step.get("chat_id") == chat_id:
-            if not is_bot_admin(chat_id, uid):
-                return
-            set_group_field(chat_id, "welcome_text", text)
-            user_steps.pop(uid, None)
-            bot.reply_to(message, "✅ متن خوش‌آمد ذخیره شد.")
+        st = user_steps.get(uid, {})
+        if st.get("step") == "wel_text" and st.get("chat_id") == chat_id:
+            if is_bot_admin(chat_id, uid):
+                set_group_field(chat_id, "welcome_text", text)
+                user_steps.pop(uid, None)
+                bot.reply_to(message, "✅ متن خوش‌آمد ذخیره شد.")
             return
 
         if text:
-            # --- پنل ---
-            if text in ["پنل", "پنل مدیریت"]:
+            if text in ("پنل", "پنل مدیریت"):
                 if not is_bot_admin(chat_id, uid):
+                    bot.reply_to(message, "فقط ادمین گپ / ادمین ربات")
                     return
                 bot.reply_to(message, "🛡 پنل مدیریت گپ", reply_markup=panel_kb(chat_id))
                 return
 
-            # --- آمار کل ---
             if text == "آمار کل":
                 conn = get_db()
                 c = conn.cursor()
@@ -486,89 +440,92 @@ def on_group(message):
                 rows = c.fetchall()
                 conn.close()
                 if not rows:
-                    bot.reply_to(message, "هنوز آماری نیست.")
+                    bot.reply_to(message, "آماری نیست.")
                     return
-                lines = ["📊 آمار کل گپ\n"]
+                lines = ["📊 آمار کل\n"]
                 for i, (u, cnt) in enumerate(rows, 1):
-                    nick = get_nick(chat_id, u)
-                    label = nick or str(u)
-                    lines.append(f"{i}. {label} — {cnt} پیام")
+                    nick = get_nick(chat_id, u) or str(u)
+                    lines.append("{}. {} — {} پیام".format(i, nick, cnt))
                 bot.reply_to(message, "\n".join(lines))
                 return
 
-            # --- دستورات ادمین ---
             if is_bot_admin(chat_id, uid):
-                # سکوت 10
                 if text.startswith("سکوت"):
                     target = extract_target(message)
                     if not target:
-                        bot.reply_to(message, "روی پیام کاربر ریپلای کن.")
+                        bot.reply_to(message, "روی پیام کاربر ریپلای کن")
                         return
                     parts = text.split()
                     sec = 60
                     if len(parts) >= 2 and parts[1].isdigit():
                         sec = int(parts[1])
-                    mute_user(chat_id, target.id, sec)
-                    bot.reply_to(message, f"🔇 سکوت به مدت {sec} ثانیه")
+                    try:
+                        mute_user(chat_id, target.id, sec)
+                        bot.reply_to(message, "🔇 سکوت {} ثانیه".format(sec))
+                    except Exception as e:
+                        bot.reply_to(message, "خطا: ربات دسترسی محدود کردن ندارد\n{}".format(e))
                     return
 
                 if text == "حذف سکوت":
                     target = extract_target(message)
                     if not target:
-                        bot.reply_to(message, "ریپلای کن.")
+                        bot.reply_to(message, "ریپلای کن")
                         return
-                    unmute_user(chat_id, target.id)
-                    bot.reply_to(message, "✅ سکوت برداشته شد.")
+                    try:
+                        unmute_user(chat_id, target.id)
+                        bot.reply_to(message, "✅ سکوت برداشته شد")
+                    except Exception as e:
+                        bot.reply_to(message, "خطا: {}".format(e))
                     return
 
                 if text == "بن":
                     target = extract_target(message)
                     if not target:
-                        bot.reply_to(message, "ریپلای کن.")
+                        bot.reply_to(message, "ریپلای کن")
                         return
-                    bot.ban_chat_member(chat_id, target.id)
-                    bot.reply_to(message, "🚫 بن شد.")
+                    try:
+                        bot.ban_chat_member(chat_id, target.id)
+                        bot.reply_to(message, "🚫 بن شد")
+                    except Exception as e:
+                        bot.reply_to(message, "خطا: {}".format(e))
                     return
 
                 if text == "حذف بن":
                     target = extract_target(message)
                     if not target:
-                        bot.reply_to(message, "ریپلای کن.")
+                        bot.reply_to(message, "ریپلای کن")
                         return
-                    bot.unban_chat_member(chat_id, target.id, only_if_banned=True)
-                    bot.reply_to(message, "✅ بن برداشته شد.")
-                    return
-
-                if text == "پاکسازی لیست بن":
-                    # تلگرام API لیست کامل بن را همیشه نمی‌دهد؛ تلاش با administrators نه
-                    bot.reply_to(
-                        message,
-                        "برای آنبن همه، از تلگرام لیست بن‌شده‌ها در دسترس کامل نیست.\n"
-                        "کاربران را تکی با «حذف بن» آزاد کن.",
-                    )
+                    try:
+                        bot.unban_chat_member(chat_id, target.id, only_if_banned=True)
+                        bot.reply_to(message, "✅ آنبن شد")
+                    except Exception as e:
+                        bot.reply_to(message, "خطا: {}".format(e))
                     return
 
                 if text == "اخطار":
                     target = extract_target(message)
                     if not target:
-                        bot.reply_to(message, "ریپلای کن.")
+                        bot.reply_to(message, "ریپلای کن")
                         return
                     cnt = add_warn(chat_id, target.id)
                     g = get_group_row(chat_id)
                     limit = g[7] if g else 3
-                    bot.reply_to(message, f"⚠️ اخطار {cnt}/{limit}")
+                    bot.reply_to(message, "⚠️ اخطار {}/{}".format(cnt, limit))
                     if cnt >= limit:
-                        mute_user(chat_id, target.id, 600)
-                        bot.reply_to(message, "به‌خاطر اخطار زیاد، ۱۰ دقیقه سکوت شد.")
+                        try:
+                            mute_user(chat_id, target.id, 600)
+                            bot.reply_to(message, "سقف اخطار — ۱۰ دقیقه سکوت")
+                        except Exception:
+                            pass
                     return
 
                 if text == "حذف اخطار":
                     target = extract_target(message)
                     if not target:
-                        bot.reply_to(message, "ریپلای کن.")
+                        bot.reply_to(message, "ریپلای کن")
                         return
                     clear_warn(chat_id, target.id)
-                    bot.reply_to(message, "✅ اخطار پاک شد.")
+                    bot.reply_to(message, "✅ اخطار پاک شد")
                     return
 
                 if text == "پاکسازی لیست اخطار":
@@ -577,7 +534,7 @@ def on_group(message):
                     c.execute("DELETE FROM warns WHERE chat_id=?", (chat_id,))
                     conn.commit()
                     conn.close()
-                    bot.reply_to(message, "✅ همه اخطارها پاک شد.")
+                    bot.reply_to(message, "✅ همه اخطارها پاک شد")
                     return
 
                 if text == "پاکسازی لیست سکوت":
@@ -593,29 +550,39 @@ def on_group(message):
                             unmute_user(chat_id, u)
                         except Exception:
                             pass
-                    bot.reply_to(message, "✅ لیست سکوت پاکسازی شد.")
+                    bot.reply_to(message, "✅ لیست سکوت پاک شد")
+                    return
+
+                if text == "پاکسازی لیست بن":
+                    bot.reply_to(
+                        message,
+                        "تلگرام لیست کامل بن را به ربات نمی‌دهد. با «حذف بن» تکی آنبن کن.",
+                    )
                     return
 
                 if text == "تنظیم ادمین":
                     target = extract_target(message)
                     if not target:
-                        bot.reply_to(message, "ریپلای کن.")
+                        bot.reply_to(message, "ریپلای کن")
                         return
                     conn = get_db()
                     c = conn.cursor()
                     c.execute(
-                        "INSERT OR IGNORE INTO bot_admins (chat_id, user_id) VALUES (?, ?)",
+                        "INSERT OR IGNORE INTO bot_admins (chat_id, user_id) VALUES (?,?)",
                         (chat_id, target.id),
                     )
                     conn.commit()
                     conn.close()
-                    bot.reply_to(message, f"✅ {target.first_name} ادمین ربات شد و می‌تواند از پنل استفاده کند.")
+                    bot.reply_to(
+                        message,
+                        "✅ {} ادمین ربات شد و می‌تواند پنل بزند".format(target.first_name),
+                    )
                     return
 
                 if text.startswith("تنظیم لقب"):
                     target = extract_target(message)
                     if not target:
-                        bot.reply_to(message, "ریپلای کن.")
+                        bot.reply_to(message, "ریپلای کن")
                         return
                     parts = text.split(maxsplit=2)
                     if len(parts) < 3:
@@ -625,12 +592,12 @@ def on_group(message):
                     conn = get_db()
                     c = conn.cursor()
                     c.execute(
-                        "INSERT OR REPLACE INTO nicknames (chat_id, user_id, nick) VALUES (?, ?, ?)",
+                        "INSERT OR REPLACE INTO nicknames (chat_id, user_id, nick) VALUES (?,?,?)",
                         (chat_id, target.id, nick),
                     )
                     conn.commit()
                     conn.close()
-                    bot.reply_to(message, f"✅ لقب ثبت شد: {nick}")
+                    bot.reply_to(message, "✅ لقب: {}".format(nick))
                     return
 
                 if text == "حذف":
@@ -639,14 +606,12 @@ def on_group(message):
                         safe_delete(chat_id, message.message_id)
                     return
 
-                if text.startswith("حذف ") and text.split()[0] == "حذف":
+                if text.startswith("حذف "):
                     parts = text.split()
                     if len(parts) == 2 and parts[1].isdigit():
                         n = min(int(parts[1]), 100)
-                        # حذف پیام‌های اخیر تا حد ممکن
-                        safe_delete(chat_id, message.message_id)
-                        # تلگرام API مستقیم bulk delete محدود است؛ از message_id رو به عقب
                         mid = message.message_id
+                        safe_delete(chat_id, mid)
                         deleted = 0
                         for i in range(1, n + 1):
                             try:
@@ -655,31 +620,27 @@ def on_group(message):
                             except Exception:
                                 pass
                         try:
-                            bot.send_message(chat_id, f"🗑 حدود {deleted} پیام حذف شد.")
+                            bot.send_message(chat_id, "🗑 {} پیام حذف شد".format(deleted))
                         except Exception:
                             pass
                         return
 
-        # فیلترها و پاسخ خودکار
-        apply_filters_and_auto(message)
+        apply_filters(message)
     except Exception as e:
         print("on_group:", e)
 
 
-def apply_filters_and_auto(message):
+def apply_filters(message):
     chat_id = message.chat.id
     uid = message.from_user.id
     if is_bot_admin(chat_id, uid):
         maybe_auto(message)
         return
-
     g = get_group_row(chat_id)
     if not g:
         return
-
     text = message.text or message.caption or ""
 
-    # ضد اسپم ساده: بیش از ۲۵ پیام در ۱۰ ثانیه
     if g[6]:
         key = (chat_id, uid)
         now = time.time()
@@ -688,19 +649,17 @@ def apply_filters_and_auto(message):
         while q and now - q[0] > 10:
             q.popleft()
         if len(q) >= 25:
+            safe_delete(chat_id, message.message_id)
             try:
-                safe_delete(chat_id, message.message_id)
                 mute_user(chat_id, uid, 120)
             except Exception:
                 pass
             return
 
-    # قفل لینک
     if g[4] and text and re.search(r"(https?://|www\.|t\.me/)", text, re.I):
         safe_delete(chat_id, message.message_id)
         return
 
-    # قفل فوروارد
     if g[5] and (message.forward_date or message.forward_from or message.forward_from_chat):
         safe_delete(chat_id, message.message_id)
         return
@@ -725,77 +684,166 @@ def maybe_auto(message):
         if exact and text == keyword:
             bot.reply_to(message, answer)
             return
-        if not exact and keyword in text:
+        if (not exact) and keyword in text:
             bot.reply_to(message, answer)
             return
 
 
-# ===================== کال‌بک پنل گپ =====================
-@bot.callback_query_handler(func=lambda c: c.data.startswith("g:"))
-def group_panel_cb(call):
+@bot.callback_query_handler(func=lambda call: True)
+def on_callback(call):
     try:
-        parts = call.data.split(":")
-        # g:chat_id:action
-        chat_id = int(parts[1])
-        action = parts[2]
         uid = call.from_user.id
+        data = call.data or ""
+        print("CB:", data, "from", uid)
 
-        if not is_bot_admin(chat_id, uid):
-            bot.answer_callback_query(call.id, "دسترسی نداری", show_alert=True)
+        if data.startswith("tog|"):
+            _, cid_s, key = data.split("|", 2)
+            chat_id = int(cid_s)
+            if not is_bot_admin(chat_id, uid):
+                bot.answer_callback_query(call.id, "دسترسی نداری", show_alert=True)
+                return
+            g = get_group_row(chat_id)
+            if not g:
+                bot.answer_callback_query(call.id, "گپ یافت نشد", show_alert=True)
+                return
+            mapping = {
+                "link": ("lock_link", 4),
+                "fwd": ("lock_forward", 5),
+                "spam": ("lock_spam", 6),
+                "wel": ("welcome_enabled", 3),
+            }
+            if key not in mapping:
+                bot.answer_callback_query(call.id)
+                return
+            field, idx = mapping[key]
+            new_val = 0 if g[idx] else 1
+            set_group_field(chat_id, field, new_val)
+            try:
+                bot.edit_message_reply_markup(
+                    call.message.chat.id,
+                    call.message.message_id,
+                    reply_markup=panel_kb(chat_id),
+                )
+            except Exception:
+                pass
+            bot.answer_callback_query(call.id, "تغییر کرد ✅")
             return
 
-        if action == "tog_link":
-            g = get_group_row(chat_id)
-            set_group_field(chat_id, "lock_link", 0 if g[4] else 1)
-        elif action == "tog_fwd":
-            g = get_group_row(chat_id)
-            set_group_field(chat_id, "lock_forward", 0 if g[5] else 1)
-        elif action == "tog_spam":
-            g = get_group_row(chat_id)
-            set_group_field(chat_id, "lock_spam", 0 if g[6] else 1)
-        elif action == "tog_wel":
-            g = get_group_row(chat_id)
-            set_group_field(chat_id, "welcome_enabled", 0 if g[3] else 1)
-        elif action == "set_wel_text":
-            user_steps[uid] = {"step": "wel_text", "chat_id": chat_id}
+        if data.startswith("act|"):
+            _, cid_s, act = data.split("|", 2)
+            chat_id = int(cid_s)
+            if not is_bot_admin(chat_id, uid):
+                bot.answer_callback_query(call.id, "دسترسی نداری", show_alert=True)
+                return
+
+            if act == "weltext":
+                user_steps[uid] = {"step": "wel_text", "chat_id": chat_id}
+                bot.answer_callback_query(call.id)
+                bot.send_message(
+                    call.message.chat.id,
+                    "متن خوش‌آمد را بفرست:\n{name} {username} {id} {group} {mention}",
+                )
+                return
+
+            if act == "auto":
+                code = "AUTO-{}".format(chat_id)
+                bot.answer_callback_query(call.id)
+                bot.send_message(
+                    call.message.chat.id,
+                    "این کد را کپی کن و در پیوی ربات بفرست:\n\n`{}`".format(code),
+                    parse_mode="Markdown",
+                )
+                return
+
+            if act == "help":
+                bot.answer_callback_query(call.id)
+                bot.send_message(
+                    call.message.chat.id,
+                    "📖 دستورات (با ریپلای روی کاربر):\n\n"
+                    "سکوت 30\nحذف سکوت\nبن\nحذف بن\n"
+                    "اخطار\nحذف اخطار\n"
+                    "پاکسازی لیست اخطار\nپاکسازی لیست سکوت\n"
+                    "تنظیم ادمین\nتنظیم لقب گرگ\n"
+                    "حذف\nحذف 50\nآمار کل\nپنل",
+                )
+                return
+
+            if act == "close":
+                safe_delete(call.message.chat.id, call.message.message_id)
+                bot.answer_callback_query(call.id)
+                return
+
             bot.answer_callback_query(call.id)
-            bot.send_message(
-                call.message.chat.id,
-                "متن خوش‌آمد جدید را بفرست.\n"
-                "متغیرها: {name} {username} {id} {group} {mention}",
+            return
+
+        if data.startswith("own|"):
+            if not is_main_owner(uid):
+                bot.answer_callback_query(call.id, "فقط ادمین اصلی", show_alert=True)
+                return
+            act = data.split("|", 1)[1]
+            if act == "upload":
+                user_steps[uid] = {"step": "upload_photo"}
+                bot.send_message(uid, "عکس‌ها را بفرست. پایان: /done")
+            elif act == "photos":
+                conn = get_db()
+                c = conn.cursor()
+                c.execute("SELECT COUNT(*) FROM welcome_photos")
+                n = c.fetchone()[0]
+                conn.close()
+                kb = InlineKeyboardMarkup()
+                kb.add(InlineKeyboardButton("پاک کردن همه", callback_data="own|clear"))
+                bot.send_message(uid, "تعداد عکس: {}".format(n), reply_markup=kb)
+            elif act == "clear":
+                conn = get_db()
+                c = conn.cursor()
+                c.execute("DELETE FROM welcome_photos")
+                conn.commit()
+                conn.close()
+                bot.send_message(uid, "✅ پاک شد")
+            elif act == "bcg":
+                user_steps[uid] = {"step": "bc_groups"}
+                bot.send_message(uid, "محتوای تبلیغ گپ‌ها را بفرست")
+            elif act == "bcu":
+                user_steps[uid] = {"step": "bc_users"}
+                bot.send_message(uid, "محتوای تبلیغ کاربران را بفرست")
+            bot.answer_callback_query(call.id)
+            return
+
+        if data in ("auto_exact", "auto_include"):
+            d = user_steps.get(uid, {})
+            if d.get("step") != "auto_mode":
+                bot.answer_callback_query(call.id)
+                return
+            exact = 1 if data == "auto_exact" else 0
+            conn = get_db()
+            c = conn.cursor()
+            c.execute(
+                "INSERT INTO autoreplies (chat_id, keyword, answer, exact_match, active) VALUES (?,?,?,?,1)",
+                (d["chat_id"], d["keyword"], d["answer"], exact),
             )
-            return
-        elif action == "auto":
-            code = f"AUTO-{chat_id}"
-            bot.answer_callback_query(call.id)
-            bot.send_message(
-                call.message.chat.id,
-                "برای تنظیم پاسخ خودکار این کد را در پیوی ربات بفرست:\n\n"
-                f"`{code}`\n\n"
-                "کد را لمس کن تا کپی شود.",
-                parse_mode="Markdown",
-            )
-            return
-        elif action == "close":
-            safe_delete(call.message.chat.id, call.message.message_id)
+            conn.commit()
+            conn.close()
+            user_steps.pop(uid, None)
+            try:
+                bot.edit_message_text(
+                    "✅ پاسخ خودکار ذخیره شد",
+                    call.message.chat.id,
+                    call.message.message_id,
+                )
+            except Exception:
+                bot.send_message(uid, "✅ ذخیره شد")
             bot.answer_callback_query(call.id)
             return
 
-        bot.edit_message_reply_markup(
-            call.message.chat.id,
-            call.message.message_id,
-            reply_markup=panel_kb(chat_id),
-        )
-        bot.answer_callback_query(call.id, "انجام شد")
+        bot.answer_callback_query(call.id)
     except Exception as e:
-        print("panel cb:", e)
+        print("callback error:", e)
         try:
-            bot.answer_callback_query(call.id)
+            bot.answer_callback_query(call.id, "خطا", show_alert=True)
         except Exception:
             pass
 
 
-# ===================== پیوی =====================
 @bot.message_handler(commands=["start"])
 def cmd_start(message):
     if message.chat.type != "private":
@@ -806,59 +854,14 @@ def cmd_start(message):
     c.execute("INSERT OR IGNORE INTO started_users (user_id) VALUES (?)", (uid,))
     conn.commit()
     conn.close()
-
     if is_main_owner(uid):
-        bot.reply_to(
-            message,
-            "👑 پنل ادمین اصلی\n\n"
-            "عکس خوش‌آمد را از دکمه آپلود کن.\n"
-            "تبلیغات را از همین‌جا بفرست.",
-            reply_markup=owner_kb(),
-        )
+        bot.reply_to(message, "👑 پنل ادمین اصلی", reply_markup=owner_kb())
     else:
         bot.reply_to(
             message,
-            "سلام 👋\n"
-            "ربات را ادمین گپ کن و در گپ بنویس: پنل\n\n"
-            "اگر کد پاسخ خودکار داری (مثل AUTO-100...) همین‌جا بفرست.",
+            "ربات را ادمین گپ کن و در گپ بنویس: پنل\n"
+            "اگر کد AUTO-... داری همین‌جا بفرست.",
         )
-
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("own:"))
-def owner_cb(call):
-    uid = call.from_user.id
-    if not is_main_owner(uid):
-        bot.answer_callback_query(call.id, "فقط ادمین اصلی", show_alert=True)
-        return
-    action = call.data.split(":")[1]
-
-    if action == "upload":
-        user_steps[uid] = {"step": "upload_photo"}
-        bot.send_message(uid, "عکس‌های خوش‌آمد را بفرست (هر پیام یک عکس).\nبرای پایان: /done")
-    elif action == "photos":
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("SELECT COUNT(*) FROM welcome_photos")
-        n = c.fetchone()[0]
-        conn.close()
-        kb = InlineKeyboardMarkup()
-        kb.add(InlineKeyboardButton("🗑 پاک کردن همه عکس‌ها", callback_data="own:clear_photos"))
-        bot.send_message(uid, f"تعداد عکس‌های خوش‌آمد: {n}", reply_markup=kb)
-    elif action == "clear_photos":
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("DELETE FROM welcome_photos")
-        conn.commit()
-        conn.close()
-        bot.send_message(uid, "✅ همه عکس‌ها پاک شد.")
-    elif action == "bc_groups":
-        user_steps[uid] = {"step": "bc_groups"}
-        bot.send_message(uid, "متن یا رسانه تبلیغ برای همه گپ‌ها را بفرست:")
-    elif action == "bc_users":
-        user_steps[uid] = {"step": "bc_users"}
-        bot.send_message(uid, "متن یا رسانه تبلیغ برای استارت‌کننده‌ها را بفرست:")
-
-    bot.answer_callback_query(call.id)
 
 
 @bot.message_handler(commands=["done"])
@@ -868,7 +871,7 @@ def cmd_done(message):
     uid = message.from_user.id
     if user_steps.get(uid, {}).get("step") == "upload_photo":
         user_steps.pop(uid, None)
-        bot.reply_to(message, "✅ آپلود تمام شد.")
+        bot.reply_to(message, "✅ آپلود تمام شد")
 
 
 @bot.message_handler(
@@ -878,48 +881,44 @@ def cmd_done(message):
 def on_private(message):
     uid = message.from_user.id
     text = (message.text or "").strip()
-    step_data = user_steps.get(uid, {})
-    step = step_data.get("step")
+    st = user_steps.get(uid, {})
+    step = st.get("step")
 
-    # کد پاسخ خودکار
     if text.startswith("AUTO-"):
         try:
             chat_id = int(text.replace("AUTO-", "").strip())
         except Exception:
-            bot.reply_to(message, "کد نامعتبر است.")
+            bot.reply_to(message, "کد نامعتبر")
             return
-        if not is_bot_admin(chat_id, uid) and not is_main_owner(uid):
-            bot.reply_to(message, "به این گپ دسترسی نداری.")
+        if not (is_bot_admin(chat_id, uid) or is_main_owner(uid)):
+            bot.reply_to(message, "دسترسی به این گپ نداری")
             return
         user_steps[uid] = {"step": "auto_key", "chat_id": chat_id}
-        bot.reply_to(message, "کلمه کلیدی را بفرست (مثال: سلام)")
+        bot.reply_to(message, "کلمه کلیدی (مثال سلام):")
         return
 
     if step == "auto_key":
         user_steps[uid] = {
             "step": "auto_ans",
-            "chat_id": step_data["chat_id"],
+            "chat_id": st["chat_id"],
             "keyword": text,
         }
-        bot.reply_to(message, "متن جواب خودکار را بفرست:")
+        bot.reply_to(message, "متن جواب:")
         return
 
     if step == "auto_ans":
         user_steps[uid] = {
             "step": "auto_mode",
-            "chat_id": step_data["chat_id"],
-            "keyword": step_data["keyword"],
+            "chat_id": st["chat_id"],
+            "keyword": st["keyword"],
             "answer": text,
         }
         kb = InlineKeyboardMarkup(row_width=1)
-        kb.add(
-            InlineKeyboardButton("فقط دقیقاً همان کلمه", callback_data="auto:exact"),
-            InlineKeyboardButton("هر جا در متن بود", callback_data="auto:include"),
-        )
-        bot.reply_to(message, "حالت تشخیص را انتخاب کن:", reply_markup=kb)
+        kb.add(InlineKeyboardButton("فقط دقیقاً همان کلمه", callback_data="auto_exact"))
+        kb.add(InlineKeyboardButton("هر جا در متن بود", callback_data="auto_include"))
+        bot.reply_to(message, "حالت:", reply_markup=kb)
         return
 
-    # آپلود عکس خوش‌آمد
     if step == "upload_photo" and is_main_owner(uid):
         if message.photo:
             fid = message.photo[-1].file_id
@@ -930,71 +929,36 @@ def on_private(message):
             c.execute("SELECT COUNT(*) FROM welcome_photos")
             n = c.fetchone()[0]
             conn.close()
-            bot.reply_to(message, f"✅ ذخیره شد. تعداد کل: {n}\nادامه بده یا /done")
+            bot.reply_to(message, "✅ ذخیره شد | کل: {}\n/done برای پایان".format(n))
         else:
-            bot.reply_to(message, "فقط عکس بفرست یا /done")
+            bot.reply_to(message, "فقط عکس یا /done")
         return
 
-    # تبلیغات
     if step in ("bc_groups", "bc_users") and is_main_owner(uid):
-        targets = []
         conn = get_db()
         c = conn.cursor()
         if step == "bc_groups":
             c.execute("SELECT chat_id FROM groups")
-            targets = [r[0] for r in c.fetchall()]
         else:
             c.execute("SELECT user_id FROM started_users")
-            targets = [r[0] for r in c.fetchall()]
+        targets = [r[0] for r in c.fetchall()]
         conn.close()
-
         ok = 0
         for t in targets:
             try:
-                if message.photo:
-                    bot.send_photo(t, message.photo[-1].file_id, caption=message.caption or None)
-                elif message.video:
-                    bot.send_video(t, message.video.file_id, caption=message.caption or None)
-                elif message.text:
-                    bot.send_message(t, message.text)
-                elif message.animation:
-                    bot.send_animation(t, message.animation.file_id, caption=message.caption or None)
-                else:
-                    bot.copy_message(t, message.chat.id, message.message_id)
+                bot.copy_message(t, message.chat.id, message.message_id)
                 ok += 1
-                time.sleep(0.05)
+                time.sleep(0.04)
             except Exception:
                 pass
         user_steps.pop(uid, None)
-        bot.reply_to(message, f"✅ ارسال شد به {ok} مقصد.")
+        bot.reply_to(message, "✅ ارسال به {} مقصد".format(ok))
         return
 
     if is_main_owner(uid) and not step:
-        bot.reply_to(message, "از منوی زیر استفاده کن:", reply_markup=owner_kb())
+        bot.reply_to(message, "منوی ادمین:", reply_markup=owner_kb())
 
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("auto:"))
-def auto_mode_cb(call):
-    uid = call.from_user.id
-    data = user_steps.get(uid, {})
-    if data.get("step") != "auto_mode":
-        bot.answer_callback_query(call.id)
-        return
-    exact = 1 if call.data == "auto:exact" else 0
-    conn = get_db()
-    c = conn.cursor()
-    c.execute(
-        "INSERT INTO autoreplies (chat_id, keyword, answer, exact_match, active) VALUES (?, ?, ?, ?, 1)",
-        (data["chat_id"], data["keyword"], data["answer"], exact),
-    )
-    conn.commit()
-    conn.close()
-    user_steps.pop(uid, None)
-    bot.edit_message_text("✅ پاسخ خودکار ذخیره شد.", call.message.chat.id, call.message.message_id)
-    bot.answer_callback_query(call.id)
-
-
-# ===================== اجرا =====================
 if __name__ == "__main__":
-    print("Bot started...")
+    print("Bot started OK")
     bot.infinity_polling(none_stop=True, timeout=60, long_polling_timeout=50)
