@@ -35,7 +35,7 @@ from telegram.ext import (
 )
 
 # ==================== تنظیمات ====================
-BOT_TOKEN = "8927379360:AAHn_W7JKAiAMKe9Gj-pAB5Lz6OeItdpszk"
+BOT_TOKEN = "8898641243:AAHB-k76A8ZUcoAGwghUHLuf1EWzAyyYmPU"
 ADMIN_ID = 7530457395
 
 # فایل ذخیره‌سازی تنظیمات و کاربران
