@@ -1,26 +1,25 @@
 # -*- coding: utf-8 -*-
 """
-ربات تلگرام نمایشی با پنل ادمین کامل
-- ادمین: 7530457395
-- منوی استارت قابل تنظیم
-- بخش‌ها با دکمه شیشه‌ای + متن + عکس + توضیحات
-- درخواست شماره/لوکیشن فقط در بخشی که ادمین مشخص کند
-- مشاهده پیام‌های کاربران
-- ارسال پیام همگانی
+ربات کارت کلکسیون
+- آپلود کارت توسط ادمین + سطح کمیابی
+- ارسال زمان‌بندی‌شده در گپ‌ها
+- گرفتن کارت با ریپلای «کارت»
+- پروفایل کارتی، لیست کارت، تنظیم پروفایل، انتقال کارت
+- لقب و سطح بر اساس کارت‌ها
 """
 
 import logging
 import json
 import os
-from datetime import datetime
+import random
+import string
+from datetime import datetime, timedelta
 
 from telegram import (
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    ReplyKeyboardMarkup,
-    KeyboardButton,
-    ReplyKeyboardRemove,
+    ChatMemberUpdated,
 )
 from telegram.ext import (
     Application,
@@ -29,12 +28,34 @@ from telegram.ext import (
     MessageHandler,
     ContextTypes,
     filters,
+    ChatMemberHandler,
 )
+from telegram.constants import ChatMemberStatus, ChatType
 
 # ==================== تنظیمات ====================
-BOT_TOKEN = "8898641243:AAHB-k76A8ZUcoAGwghUHLuf1EWzAyyYmPU"
+BOT_TOKEN = "8273833935:AAHqnz3EBZPdDtThKRDZ4aN6cyybbujmXd0"
 ADMIN_ID = 7530457395
-DATA_FILE = "bot_data.json"
+DATA_FILE = "card_bot_data.json"
+
+INTERVALS = [
+    3600, 5400, 7200, 9000, 10800, 12600, 14400, 16200, 18000,
+]
+
+RARITIES = ["فوق‌کمیاب", "افسانه‌ای", "اولتیمت", "اپیک", "لجند"]
+RARITY_EMOJI = {
+    "فوق‌کمیاب": "💎",
+    "افسانه‌ای": "👑",
+    "اولتیمت": "🔥",
+    "اپیک": "⚡",
+    "لجند": "🌟",
+}
+RARITY_POINTS = {
+    "فوق‌کمیاب": 50,
+    "افسانه‌ای": 30,
+    "اولتیمت": 20,
+    "اپیک": 10,
+    "لجند": 5,
+}
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -43,644 +64,801 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# ==================== مدیریت داده ====================
-def load_data() -> dict:
-    default = {
-        "start_message": "👋 سلام! به ربات خوش آمدید.\n\nلطفاً یکی از گزینه‌های زیر را انتخاب کنید:",
-        "sections": [],  # هیچ بخش پیش‌فرضی نیست - همه چیز از پنل ادمین ساخته می‌شود
+def default_data():
+    return {
+        "pool": [],
         "users": {},
-        "messages": [],
-        "after_contact_msg": "✅ شماره شما با موفقیت ثبت شد. ممنون!",
-        "after_location_msg": "✅ لوکیشن شما با موفقیت ثبت شد. ممنون!",
+        "groups": {},
+        "titles": [
+            {"name": "تازه‌وارد", "min_points": 0},
+            {"name": "جمع‌کننده", "min_points": 20},
+            {"name": "شکارچی کارت", "min_points": 50},
+            {"name": "افسانه", "min_points": 100},
+            {"name": "اسطوره", "min_points": 200},
+        ],
     }
+
+
+def load_data():
     if os.path.exists(DATA_FILE):
         try:
             with open(DATA_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                for k, v in default.items():
-                    if k not in data:
-                        data[k] = v
-                # مطمئن شو همه بخش‌ها type دارند
-                for sec in data.get("sections", []):
-                    if "type" not in sec:
-                        sec["type"] = "normal"
-                return data
+                d = json.load(f)
+            base = default_data()
+            for k, v in base.items():
+                if k not in d:
+                    d[k] = v
+            return d
         except Exception as e:
-            logger.error(f"خطا در خواندن فایل: {e}")
-    return default
+            logger.error(e)
+    return default_data()
 
 
-def save_data(data: dict):
-    try:
-        with open(DATA_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        logger.error(f"خطا در ذخیره فایل: {e}")
+def save_data(data):
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-def is_admin(user_id: int) -> bool:
-    return user_id == ADMIN_ID
+def is_admin(uid: int) -> bool:
+    return uid == ADMIN_ID
 
 
-# ==================== کیبوردها ====================
-def get_main_keyboard(data: dict) -> InlineKeyboardMarkup:
-    buttons = []
-    for sec in data.get("sections", []):
-        buttons.append([
-            InlineKeyboardButton(sec["title"], callback_data=f"sec_{sec['id']}")
-        ])
-    return InlineKeyboardMarkup(buttons) if buttons else InlineKeyboardMarkup([])
+def gen_code(length=6) -> str:
+    chars = string.ascii_lowercase + string.digits
+    return "c" + "".join(random.choice(chars) for _ in range(length))
 
 
-def get_admin_keyboard() -> InlineKeyboardMarkup:
-    keyboard = [
-        [InlineKeyboardButton("📝 تنظیم پیام استارت", callback_data="admin_edit_start")],
-        [InlineKeyboardButton("➕ افزودن بخش جدید", callback_data="admin_add_section")],
-        [InlineKeyboardButton("📋 لیست بخش‌ها / حذف", callback_data="admin_list_sections")],
-        [InlineKeyboardButton("💬 پیام‌های کاربران", callback_data="admin_messages")],
-        [InlineKeyboardButton("📢 ارسال پیام همگانی", callback_data="admin_broadcast")],
-        [InlineKeyboardButton("👥 آمار کاربران", callback_data="admin_stats")],
-        [InlineKeyboardButton("🔙 بستن پنل", callback_data="admin_close")],
+def ensure_user(data, user) -> dict:
+    uid = str(user.id)
+    if uid not in data["users"]:
+        data["users"][uid] = {
+            "name": user.full_name,
+            "username": user.username or "",
+            "cards": [],
+            "profile_code": None,
+            "points": 0,
+            "level": 1,
+            "title": "تازه‌وارد",
+        }
+    else:
+        data["users"][uid]["name"] = user.full_name
+        data["users"][uid]["username"] = user.username or ""
+    return data["users"][uid]
+
+
+def calc_points(cards: list) -> int:
+    return sum(RARITY_POINTS.get(c.get("rarity", "لجند"), 5) for c in cards)
+
+
+def calc_level(points: int) -> int:
+    level = 1
+    need = 15
+    total = 0
+    while points >= total + need:
+        total += need
+        level += 1
+        need = int(need * 1.4) + 10
+    return level
+
+
+def pick_title(data, points: int) -> str:
+    titles = sorted(data.get("titles", []), key=lambda t: t.get("min_points", 0))
+    chosen = "تازه‌وارد"
+    for t in titles:
+        if points >= t.get("min_points", 0):
+            chosen = t["name"]
+    return chosen
+
+
+def update_user_stats(data, uid: str):
+    u = data["users"].get(uid)
+    if not u:
+        return
+    pts = calc_points(u["cards"])
+    u["points"] = pts
+    u["level"] = calc_level(pts)
+    u["title"] = pick_title(data, pts)
+
+
+def rarity_caption(rarity: str, code: str) -> str:
+    em = RARITY_EMOJI.get(rarity, "✨")
+    templates = {
+        "فوق‌کمیاب": f"{em} یک کارت فوق‌کمیاب ظاهر شد!\nکد: `{code}`\nبرای گرفتن، ریپلای کن و بنویس: کارت",
+        "افسانه‌ای": f"{em} کارت افسانه‌ای از راه رسید!\nکد: `{code}`\nریپلای + کلمه کارت = مال تو",
+        "اولتیمت": f"{em} قدرت اولتیمت آزاد شد!\nکد: `{code}`\nاولین نفری که «کارت» بفرسته برنده‌ست",
+        "اپیک": f"{em} کارت اپیک پیدا شد!\nکد: `{code}`\nریپلای کن و بنویس کارت",
+        "لجند": f"{em} کارت لجند آماده شکار!\nکد: `{code}`\nبا ریپلای و نوشتن کارت مال تو می‌شه",
+    }
+    return templates.get(rarity, f"{em} کارت جدید!\nکد: `{code}`\nریپلای + کارت")
+
+
+def count_by_rarity(cards: list) -> dict:
+    c = {r: 0 for r in RARITIES}
+    for card in cards:
+        r = card.get("rarity", "لجند")
+        c[r] = c.get(r, 0) + 1
+    return c
+
+
+def profile_text(data, uid: str) -> str:
+    u = data["users"].get(uid)
+    if not u:
+        return "کاربر پیدا نشد."
+    counts = count_by_rarity(u["cards"])
+    lines = [
+        f"👤 <b>{u.get('name', '-')}</b>",
+        f"🏷 لقب: <b>{u.get('title', '-')}</b>",
+        f"📊 سطح: <b>{u.get('level', 1)}</b>",
+        f"⭐ امتیاز: <b>{u.get('points', 0)}</b>",
+        f"🃏 تعداد کل کارت: <b>{len(u['cards'])}</b>",
+        "",
+        "📦 به تفکیک:",
     ]
-    return InlineKeyboardMarkup(keyboard)
+    for r in RARITIES:
+        if counts.get(r, 0):
+            lines.append(f"{RARITY_EMOJI.get(r, '')} {r}: {counts[r]}")
+    if u.get("profile_code"):
+        lines.append(f"\n🖼 پروفایل کارتی: <code>{u['profile_code']}</code>")
+    else:
+        lines.append("\n🖼 پروفایل کارتی: تنظیم نشده")
+    return "\n".join(lines)
 
 
-def get_contact_keyboard() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        [[KeyboardButton("📱 ارسال شماره تماس", request_contact=True)]],
-        resize_keyboard=True,
-        one_time_keyboard=True,
-    )
+def admin_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📤 آپلود کارت جدید", callback_data="ad_upload")],
+        [InlineKeyboardButton("📋 موجودی استخر کارت", callback_data="ad_pool")],
+        [InlineKeyboardButton("🏷 مدیریت لقب‌ها", callback_data="ad_titles")],
+        [InlineKeyboardButton("👥 آمار", callback_data="ad_stats")],
+        [InlineKeyboardButton("📢 ارسال فوری در همه گپ‌ها", callback_data="ad_force")],
+    ])
 
 
-def get_location_keyboard() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        [[KeyboardButton("📍 ارسال لوکیشن", request_location=True)]],
-        resize_keyboard=True,
-        one_time_keyboard=True,
-    )
+def rarity_keyboard():
+    rows = [[InlineKeyboardButton(f"{RARITY_EMOJI.get(r, '')} {r}", callback_data=f"ad_rar_{r}")] for r in RARITIES]
+    rows.append([InlineKeyboardButton("❌ انصراف", callback_data="ad_cancel")])
+    return InlineKeyboardMarkup(rows)
 
 
-# ==================== /start ====================
+def profile_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📋 لیست کارت‌هام", callback_data="my_cards")],
+        [InlineKeyboardButton("🖼 تنظیم پروفایل کارتی", callback_data="set_profile")],
+    ])
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     data = load_data()
-    user_id = str(user.id)
-
-    # ثبت کاربر
-    if user_id not in data["users"]:
-        data["users"][user_id] = {
-            "name": user.full_name,
-            "username": user.username or "-",
-            "phone": None,
-            "location": None,
-            "joined": datetime.now().strftime("%Y-%m-%d %H:%M"),
-        }
-    else:
-        data["users"][user_id]["name"] = user.full_name
-        data["users"][user_id]["username"] = user.username or "-"
+    ensure_user(data, user)
     save_data(data)
 
-    # ادمین → پنل
-    if is_admin(user.id):
+    if is_admin(user.id) and update.effective_chat.type == ChatType.PRIVATE:
         await update.message.reply_text(
-            "🔐 <b>پنل مدیریت ربات</b>\n\nاز منوی زیر تنظیمات را انجام دهید:",
-            reply_markup=get_admin_keyboard(),
+            "🔐 <b>پنل ادمین</b>\n\nاز منو استفاده کن. تو هم می‌تونی تو گپ‌ها کارت جمع کنی.",
             parse_mode="HTML",
+            reply_markup=admin_keyboard(),
         )
         return
 
-    # کاربر عادی → فقط پیام استارت + دکمه‌های بخش‌ها (بدون اجبار شماره)
+    text = (
+        "🎴 <b>ربات کارت کلکسیون</b>\n\n"
+        "تو گپ‌ها کارت رندوم میاد.\n"
+        "اولین نفری که ریپلای کنه و بنویسه <b>کارت</b> برنده‌ست.\n\n"
+        "دستورات:\n"
+        "• <code>پروفایلم</code> → پروفایل خودت\n"
+        "• ریپلای + <code>پروفایل کارتی</code> → پروفایل اون نفر\n"
+        "• <code>انتقال کارت کد</code> → انتقال کارت (با ریپلای روی گیرنده)\n\n"
+        "از دکمه‌ها هم استفاده کن:"
+    )
+    await update.message.reply_text(text, parse_mode="HTML", reply_markup=profile_keyboard())
+
+
+async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    if update.effective_chat.type != ChatType.PRIVATE:
+        await update.message.reply_text("پنل ادمین فقط تو پیوی رباته.")
+        return
+    await update.message.reply_text("🔐 پنل ادمین:", reply_markup=admin_keyboard())
+
+
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        data.get("start_message", "سلام!"),
-        reply_markup=get_main_keyboard(data),
+        "📖 <b>راهنما</b>\n\n"
+        "• وقتی کارت تو گپ میاد، ریپلای کن و بنویس: <b>کارت</b>\n"
+        "• <code>پروفایلم</code> → پروفایل خودت\n"
+        "• ریپلای روی کسی + <code>پروفایل کارتی</code> → پروفایل اون\n"
+        "• <code>انتقال کارت کد</code> + ریپلای روی گیرنده\n"
+        "• دکمه‌های لیست کارت و تنظیم پروفایل\n\n"
+        "ربات را به گپ اضافه کن تا خودکار شروع کند.",
         parse_mode="HTML",
+        reply_markup=profile_keyboard(),
     )
 
 
-# ==================== کال‌بک بخش‌ها (کاربر) ====================
-async def section_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    data = load_data()
-    sec_id = query.data.replace("sec_", "")
-    section = next((s for s in data["sections"] if s["id"] == sec_id), None)
-
-    if not section:
-        await query.edit_message_text("❌ بخش پیدا نشد.")
+async def on_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    result: ChatMemberUpdated = update.my_chat_member
+    chat = result.chat
+    if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
         return
-
-    sec_type = section.get("type", "normal")
-
-    # ---- بخش درخواست شماره ----
-    if sec_type == "contact":
-        text = section.get("text") or "لطفاً شماره تماس خود را ارسال کنید:"
-        if section.get("description"):
-            text = f"{section['description']}\n\n{text}"
-        try:
-            await query.message.reply_text(
-                text,
-                reply_markup=get_contact_keyboard(),
-                parse_mode="HTML",
-            )
-            await query.delete_message()
-        except Exception:
-            await query.edit_message_text(text, parse_mode="HTML")
-            await query.message.reply_text(
-                "دکمه زیر را بزنید:",
-                reply_markup=get_contact_keyboard(),
-            )
-        return
-
-    # ---- بخش درخواست لوکیشن ----
-    if sec_type == "location":
-        text = section.get("text") or "لطفاً لوکیشن خود را ارسال کنید:"
-        if section.get("description"):
-            text = f"{section['description']}\n\n{text}"
-        try:
-            await query.message.reply_text(
-                text,
-                reply_markup=get_location_keyboard(),
-                parse_mode="HTML",
-            )
-            await query.delete_message()
-        except Exception:
-            await query.edit_message_text(text, parse_mode="HTML")
-            await query.message.reply_text(
-                "دکمه زیر را بزنید:",
-                reply_markup=get_location_keyboard(),
-            )
-        return
-
-    # ---- بخش عادی ----
-    text = f"<b>{section['title']}</b>\n\n"
-    if section.get("description"):
-        text += f"{section['description']}\n\n"
-    if section.get("text"):
-        text += section["text"]
-
-    if section.get("photo"):
-        try:
-            await query.message.reply_photo(
-                photo=section["photo"],
-                caption=text,
-                parse_mode="HTML",
-                reply_markup=get_main_keyboard(data),
-            )
-            await query.delete_message()
-            return
-        except Exception as e:
-            logger.warning(f"خطا در ارسال عکس: {e}")
-
-    await query.edit_message_text(
-        text or "محتوایی وجود ندارد.",
-        parse_mode="HTML",
-        reply_markup=get_main_keyboard(data),
-    )
-
-
-# ==================== هندلر شماره تماس ====================
-async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message.contact:
-        return
-
-    user = update.effective_user
-    data = load_data()
-    user_id = str(user.id)
-    phone = update.message.contact.phone_number
-
-    if user_id not in data["users"]:
-        data["users"][user_id] = {
-            "name": user.full_name,
-            "username": user.username or "-",
-            "phone": phone,
-            "location": None,
-            "joined": datetime.now().strftime("%Y-%m-%d %H:%M"),
-        }
-    else:
-        data["users"][user_id]["phone"] = phone
-
-    data["messages"].append({
-        "user_id": user_id,
-        "name": user.full_name,
-        "type": "contact",
-        "content": phone,
-        "time": datetime.now().strftime("%Y-%m-%d %H:%M"),
-    })
-    save_data(data)
-
-    await update.message.reply_text(
-        data.get("after_contact_msg", "✅ شماره ثبت شد."),
-        reply_markup=ReplyKeyboardRemove(),
-    )
-    await update.message.reply_text(
-        "از منوی زیر استفاده کنید:",
-        reply_markup=get_main_keyboard(data),
-    )
-
-
-# ==================== هندلر لوکیشن ====================
-async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message.location:
-        return
-
-    user = update.effective_user
-    data = load_data()
-    user_id = str(user.id)
-    loc = update.message.location
-    loc_str = f"{loc.latitude}, {loc.longitude}"
-
-    if user_id not in data["users"]:
-        data["users"][user_id] = {
-            "name": user.full_name,
-            "username": user.username or "-",
-            "phone": None,
-            "location": loc_str,
-            "joined": datetime.now().strftime("%Y-%m-%d %H:%M"),
-        }
-    else:
-        data["users"][user_id]["location"] = loc_str
-
-    data["messages"].append({
-        "user_id": user_id,
-        "name": user.full_name,
-        "type": "location",
-        "content": loc_str,
-        "time": datetime.now().strftime("%Y-%m-%d %H:%M"),
-    })
-    save_data(data)
-
-    await update.message.reply_text(
-        data.get("after_location_msg", "✅ لوکیشن ثبت شد."),
-        reply_markup=ReplyKeyboardRemove(),
-    )
-    await update.message.reply_text(
-        "از منوی زیر استفاده کنید:",
-        reply_markup=get_main_keyboard(data),
-    )
-
-
-# ==================== پیام متنی کاربران ====================
-async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if is_admin(user.id):
-        return  # ادمین در admin_message_handler هندل می‌شود
-
-    text = update.message.text or ""
-    data = load_data()
-    user_id = str(user.id)
-
-    data["messages"].append({
-        "user_id": user_id,
-        "name": user.full_name,
-        "type": "text",
-        "content": text,
-        "time": datetime.now().strftime("%Y-%m-%d %H:%M"),
-    })
-    save_data(data)
-
-    await update.message.reply_text(
-        "✅ پیام شما دریافت شد.\nاز منوی زیر استفاده کنید:",
-        reply_markup=get_main_keyboard(data),
-    )
-
-
-# ==================== پنل ادمین (کال‌بک) ====================
-async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    if not is_admin(query.from_user.id):
-        await query.edit_message_text("⛔ دسترسی ندارید.")
-        return
-
-    data = load_data()
-    action = query.data
-
-    if action == "admin_menu":
-        await query.edit_message_text(
-            "🔐 <b>پنل مدیریت ربات</b>\n\nاز منوی زیر انتخاب کنید:",
-            reply_markup=get_admin_keyboard(),
-            parse_mode="HTML",
-        )
-        return
-
-    if action == "admin_close":
-        await query.edit_message_text("✅ پنل بسته شد.")
-        return
-
-    if action == "admin_stats":
-        total = len(data["users"])
-        with_phone = sum(1 for u in data["users"].values() if u.get("phone"))
-        with_loc = sum(1 for u in data["users"].values() if u.get("location"))
-        msg_count = len(data["messages"])
-        text = (
-            f"📊 <b>آمار ربات</b>\n\n"
-            f"👥 تعداد کاربران: <b>{total}</b>\n"
-            f"📱 دارای شماره: <b>{with_phone}</b>\n"
-            f"📍 دارای لوکیشن: <b>{with_loc}</b>\n"
-            f"💬 تعداد پیام‌ها: <b>{msg_count}</b>"
-        )
-        await query.edit_message_text(
-            text,
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 بازگشت", callback_data="admin_menu")]
-            ]),
-            parse_mode="HTML",
-        )
-        return
-
-    if action == "admin_list_sections":
-        if not data["sections"]:
-            text = "هیچ بخشی تعریف نشده."
-            buttons = [[InlineKeyboardButton("🔙 بازگشت", callback_data="admin_menu")]]
-        else:
-            text = "📋 <b>لیست بخش‌ها:</b>\n\n"
-            buttons = []
-            for sec in data["sections"]:
-                ttype = {"normal": "عادی", "contact": "شماره", "location": "لوکیشن"}.get(sec.get("type", "normal"), "عادی")
-                text += f"• {sec['title']}  [{ttype}]\n"
-                buttons.append([
-                    InlineKeyboardButton(
-                        f"🗑 حذف «{sec['title']}»",
-                        callback_data=f"admin_del_sec_{sec['id']}"
-                    )
-                ])
-            buttons.append([InlineKeyboardButton("🔙 بازگشت", callback_data="admin_menu")])
-        await query.edit_message_text(
-            text,
-            reply_markup=InlineKeyboardMarkup(buttons),
-            parse_mode="HTML",
-        )
-        return
-
-    if action.startswith("admin_del_sec_"):
-        sec_id = action.replace("admin_del_sec_", "")
-        data["sections"] = [s for s in data["sections"] if s["id"] != sec_id]
-        save_data(data)
-        await query.edit_message_text(
-            "✅ بخش حذف شد.",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 بازگشت", callback_data="admin_list_sections")]
-            ]),
-        )
-        return
-
-    if action == "admin_messages":
-        msgs = data.get("messages", [])[-25:]
-        if not msgs:
-            text = "هنوز پیامی ثبت نشده."
-        else:
-            text = "💬 <b>آخرین پیام‌های کاربران:</b>\n\n"
-            for m in reversed(msgs):
-                content = str(m.get("content", ""))[:70]
-                text += (
-                    f"👤 {m.get('name', '-')} ({m.get('user_id', '-')})\n"
-                    f"📌 {m.get('type', '-')}: {content}\n"
-                    f"🕐 {m.get('time', '-')}\n"
-                    f"{'─' * 18}\n"
+    new = result.new_chat_member
+    if new.status in (ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR):
+        data = load_data()
+        cid = str(chat.id)
+        if cid not in data["groups"]:
+            data["groups"][cid] = {
+                "interval_index": 0,
+                "next_send": datetime.now().isoformat(),
+                "active_msg_id": None,
+                "active_card_code": None,
+                "title": chat.title or "",
+            }
+            save_data(data)
+            try:
+                await context.bot.send_message(
+                    chat.id,
+                    "🎴 ربات کارت فعال شد!\n"
+                    "هر از گاهی کارت رندوم میاد.\n"
+                    "با ریپلای و نوشتن <b>کارت</b> می‌تونی بگیری‌ش.\n\n"
+                    "دستورات: پروفایلم | پروفایل کارتی (ریپلای) | انتقال کارت",
+                    parse_mode="HTML",
                 )
-        await query.edit_message_text(
-            text[:4000],
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🗑 پاک کردن همه", callback_data="admin_clear_msgs")],
-                [InlineKeyboardButton("🔙 بازگشت", callback_data="admin_menu")],
-            ]),
-            parse_mode="HTML",
-        )
-        return
+            except Exception:
+                pass
+            if context.job_queue:
+                context.job_queue.run_once(
+                    job_send_card,
+                    when=20,
+                    chat_id=chat.id,
+                    name=f"send_{cid}",
+                    data={"chat_id": chat.id},
+                )
 
-    if action == "admin_clear_msgs":
-        data["messages"] = []
+
+async def job_send_card(context: ContextTypes.DEFAULT_TYPE):
+    chat_id = None
+    if context.job and context.job.data:
+        chat_id = context.job.data.get("chat_id")
+    if not chat_id and context.job:
+        chat_id = context.job.chat_id
+    if not chat_id:
+        return
+    await send_card_to_group(context, int(chat_id))
+
+
+async def send_card_to_group(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    data = load_data()
+    cid = str(chat_id)
+
+    if not data["pool"]:
+        try:
+            await context.bot.send_message(chat_id, "⏳ فعلاً کارتی تو استخر نیست.")
+        except Exception:
+            pass
+        _schedule_next(context, data, chat_id)
         save_data(data)
-        await query.edit_message_text(
-            "✅ همه پیام‌ها پاک شدند.",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 بازگشت", callback_data="admin_menu")]
-            ]),
-        )
         return
 
-    if action == "admin_add_section":
-        await query.edit_message_text(
-            "➕ <b>افزودن بخش جدید</b>\n\n"
-            "نوع بخش را انتخاب کنید:",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📄 بخش عادی (متن/عکس)", callback_data="admin_add_type_normal")],
-                [InlineKeyboardButton("📱 بخش درخواست شماره", callback_data="admin_add_type_contact")],
-                [InlineKeyboardButton("📍 بخش درخواست لوکیشن", callback_data="admin_add_type_location")],
-                [InlineKeyboardButton("🔙 انصراف", callback_data="admin_menu")],
-            ]),
-            parse_mode="HTML",
+    card = random.choice(data["pool"])
+    data["pool"] = [c for c in data["pool"] if c["code"] != card["code"]]
+
+    caption = rarity_caption(card["rarity"], card["code"])
+    try:
+        msg = await context.bot.send_photo(
+            chat_id=chat_id,
+            photo=card["file_id"],
+            caption=caption,
+            parse_mode="Markdown",
         )
+        if cid not in data["groups"]:
+            data["groups"][cid] = {
+                "interval_index": 0,
+                "next_send": None,
+                "active_msg_id": None,
+                "active_card_code": None,
+                "title": "",
+            }
+        g = data["groups"][cid]
+        g["active_msg_id"] = msg.message_id
+        g["active_card_code"] = card["code"]
+        g["pending_card"] = card
+        save_data(data)
+    except Exception as e:
+        logger.error(f"send card error: {e}")
+        data["pool"].append(card)
+        save_data(data)
+
+    _schedule_next(context, data, chat_id)
+    save_data(data)
+
+
+def _schedule_next(context, data, chat_id: int):
+    if not context.job_queue:
         return
+    cid = str(chat_id)
+    if cid not in data["groups"]:
+        data["groups"][cid] = {"interval_index": 0}
+    g = data["groups"][cid]
+    idx = g.get("interval_index", 0) % len(INTERVALS)
+    delay = INTERVALS[idx]
+    g["interval_index"] = (idx + 1) % len(INTERVALS)
+    g["next_send"] = (datetime.now() + timedelta(seconds=delay)).isoformat()
 
-    if action.startswith("admin_add_type_"):
-        sec_type = action.replace("admin_add_type_", "")
-        context.user_data["new_section"] = {"type": sec_type}
-        context.user_data["admin_state"] = "add_title"
-        type_name = {"normal": "عادی", "contact": "درخواست شماره", "location": "درخواست لوکیشن"}.get(sec_type, "")
-        await query.edit_message_text(
-            f"نوع انتخاب‌شده: <b>{type_name}</b>\n\n"
-            "حالا <b>عنوان دکمه</b> را ارسال کنید\n"
-            "(مثال: 🛍️ فروشگاه یا 📱 ارسال شماره):",
-            parse_mode="HTML",
-        )
-        return
+    name = f"send_{cid}"
+    for job in context.job_queue.get_jobs_by_name(name):
+        job.schedule_removal()
 
-    if action == "admin_edit_start":
-        await query.edit_message_text(
-            "📝 پیام فعلی استارت:\n\n"
-            f"<code>{data.get('start_message', '')}</code>\n\n"
-            "پیام جدید را ارسال کنید:",
-            parse_mode="HTML",
-        )
-        context.user_data["admin_state"] = "edit_start"
-        return
-
-    if action == "admin_broadcast":
-        await query.edit_message_text(
-            "📢 <b>ارسال پیام همگانی</b>\n\n"
-            "پیام خود را ارسال کنید (متن یا عکس با کپشن):",
-            parse_mode="HTML",
-        )
-        context.user_data["admin_state"] = "broadcast"
-        return
+    context.job_queue.run_once(
+        job_send_card,
+        when=delay,
+        chat_id=chat_id,
+        name=name,
+        data={"chat_id": chat_id},
+    )
 
 
-# ==================== پیام‌های ادمین (حالت‌ها) ====================
-async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def claim_card(update: Update, context: ContextTypes.DEFAULT_TYPE, data: dict):
     user = update.effective_user
+    chat = update.effective_chat
+    reply = update.message.reply_to_message
+    cid = str(chat.id)
+
+    g = data["groups"].get(cid)
+    if not g or not g.get("active_card_code"):
+        return
+    if reply.message_id != g.get("active_msg_id"):
+        return
+
+    card = g.get("pending_card")
+    if not card:
+        return
+
+    g["active_card_code"] = None
+    g["pending_card"] = None
+    g["active_msg_id"] = None
+
+    uid = str(user.id)
+    ensure_user(data, user)
+    u = data["users"][uid]
+    old_count = len(u["cards"])
+    old_level = u.get("level", 1)
+
+    u["cards"].append(card)
+    update_user_stats(data, uid)
+    new_count = len(u["cards"])
+    new_level = u.get("level", 1)
+    save_data(data)
+
+    tag = f"@{user.username}" if user.username else user.full_name
+    new_cap = (
+        f"✅ کارت توسط {tag} گرفته شد!\n"
+        f"نوع: {RARITY_EMOJI.get(card['rarity'], '')} {card['rarity']}\n"
+        f"کد: {card['code']}\n"
+        f"کارت‌ها: {old_count} → {new_count}\n"
+        f"سطح: {old_level} → {new_level}"
+    )
+    try:
+        await context.bot.edit_message_caption(
+            chat_id=chat.id,
+            message_id=reply.message_id,
+            caption=new_cap,
+        )
+    except Exception:
+        await update.message.reply_text(new_cap)
+
+    await update.message.reply_text(f"🎉 {tag} کارت {card['rarity']} رو گرفت!")
+
+
+async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.text:
+        return
+
+    user = update.effective_user
+    chat = update.effective_chat
+    text = update.message.text.strip()
+    data = load_data()
+    ensure_user(data, user)
+
+    if text.startswith("انتقال کارت"):
+        await handle_transfer_start(update, context, data, text)
+        return
+
+    if text in ("پروفایلم", "پروفایل من", "/profile"):
+        update_user_stats(data, str(user.id))
+        save_data(data)
+        uid = str(user.id)
+        txt = profile_text(data, uid)
+        u = data["users"][uid]
+        photo = None
+        if u.get("profile_code"):
+            for c in u["cards"]:
+                if c["code"] == u["profile_code"]:
+                    photo = c["file_id"]
+                    break
+        if photo:
+            await update.message.reply_photo(
+                photo=photo, caption=txt, parse_mode="HTML", reply_markup=profile_keyboard()
+            )
+        else:
+            await update.message.reply_text(txt, parse_mode="HTML", reply_markup=profile_keyboard())
+        return
+
+    if text in ("پروفایل کارتی", "پروفایل کارت") and update.message.reply_to_message:
+        target = update.message.reply_to_message.from_user
+        if not target:
+            return
+        ensure_user(data, target)
+        update_user_stats(data, str(target.id))
+        save_data(data)
+        uid = str(target.id)
+        txt = profile_text(data, uid)
+        u = data["users"][uid]
+        photo = None
+        if u.get("profile_code"):
+            for c in u["cards"]:
+                if c["code"] == u["profile_code"]:
+                    photo = c["file_id"]
+                    break
+        if photo:
+            await update.message.reply_photo(photo=photo, caption=txt, parse_mode="HTML")
+        else:
+            await update.message.reply_text(txt, parse_mode="HTML")
+        return
+
+    if text == "کارت" and update.message.reply_to_message and chat.type in (
+        ChatType.GROUP, ChatType.SUPERGROUP
+    ):
+        await claim_card(update, context, data)
+        return
+
+    if is_admin(user.id) and context.user_data.get("admin_state") == "add_title_name":
+        context.user_data["new_title_name"] = text
+        context.user_data["admin_state"] = "add_title_points"
+        await update.message.reply_text(
+            f"لقب: <b>{text}</b>\nحداقل امتیاز لازم را عدد بفرست (مثلاً ۵۰):",
+            parse_mode="HTML",
+        )
+        return
+
+    if is_admin(user.id) and context.user_data.get("admin_state") == "add_title_points":
+        try:
+            pts = int(text)
+        except ValueError:
+            await update.message.reply_text("یک عدد بفرست.")
+            return
+        name = context.user_data.get("new_title_name", "بدون‌نام")
+        data["titles"].append({"name": name, "min_points": pts})
+        data["titles"].sort(key=lambda t: t["min_points"])
+        save_data(data)
+        context.user_data.clear()
+        await update.message.reply_text(
+            f"✅ لقب «{name}» با حداقل {pts} امتیاز ثبت شد.",
+            reply_markup=admin_keyboard(),
+        )
+        return
+
+    if context.user_data.get("mode") == "set_profile":
+        code = text.strip().lstrip("`")
+        uid = str(user.id)
+        u = data["users"][uid]
+        found = next((c for c in u["cards"] if c["code"] == code), None)
+        if not found:
+            await update.message.reply_text("این کد بین کارت‌های تو نیست.")
+            context.user_data.pop("mode", None)
+            return
+        u["profile_code"] = code
+        save_data(data)
+        context.user_data.pop("mode", None)
+        await update.message.reply_photo(
+            photo=found["file_id"],
+            caption=f"✅ پروفایل کارتی تنظیم شد.\nکد: <code>{code}</code>",
+            parse_mode="HTML",
+            reply_markup=profile_keyboard(),
+        )
+        return
+
+
+async def handle_transfer_start(update, context, data, text):
+    user = update.effective_user
+    parts = text.split()
+    if len(parts) < 3:
+        await update.message.reply_text(
+            "فرمت:\n<code>انتقال کارت کدکارت</code>\nو روی پیام گیرنده ریپلای کن.",
+            parse_mode="HTML",
+        )
+        return
+
+    code = parts[2].strip().lstrip("`")
+    if not update.message.reply_to_message or not update.message.reply_to_message.from_user:
+        await update.message.reply_text("باید روی پیام گیرنده ریپلای کنی.")
+        return
+
+    target = update.message.reply_to_message.from_user
+    if target.id == user.id:
+        await update.message.reply_text("نمی‌تونی به خودت منتقل کنی.")
+        return
+    if target.is_bot:
+        await update.message.reply_text("نمی‌تونی به ربات منتقل کنی.")
+        return
+
+    uid = str(user.id)
+    u = data["users"].get(uid)
+    if not u:
+        await update.message.reply_text("کارتی نداری.")
+        return
+    card = next((c for c in u["cards"] if c["code"] == code), None)
+    if not card:
+        await update.message.reply_text("این کد مال تو نیست.")
+        return
+
+    context.user_data["transfer"] = {
+        "code": code,
+        "from_id": uid,
+        "to_id": str(target.id),
+        "to_name": target.full_name,
+    }
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ تایید انتقال", callback_data="tr_yes"),
+        InlineKeyboardButton("❌ انصراف", callback_data="tr_no"),
+    ]])
+    await update.message.reply_text(
+        f"انتقال کارت <code>{code}</code> ({card['rarity']}) به <b>{target.full_name}</b>\nمطمئنی؟",
+        parse_mode="HTML",
+        reply_markup=kb,
+    )
+
+
+async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user = query.from_user
+    data = load_data()
+    ensure_user(data, user)
+    cb = query.data
+
+    if cb == "tr_no":
+        context.user_data.pop("transfer", None)
+        await query.edit_message_text("انتقال لغو شد.")
+        return
+
+    if cb == "tr_yes":
+        tr = context.user_data.get("transfer")
+        if not tr or str(user.id) != tr["from_id"]:
+            await query.edit_message_text("منقضی شده.")
+            return
+        from_u = data["users"][tr["from_id"]]
+        card = next((c for c in from_u["cards"] if c["code"] == tr["code"]), None)
+        if not card:
+            await query.edit_message_text("کارت پیدا نشد.")
+            return
+        from_u["cards"] = [c for c in from_u["cards"] if c["code"] != tr["code"]]
+        if from_u.get("profile_code") == tr["code"]:
+            from_u["profile_code"] = None
+        tid = tr["to_id"]
+        if tid not in data["users"]:
+            data["users"][tid] = {
+                "name": tr["to_name"], "username": "", "cards": [],
+                "profile_code": None, "points": 0, "level": 1, "title": "تازه‌وارد",
+            }
+        data["users"][tid]["cards"].append(card)
+        update_user_stats(data, tr["from_id"])
+        update_user_stats(data, tid)
+        save_data(data)
+        context.user_data.pop("transfer", None)
+        await query.edit_message_text(
+            f"✅ کارت <code>{tr['code']}</code> به {tr['to_name']} منتقل شد.",
+            parse_mode="HTML",
+        )
+        try:
+            await context.bot.send_message(
+                int(tid),
+                f"🎁 کارت جدید دریافت کردی!\nکد: <code>{tr['code']}</code>\nنوع: {card['rarity']}",
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+        return
+
+    if cb == "my_cards":
+        if query.message.chat.type != ChatType.PRIVATE:
+            try:
+                await context.bot.send_message(
+                    user.id,
+                    "برای دیدن کارت‌ها از دکمه‌های زیر استفاده کن یا /start بزن:",
+                    reply_markup=profile_keyboard(),
+                )
+                await query.answer("پیوی ربات رو چک کن", show_alert=True)
+            except Exception:
+                await query.answer("اول پیوی ربات رو /start کن، بعد دوباره بزن.", show_alert=True)
+            return
+        await send_my_cards(query, data, user)
+        return
+
+    if cb == "set_profile":
+        if query.message.chat.type != ChatType.PRIVATE:
+            try:
+                await context.bot.send_message(user.id, "کد کارتی که می‌خوای پروفایل بشه رو بفرست:")
+                # mode must be set on user's context - use data file flag is hard; message them
+                await query.answer("پیوی رو چک کن و کد را همانجا بفرست بعد از /start", show_alert=True)
+            except Exception:
+                await query.answer("اول ربات را تو پیوی /start کن.", show_alert=True)
+            return
+        context.user_data["mode"] = "set_profile"
+        await query.edit_message_text("کد کارت را بفرست (مثلاً cabc123):")
+        return
+
     if not is_admin(user.id):
         return
 
-    state = context.user_data.get("admin_state")
-    if not state:
-        # اگر ادمین پیام عادی فرستاد، فقط جواب نده (یا منو نشون بده)
+    if cb == "ad_cancel":
+        context.user_data.clear()
+        await query.edit_message_text("لغو شد.", reply_markup=admin_keyboard())
         return
 
-    data = load_data()
-    text = update.message.text or ""
-
-    # ویرایش پیام استارت
-    if state == "edit_start":
-        data["start_message"] = text
-        save_data(data)
-        context.user_data["admin_state"] = None
-        await update.message.reply_text(
-            "✅ پیام استارت با موفقیت تغییر کرد.",
-            reply_markup=get_admin_keyboard(),
-        )
+    if cb == "ad_upload":
+        context.user_data["admin_state"] = "wait_photo"
+        await query.edit_message_text("عکس کارت را بفرست:")
         return
 
-    # افزودن بخش - عنوان
-    if state == "add_title":
-        context.user_data["new_section"]["title"] = text
-        context.user_data["admin_state"] = "add_text"
-        await update.message.reply_text(
-            "حالا <b>متن اصلی</b> بخش را بفرستید\n"
-            "(یا /skip برای رد کردن):",
-            parse_mode="HTML",
-        )
-        return
-
-    # افزودن بخش - متن
-    if state == "add_text":
-        if text.strip() != "/skip":
-            context.user_data["new_section"]["text"] = text
-        else:
-            context.user_data["new_section"]["text"] = ""
-        context.user_data["admin_state"] = "add_desc"
-        await update.message.reply_text(
-            "توضیحات کوتاه (اختیاری) را بفرستید\n"
-            "(یا /skip):"
-        )
-        return
-
-    # افزودن بخش - توضیحات
-    if state == "add_desc":
-        if text.strip() != "/skip":
-            context.user_data["new_section"]["description"] = text
-        else:
-            context.user_data["new_section"]["description"] = ""
-        context.user_data["admin_state"] = "add_photo"
-        await update.message.reply_text(
-            "اگر عکس می‌خواهید، عکس را ارسال کنید.\n"
-            "در غیر این صورت /skip بزنید:"
-        )
-        return
-
-    # افزودن بخش - عکس
-    if state == "add_photo":
-        new_sec = context.user_data.get("new_section", {})
-        photo_id = None
-
-        if update.message.photo:
-            photo_id = update.message.photo[-1].file_id
-        elif text.strip() == "/skip":
-            photo_id = None
-        else:
-            await update.message.reply_text("لطفاً عکس بفرستید یا /skip بزنید.")
+    if cb.startswith("ad_rar_"):
+        rarity = cb.replace("ad_rar_", "")
+        file_id = context.user_data.get("upload_file_id")
+        if not file_id:
+            await query.edit_message_text("عکس پیدا نشد. دوباره آپلود کن.", reply_markup=admin_keyboard())
             return
-
-        sec_id = f"s_{int(datetime.now().timestamp())}"
-        section = {
-            "id": sec_id,
-            "title": new_sec.get("title", "بدون عنوان"),
-            "text": new_sec.get("text", ""),
-            "description": new_sec.get("description", ""),
-            "photo": photo_id,
-            "type": new_sec.get("type", "normal"),
+        code = gen_code()
+        card = {
+            "code": code,
+            "file_id": file_id,
+            "rarity": rarity,
+            "caption": rarity_caption(rarity, code),
+            "added_at": datetime.now().isoformat(),
         }
-        data["sections"].append(section)
+        data["pool"].append(card)
         save_data(data)
-
-        context.user_data["admin_state"] = None
-        context.user_data["new_section"] = None
-
-        type_name = {"normal": "عادی", "contact": "درخواست شماره", "location": "درخواست لوکیشن"}.get(section["type"], "")
-        await update.message.reply_text(
-            f"✅ بخش «{section['title']}» ({type_name}) با موفقیت اضافه شد.",
-            reply_markup=get_admin_keyboard(),
+        context.user_data.clear()
+        await query.edit_message_text(
+            f"✅ کارت اضافه شد.\nکد: <code>{code}</code>\n"
+            f"سطح: {RARITY_EMOJI.get(rarity, '')} {rarity}\n"
+            f"موجودی استخر: {len(data['pool'])}",
+            parse_mode="HTML",
+            reply_markup=admin_keyboard(),
         )
         return
 
-    # برودکست
-    if state == "broadcast":
-        context.user_data["admin_state"] = None
-        users = list(data["users"].keys())
-        success = 0
-        fail = 0
+    if cb == "ad_pool":
+        n = len(data["pool"])
+        by = {}
+        for c in data["pool"]:
+            by[c["rarity"]] = by.get(c["rarity"], 0) + 1
+        lines = [f"📦 استخر: <b>{n}</b> کارت\n"]
+        for r in RARITIES:
+            if by.get(r):
+                lines.append(f"{RARITY_EMOJI.get(r, '')} {r}: {by[r]}")
+        await query.edit_message_text("\n".join(lines) or "خالی", parse_mode="HTML", reply_markup=admin_keyboard())
+        return
 
-        status = await update.message.reply_text("⏳ در حال ارسال به کاربران...")
+    if cb == "ad_stats":
+        total_users = len(data["users"])
+        total_cards = sum(len(u["cards"]) for u in data["users"].values())
+        groups = len(data["groups"])
+        await query.edit_message_text(
+            f"📊 کاربران: {total_users}\n🃏 کارت‌های جمع‌شده: {total_cards}\n"
+            f"📦 استخر: {len(data['pool'])}\n👥 گپ‌ها: {groups}",
+            reply_markup=admin_keyboard(),
+        )
+        return
 
-        for uid in users:
+    if cb == "ad_titles":
+        lines = ["🏷 لقب‌ها:\n"]
+        for t in data.get("titles", []):
+            lines.append(f"• {t['name']} (از {t.get('min_points', 0)} امتیاز)")
+        await query.edit_message_text(
+            "\n".join(lines),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("➕ لقب جدید", callback_data="ad_add_title")],
+                [InlineKeyboardButton("🔙 بازگشت", callback_data="ad_back")],
+            ]),
+        )
+        return
+
+    if cb == "ad_add_title":
+        context.user_data["admin_state"] = "add_title_name"
+        await query.edit_message_text("اسم لقب را بفرست:")
+        return
+
+    if cb == "ad_back":
+        await query.edit_message_text("پنل ادمین:", reply_markup=admin_keyboard())
+        return
+
+    if cb == "ad_force":
+        if not data["pool"]:
+            await query.answer("استخر خالی است", show_alert=True)
+            return
+        count = 0
+        for cid in list(data["groups"].keys()):
             try:
-                if update.message.photo:
-                    await context.bot.send_photo(
-                        chat_id=int(uid),
-                        photo=update.message.photo[-1].file_id,
-                        caption=update.message.caption or "",
-                    )
-                else:
-                    await context.bot.send_message(chat_id=int(uid), text=text)
-                success += 1
+                await send_card_to_group(context, int(cid))
+                count += 1
             except Exception as e:
-                fail += 1
-                logger.warning(f"ارسال به {uid} ناموفق: {e}")
-
-        await status.edit_text(
-            f"✅ ارسال تمام شد.\n\nموفق: {success}\nناموفق: {fail}"
-        )
-        await update.message.reply_text(
-            "بازگشت به پنل:",
-            reply_markup=get_admin_keyboard(),
-        )
+                logger.error(e)
+        await query.answer(f"ارسال به {count} گپ", show_alert=True)
         return
 
 
-# ==================== دستور /admin ====================
-async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("⛔ شما ادمین نیستید.")
+async def send_my_cards(query, data, user):
+    uid = str(user.id)
+    u = data["users"].get(uid)
+    if not u or not u["cards"]:
+        await query.edit_message_text("هنوز کارتی نداری.", reply_markup=profile_keyboard())
         return
-    await update.message.reply_text(
-        "🔐 <b>پنل مدیریت ربات</b>",
-        reply_markup=get_admin_keyboard(),
-        parse_mode="HTML",
-    )
+    await query.edit_message_text(f"🃏 {len(u['cards'])} کارت داری. دارم می‌فرستم...")
+    for c in u["cards"][:30]:
+        cap = f"{RARITY_EMOJI.get(c['rarity'], '')} {c['rarity']}\nکد: <code>{c['code']}</code>"
+        try:
+            await query.message.reply_photo(photo=c["file_id"], caption=cap, parse_mode="HTML")
+        except Exception:
+            pass
+    await query.message.reply_text("تمام.", reply_markup=profile_keyboard())
 
 
-# ==================== main ====================
+async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not is_admin(user.id):
+        return
+    if update.effective_chat.type != ChatType.PRIVATE:
+        return
+    if context.user_data.get("admin_state") != "wait_photo":
+        return
+    photo = update.message.photo[-1]
+    context.user_data["upload_file_id"] = photo.file_id
+    context.user_data["admin_state"] = "wait_rarity"
+    await update.message.reply_text("سطح کمیابی این کارت؟", reply_markup=rarity_keyboard())
+
+
+async def post_init(app: Application):
+    data = load_data()
+    jq = app.job_queue
+    if not jq:
+        logger.warning('JobQueue نیست. نصب کن: pip install "python-telegram-bot[job-queue]"')
+        return
+    now = datetime.now()
+    for cid, g in data.get("groups", {}).items():
+        try:
+            chat_id = int(cid)
+            delay = 60
+            ns = g.get("next_send")
+            if ns:
+                try:
+                    t = datetime.fromisoformat(ns)
+                    delay = max(30, int((t - now).total_seconds()))
+                except Exception:
+                    delay = 60
+            jq.run_once(
+                job_send_card,
+                when=delay,
+                chat_id=chat_id,
+                name=f"send_{cid}",
+                data={"chat_id": chat_id},
+            )
+            logger.info(f"scheduled {cid} in {delay}s")
+        except Exception as e:
+            logger.error(e)
+
+
 def main():
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("admin", admin_command))
+    app.add_handler(CommandHandler("admin", admin_cmd))
+    app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
+    app.add_handler(CallbackQueryHandler(on_callback))
+    app.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, on_photo))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
 
-    app.add_handler(CallbackQueryHandler(section_callback, pattern=r"^sec_"))
-    app.add_handler(CallbackQueryHandler(admin_callback, pattern=r"^admin_"))
-
-    app.add_handler(MessageHandler(filters.CONTACT, handle_contact))
-    app.add_handler(MessageHandler(filters.LOCATION, handle_location))
-
-    # پیام‌های ادمین (متن و عکس) برای حالت‌های تنظیم
-    app.add_handler(
-        MessageHandler(
-            (filters.TEXT | filters.PHOTO) & ~filters.COMMAND,
-            admin_message_handler,
-        ),
-        group=0,
-    )
-
-    # پیام‌های کاربران عادی
-    app.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_user_message),
-        group=1,
-    )
-
-    logger.info("ربات شروع شد...")
+    logger.info("Card bot started")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
