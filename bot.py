@@ -9,7 +9,7 @@ from telegram.ext import (
 )
 from telegram.constants import ChatMemberStatus, ChatType
 
-BOT_TOKEN = "8273833935:AAHm3q_XxEBXm84PISUfP8L0TTwsUv4bu38"
+BOT_TOKEN = "8273833935:AAFKVpl4Atb_ldgciIJfqtvFUlixvz2l1S4"
 MAIN_ADMIN = 7530457395
 DATA = "card_data.json"
 DAILY = 100
@@ -328,13 +328,62 @@ async def claim(u, c, d):
     })
     gain = int(card.get("points", 0))
     x["points"] = old + gain
-    upd(d, uid); save(d)
+    upd(d, uid)
+    await check_collections(c, d, uid, user)
+    save(d)
     tag = f"@{user.username}" if user.username else user.full_name
     nc = f"✅ {tag}\n{card.get('name')} | +{gain} ({old}→{x['points']})"
     try:
         await c.bot.edit_message_caption(ch.id, rp.message_id, caption=nc)
     except Exception:
         await u.message.reply_text(nc)
+
+
+async def check_collections(c, d, uid, user):
+    """اگر همه کارت‌های یک کالکشن جمع شد → جایزه + اعلام"""
+    u = d["users"].get(uid)
+    if not u:
+        return
+    have = {x["code"] for x in u.get("cards", [])}
+    for col in d.get("collections", []):
+        cid = col.get("id")
+        if not cid or cid in u.get("collections_done", []):
+            continue
+        need = set(col.get("card_codes", []))
+        if not need or not need.issubset(have):
+            continue
+        u.setdefault("collections_done", []).append(cid)
+        # کارت جایزه
+        if col.get("prize"):
+            pr = dict(col["prize"])
+            pr["code"] = code()
+            u["cards"].append(pr)
+            u["points"] = u.get("points", 0) + int(pr.get("points", 0))
+        # امتیاز جایزه متنی
+        bonus = int(col.get("bonus_points", 0))
+        if bonus:
+            u["points"] = u.get("points", 0) + bonus
+        upd(d, uid)
+        tag = f"@{user.username}" if user.username else user.full_name
+        txt = col.get("done_text") or (
+            f"🏆 کالکشن <b>{col.get('name')}</b> کامل شد!\n"
+            f"مالک: {tag}\n"
+            f"{col.get('reward_text', '')}"
+        )
+        # اعلام در گپ‌ها
+        targets = col.get("groups") or list(d.get("groups", {}).keys())
+        for gid in targets:
+            try:
+                if col.get("preview"):
+                    await c.bot.send_photo(int(gid), photo=col["preview"], caption=txt, parse_mode="HTML")
+                else:
+                    await c.bot.send_message(int(gid), txt, parse_mode="HTML")
+            except Exception:
+                pass
+        try:
+            await c.bot.send_message(user.id, f"🎉 کالکشن «{col.get('name')}» را کامل کردی!")
+        except Exception:
+            pass
 
 async def send_browse(chat_id, c, cards, i, msg_id=None):
     if not cards:
@@ -469,6 +518,32 @@ async def on_text(u, c):
             await u.message.reply_text(txt, reply_markup=pkb())
         return
 
+    if text in ("کالکشن", "کالکشن ها", "کالکشن‌ها"):
+        cols = d.get("collections", [])
+        if not cols:
+            await u.message.reply_text("کالکشنی نیست")
+            return
+        have = {x["code"] for x in d["users"][uid].get("cards", [])}
+        done_ids = set(d["users"][uid].get("collections_done", []))
+        for col in cols:
+            need = col.get("card_codes", [])
+            got = sum(1 for x in need if x in have)
+            total = max(len(need), 1)
+            mark = "✅ کامل" if col.get("id") in done_ids else f"{got}/{total}"
+            cap = (
+                f"📦 <b>{col.get('name')}</b> — {mark}\n"
+                f"{col.get('desc', '')}\n"
+                f"جایزه: {col.get('reward_text', '-')}"
+            )
+            try:
+                if col.get("preview"):
+                    await u.message.reply_photo(col["preview"], caption=cap, parse_mode="HTML")
+                else:
+                    await u.message.reply_text(cap, parse_mode="HTML")
+            except Exception:
+                await u.message.reply_text(cap, parse_mode="HTML")
+        return
+
     if text.startswith("جستجو "):
         cd0 = text.split(" ", 1)[1].strip().lstrip("`")
         for _, ou in d["users"].items():
@@ -575,6 +650,74 @@ async def admin_text(u, c, d, text):
         except ValueError:
             await u.message.reply_text("عدد"); return
         set_state(c, "adm_shop_ph"); await u.message.reply_text("عکس:", reply_markup=cancel_kb()); return
+    # ---- کالکشن ----
+    if kind == "adm_col_name":
+        c.user_data["col"] = {"id": code(4), "name": text, "card_codes": [], "groups": []}
+        set_state(c, "adm_col_desc")
+        await u.message.reply_text("توضیحات کالکشن را بفرست:", reply_markup=cancel_kb())
+        return
+    if kind == "adm_col_desc":
+        c.user_data["col"]["desc"] = text
+        set_state(c, "adm_col_codes")
+        await u.message.reply_text(
+            "کد کارت‌های عضو را با فاصله بفرست:\n"
+            "مثال: <code>cabc123 cdef456 cghi789</code>",
+            parse_mode="HTML",
+            reply_markup=cancel_kb(),
+        )
+        return
+    if kind == "adm_col_codes":
+        codes = [x.lstrip("`") for x in text.replace(",", " ").split() if x]
+        if not codes:
+            await u.message.reply_text("حداقل یک کد بفرست")
+            return
+        c.user_data["col"]["card_codes"] = codes
+        set_state(c, "adm_col_reward")
+        await u.message.reply_text(
+            "متن جایزه / اعلام را بفرست (وقتی کسی کامل کرد نشان داده می‌شود):",
+            reply_markup=cancel_kb(),
+        )
+        return
+    if kind == "adm_col_reward":
+        c.user_data["col"]["reward_text"] = text
+        set_state(c, "adm_col_bonus")
+        await u.message.reply_text(
+            "امتیاز جایزه عددی (اگر نمی‌خوای ۰ بفرست):",
+            reply_markup=cancel_kb(),
+        )
+        return
+    if kind == "adm_col_bonus":
+        try:
+            c.user_data["col"]["bonus_points"] = int(text)
+        except ValueError:
+            await u.message.reply_text("عدد بفرست (مثلاً ۰ یا ۵۰۰)")
+            return
+        set_state(c, "adm_col_prize")
+        await u.message.reply_text(
+            "کد کارت جایزه از استخر را بفرست (اگر نمی‌خوای بنویس: - )",
+            reply_markup=cancel_kb(),
+        )
+        return
+    if kind == "adm_col_prize":
+        col = c.user_data.get("col", {})
+        t = text.strip().lstrip("`")
+        if t != "-":
+            pr = next((x for x in d["pool"] if x["code"] == t), None)
+            if not pr:
+                await u.message.reply_text("این کد تو استخر نیست. دوباره بفرست یا -")
+                return
+            col["prize"] = {
+                "file_id": pr["file_id"],
+                "name": pr.get("name", "جایزه"),
+                "description": pr.get("description", ""),
+                "rarity": pr.get("rarity", "جایزه"),
+                "points": pr.get("points", 0),
+                "emoji": pr.get("emoji", "🎁"),
+            }
+            # از استخر کم نکن مگر بخوای — جایزه کپی می‌شود
+        set_state(c, "adm_col_preview")
+        await u.message.reply_text("عکس پیش‌نمایش کالکشن را بفرست:", reply_markup=cancel_kb())
+        return
 
 async def on_photo(u, c):
     user = u.effective_user
@@ -593,6 +736,39 @@ async def on_photo(u, c):
         si["file_id"] = fid; si["code"] = code(); si["rarity"] = "فروشگاهی"; si["points"] = si.get("price", 0) // 2
         d["shop"].append(si); save(d); clear_state(c)
         await u.message.reply_text(f"✅ {si['name']}", reply_markup=akb()); return
+    if kind == "adm_col_preview":
+        col = c.user_data.get("col", {})
+        col["preview"] = fid
+        col["done_text"] = (
+            f"🏆 کالکشن <b>{col.get('name')}</b> کامل شد!\n"
+            f"{col.get('reward_text', '')}"
+        )
+        d.setdefault("collections", []).append(col)
+        save(d)
+        clear_state(c)
+        # اعلام ساخت در همه گپ‌ها
+        announce = (
+            f"📦 <b>کالکشن جدید</b>\n"
+            f"نام: {col.get('name')}\n"
+            f"{col.get('desc', '')}\n"
+            f"تعداد کارت: {len(col.get('card_codes', []))}\n"
+            f"جایزه: {col.get('reward_text', '-')}\n"
+            f"امتیاز جایزه: {col.get('bonus_points', 0)}"
+        )
+        for gid in list(d.get("groups", {}).keys())[:30]:
+            try:
+                await c.bot.send_photo(int(gid), photo=fid, caption=announce, parse_mode="HTML")
+            except Exception:
+                try:
+                    await c.bot.send_message(int(gid), announce, parse_mode="HTML")
+                except Exception:
+                    pass
+        await u.message.reply_text(
+            f"✅ کالکشن «{col.get('name')}» ثبت و اعلام شد\n"
+            f"کارت‌ها: {len(col.get('card_codes', []))}",
+            reply_markup=akb(),
+        )
+        return
 
 async def on_cb(u, c):
     q = u.callback_query
@@ -720,13 +896,54 @@ async def on_cb(u, c):
     if cb == "cols":
         cols = d.get("collections", [])
         if not cols:
-            await q.answer("نیست", show_alert=True); return
+            await q.answer("کالکشنی نیست", show_alert=True)
+            return
         have = {x["code"] for x in d["users"][uid].get("cards", [])}
-        lines = ["📦\n"] + [f"• {col.get('name')} {sum(1 for x in col.get('card_codes',[]) if x in have)}/{max(len(col.get('card_codes',[])),1)}" for col in cols]
+        done_ids = set(d["users"][uid].get("collections_done", []))
+        lines = ["📦 <b>کالکشن‌ها</b>\n"]
+        for col in cols:
+            need = col.get("card_codes", [])
+            got = sum(1 for x in need if x in have)
+            total = max(len(need), 1)
+            mark = "✅" if col.get("id") in done_ids else f"{got}/{total}"
+            lines.append(f"• <b>{col.get('name')}</b> — {mark}")
+            if col.get("desc"):
+                lines.append(f"  {col.get('desc')[:60]}")
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🖼 پیش‌نمایش‌ها", callback_data="cols_prev")],
+            [InlineKeyboardButton("🔙", callback_data="back_p")],
+        ])
         try:
-            await q.edit_message_text("\n".join(lines), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="back_p")]]))
+            await q.edit_message_text("\n".join(lines), parse_mode="HTML", reply_markup=kb)
         except Exception:
-            await q.message.reply_text("\n".join(lines))
+            await q.message.reply_text("\n".join(lines), parse_mode="HTML", reply_markup=kb)
+        return
+
+    if cb == "cols_prev":
+        cols = d.get("collections", [])
+        if not cols:
+            await q.answer("نیست", show_alert=True)
+            return
+        have = {x["code"] for x in d["users"][uid].get("cards", [])}
+        for col in cols[:10]:
+            need = col.get("card_codes", [])
+            got = sum(1 for x in need if x in have)
+            total = max(len(need), 1)
+            cap = (
+                f"📦 <b>{col.get('name')}</b>\n"
+                f"{col.get('desc', '')}\n"
+                f"پیشرفت: {got}/{total}\n"
+                f"جایزه: {col.get('reward_text', '-')}\n"
+                f"امتیاز: {col.get('bonus_points', 0)}"
+            )
+            try:
+                if col.get("preview"):
+                    await q.message.reply_photo(col["preview"], caption=cap, parse_mode="HTML")
+                else:
+                    await q.message.reply_text(cap, parse_mode="HTML")
+            except Exception:
+                pass
+        await q.answer()
         return
 
     if cb == "exch":
@@ -790,7 +1007,27 @@ async def on_cb(u, c):
     if cb == "a_shop_add":
         set_state(c, "adm_shop_name"); await q.edit_message_text("نام:", reply_markup=cancel_kb()); return
     if cb == "a_col":
-        await q.edit_message_text("کالکشن — از نسخه قبل", reply_markup=akb()); return
+        cols = d.get("collections", [])
+        lines = [f"📦 کالکشن‌ها: {len(cols)}\n"]
+        for col in cols:
+            lines.append(f"• {col.get('name')} ({len(col.get('card_codes', []))} کارت)")
+        if not cols:
+            lines.append("هنوز کالکشنی نیست.")
+        await q.edit_message_text(
+            "\n".join(lines),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("➕ کالکشن جدید", callback_data="a_col_add")],
+                [InlineKeyboardButton("🔙", callback_data="a_back")],
+            ]),
+        )
+        return
+    if cb == "a_col_add":
+        set_state(c, "adm_col_name")
+        await q.edit_message_text(
+            "نام کالکشن را بفرست:\nمثال: مادارا",
+            reply_markup=cancel_kb(),
+        )
+        return
     if cb == "a_set":
         await q.edit_message_text("تنظیمات", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("قالب", callback_data="a_tpl")], [InlineKeyboardButton("استارت", callback_data="a_smsg")], [InlineKeyboardButton("آستانه", callback_data="a_th")], [InlineKeyboardButton("🔙", callback_data="a_back")]])); return
     if cb == "a_tpl":
