@@ -33,7 +33,7 @@ from telegram.ext import (
 from telegram.constants import ChatMemberStatus, ChatType
 
 # ==================== تنظیمات ====================
-BOT_TOKEN = "8273833935:AAHqnz3EBZPdDtThKRDZ4aN6cyybbujmXd0"
+BOT_TOKEN = "8273833935:AAFKVpl4Atb_ldgciIJfqtvFUlixvz2l1S4"
 ADMIN_ID = 7530457395
 DATA_FILE = "card_bot_data.json"
 
