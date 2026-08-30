@@ -9,7 +9,7 @@ from telegram.ext import (
 )
 from telegram.constants import ChatMemberStatus, ChatType
 
-BOT_TOKEN = "8273833935:AAHm3q_XxEBXm84PISUfP8L0TTwsUv4bu38"
+BOT_TOKEN = "8273833935:AAFKVpl4Atb_ldgciIJfqtvFUlixvz2l1S4"
 MAIN_ADMIN = 7530457395
 DATA = "card_data.json"
 DAILY = 100
@@ -127,15 +127,31 @@ def profile(d, uid):
     except Exception:
         return f"{u.get('name')} | L{u.get('level')} | {u.get('points')}p"
 
-def pkb():
+def pkb(owner_id=None):
+    """فقط صاحب پنل می‌تواند دکمه‌ها را بزند"""
+    o = str(owner_id) if owner_id is not None else "0"
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📋 لیست کارت‌هام", callback_data="myc")],
-        [InlineKeyboardButton("🖼 تنظیم پروفایل", callback_data="setp")],
-        [InlineKeyboardButton("🛒 فروشگاه", callback_data="shop")],
-        [InlineKeyboardButton("📦 کالکشن", callback_data="cols")],
-        [InlineKeyboardButton("🎮 بازی کارتی", callback_data="game")],
-        [InlineKeyboardButton("🔄 تعویض کارت", callback_data="exch")],
+        [InlineKeyboardButton("📋 لیست کارت‌هام", callback_data=f"myc:{o}")],
+        [InlineKeyboardButton("🖼 تنظیم پروفایل", callback_data=f"setp:{o}")],
+        [InlineKeyboardButton("🛒 فروشگاه", callback_data=f"shop:{o}")],
+        [InlineKeyboardButton("📦 کالکشن", callback_data=f"cols:{o}")],
+        [InlineKeyboardButton("🎮 بازی کارتی", callback_data=f"game:{o}")],
+        [InlineKeyboardButton("🔄 تعویض کارت", callback_data=f"exch:{o}")],
     ])
+
+def panel_owner_ok(q):
+    """بررسی کند کلیک‌کننده صاحب پنل باشد. (ok, action)"""
+    parts = q.data.split(":")
+    action = parts[0]
+    if len(parts) < 2:
+        return True, action
+    try:
+        owner = int(parts[1])
+    except ValueError:
+        return True, action
+    if q.from_user.id != owner:
+        return False, action
+    return True, action
 
 def akb():
     return InlineKeyboardMarkup([
@@ -190,14 +206,14 @@ async def cmd_start(u, c):
         upd(d, uid)
         note = f"\n\n🎁 +{DAILY} امتیاز روزانه"
     save(d)
-    kb = akb() if adm(user.id, d) and u.effective_chat.type == ChatType.PRIVATE else pkb()
+    kb = akb() if adm(user.id, d) and u.effective_chat.type == ChatType.PRIVATE else pkb(user.id)
     await u.message.reply_text(d.get("start_msg", "سلام") + note, reply_markup=kb)
 
 async def cmd_help(u, c):
     await u.message.reply_text(
         "📖 راهنما\n• ریپلای+کارت\n• پروفایلم\n• ریپلای+پروفایل کارتی\n• جستجو کد\n• /top /force\n"
         "وقتی ربات کد خواست روی همان پیام ریپلای کن (۵۰ث)",
-        reply_markup=pkb(),
+        reply_markup=pkb(user.id),
     )
 
 async def cmd_top(u, c):
@@ -422,7 +438,7 @@ async def on_text(u, c):
                 await u.message.reply_text("❌ کد بین کارت‌های تو نیست")
             else:
                 uu["profile_code"] = cd0; save(d)
-                await u.message.reply_photo(fnd["file_id"], caption=f"✅ پروفایل\n<code>{cd0}</code>", parse_mode="HTML", reply_markup=pkb())
+                await u.message.reply_photo(fnd["file_id"], caption=f"✅ پروفایل\n<code>{cd0}</code>", parse_mode="HTML", reply_markup=pkb(user.id))
             return
         if kind == "sell":
             clear_state(c)
@@ -441,7 +457,7 @@ async def on_text(u, c):
                 uu["profile_code"] = None
             uu["points"] = uu.get("points", 0) + gain
             upd(d, uid); save(d)
-            await u.message.reply_text(f"✅ فروش +{gain} → {uu['points']}", reply_markup=pkb())
+            await u.message.reply_text(f"✅ فروش +{gain} → {uu['points']}", reply_markup=pkb(user.id))
             return
         if kind == "exch":
             clear_state(c)
@@ -476,7 +492,7 @@ async def on_text(u, c):
             uu["cards"].append({k: prize.get(k) for k in ("code","file_id","name","description","rarity","points","emoji")})
             uu["points"] = uu.get("points", 0) + int(prize.get("points", 0))
             upd(d, uid); save(d)
-            await u.message.reply_photo(prize["file_id"], caption=f"🔄 {prize.get('name')}", reply_markup=pkb())
+            await u.message.reply_photo(prize["file_id"], caption=f"🔄 {prize.get('name')}", reply_markup=pkb(user.id))
             return
         if kind and kind.startswith("adm_"):
             await admin_text(u, c, d, text)
@@ -496,9 +512,9 @@ async def on_text(u, c):
                 if cd["code"] == uu["profile_code"]:
                     ph = cd["file_id"]; break
         if ph:
-            await u.message.reply_photo(ph, caption=txt, reply_markup=pkb())
+            await u.message.reply_photo(ph, caption=txt, reply_markup=pkb(user.id))
         else:
-            await u.message.reply_text(txt, reply_markup=pkb())
+            await u.message.reply_text(txt, reply_markup=pkb(user.id))
         return
 
     if text in ("پروفایل کارتی", "پروفایل کارت") and u.message.reply_to_message:
@@ -513,9 +529,9 @@ async def on_text(u, c):
                 if cd["code"] == uu["profile_code"]:
                     ph = cd["file_id"]; break
         if ph:
-            await u.message.reply_photo(ph, caption=txt, reply_markup=pkb())
+            await u.message.reply_photo(ph, caption=txt, reply_markup=pkb(user.id))
         else:
-            await u.message.reply_text(txt, reply_markup=pkb())
+            await u.message.reply_text(txt, reply_markup=pkb(user.id))
         return
 
     if text in ("کالکشن", "کالکشن ها", "کالکشن‌ها"):
@@ -772,11 +788,21 @@ async def on_photo(u, c):
 
 async def on_cb(u, c):
     q = u.callback_query
-    await q.answer()
     user = q.from_user
     d = load(); eu(d, user)
     cb = q.data
     uid = str(user.id)
+
+    # پنل پروفایل فقط برای صاحبش
+    if ":" in cb and cb.split(":")[0] in ("myc", "setp", "shop", "cols", "game", "exch", "back_p", "myc_br", "cols_prev", "sell"):
+        ok, action = panel_owner_ok(q)
+        if not ok:
+            await q.answer("این پنل مال تو نیست ❌", show_alert=True)
+            return
+        cb = action  # از این به بعد مثل قبل با action کار می‌کنیم
+        # برای back_p و ... owner در data هست
+
+    await q.answer()
 
     if cb == "cancel_st":
         clear_state(c)
@@ -817,8 +843,8 @@ async def on_cb(u, c):
         for i, x in enumerate(cards[:40], 1):
             lines.append(f"{i}. {x.get('name')} | {x.get('rarity')} | <code>{x['code']}</code>")
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🖼 مرور فلش", callback_data="myc_br")],
-            [InlineKeyboardButton("🔙", callback_data="back_p")],
+            [InlineKeyboardButton("🖼 مرور فلش", callback_data=f"myc_br:{uid}")],
+            [InlineKeyboardButton("🔙", callback_data=f"back_p:{uid}")],
         ])
         try:
             await q.edit_message_text("\n".join(lines), parse_mode="HTML", reply_markup=kb)
@@ -836,9 +862,9 @@ async def on_cb(u, c):
 
     if cb == "back_p":
         try:
-            await q.edit_message_text(profile(d, uid), reply_markup=pkb())
+            await q.edit_message_text(profile(d, uid), reply_markup=pkb(user.id))
         except Exception:
-            await q.message.reply_text(profile(d, uid), reply_markup=pkb())
+            await q.message.reply_text(profile(d, uid), reply_markup=pkb(user.id))
         return
 
     if cb == "setp":
@@ -861,8 +887,8 @@ async def on_cb(u, c):
             for s in items[:15]:
                 lines.append(f"• {s['name']} — {s['price']} (×{s['stock']})")
                 rows.append([InlineKeyboardButton(f"خرید {s['name']} ({s['price']})", callback_data=f"buy_{s['code']}")])
-        rows.append([InlineKeyboardButton("💰 فروش کارت", callback_data="sell")])
-        rows.append([InlineKeyboardButton("🔙", callback_data="back_p")])
+        rows.append([InlineKeyboardButton("💰 فروش کارت", callback_data=f"sell:{uid}")])
+        rows.append([InlineKeyboardButton("🔙", callback_data=f"back_p:{uid}")])
         try:
             await q.edit_message_text("\n".join(lines), parse_mode="HTML", reply_markup=InlineKeyboardMarkup(rows))
         except Exception:
@@ -910,8 +936,8 @@ async def on_cb(u, c):
             if col.get("desc"):
                 lines.append(f"  {col.get('desc')[:60]}")
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🖼 پیش‌نمایش‌ها", callback_data="cols_prev")],
-            [InlineKeyboardButton("🔙", callback_data="back_p")],
+            [InlineKeyboardButton("🖼 پیش‌نمایش‌ها", callback_data=f"cols_prev:{uid}")],
+            [InlineKeyboardButton("🔙", callback_data=f"back_p:{uid}")],
         ])
         try:
             await q.edit_message_text("\n".join(lines), parse_mode="HTML", reply_markup=kb)
