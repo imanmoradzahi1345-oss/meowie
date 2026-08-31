@@ -9,7 +9,7 @@ from telegram.ext import (
 )
 from telegram.constants import ChatMemberStatus, ChatType
 
-BOT_TOKEN = "8975007734:AAHHvFoLRIKCt06BxotMAC3MCh4B3khbFjA"
+BOT_TOKEN = "8273833935:AAHm3q_XxEBXm84PISUfP8L0TTwsUv4bu38"
 MAIN_ADMIN = 7530457395
 DATA = "card_data.json"
 DAILY = 100
@@ -844,27 +844,57 @@ async def admin_text(u, c, d, text):
             await u.message.reply_text("آیدی")
         return
     if kind == "adm_shop_cat":
-        c.user_data["si"] = {"category": text.strip()}
+        cat = text.strip()
+        c.user_data["shop_cat"] = cat
+        c.user_data["si"] = {"category": cat}
         set_state(c, "adm_shop_name")
-        await u.message.reply_text("نام کارت/محصول:", reply_markup=cancel_kb())
+        await u.message.reply_text(
+            f"📁 دسته: <b>{cat}</b>\nالان چند کارت پشت‌سرهم اضافه کن.\n\nنام کارت اول:",
+            parse_mode="HTML",
+            reply_markup=cancel_kb(),
+        )
         return
     if kind == "adm_shop_name":
         c.user_data.setdefault("si", {})["name"] = text
+        c.user_data["si"]["category"] = c.user_data.get("shop_cat") or c.user_data["si"].get("category") or "عمومی"
         set_state(c, "adm_shop_desc")
-        await u.message.reply_text("توضیح:", reply_markup=cancel_kb())
+        await u.message.reply_text("توضیح کارت:", reply_markup=cancel_kb())
         return
     if kind == "adm_shop_desc":
-        c.user_data["si"]["description"] = text; set_state(c, "adm_shop_price"); await u.message.reply_text("قیمت:", reply_markup=cancel_kb()); return
+        c.user_data["si"]["description"] = text
+        set_state(c, "adm_shop_price")
+        await u.message.reply_text("قیمت (امتیاز):", reply_markup=cancel_kb())
+        return
     if kind == "adm_shop_price":
-        try: c.user_data["si"]["price"] = int(text)
+        try:
+            c.user_data["si"]["price"] = int(text)
         except ValueError:
-            await u.message.reply_text("عدد"); return
-        set_state(c, "adm_shop_stock"); await u.message.reply_text("موجودی:", reply_markup=cancel_kb()); return
+            await u.message.reply_text("عدد بفرست")
+            return
+        set_state(c, "adm_shop_stock")
+        await u.message.reply_text("موجودی (چند نفر می‌تونن بخرن):", reply_markup=cancel_kb())
+        return
     if kind == "adm_shop_stock":
-        try: c.user_data["si"]["stock"] = int(text)
+        try:
+            c.user_data["si"]["stock"] = int(text)
         except ValueError:
-            await u.message.reply_text("عدد"); return
-        set_state(c, "adm_shop_ph"); await u.message.reply_text("عکس:", reply_markup=cancel_kb()); return
+            await u.message.reply_text("عدد بفرست")
+            return
+        set_state(c, "adm_shop_ph")
+        await u.message.reply_text("عکس کارت را بفرست:", reply_markup=cancel_kb())
+        return
+    if kind == "adm_shop_more":
+        t0 = text.strip()
+        if t0 in ("پایان", "تمام", "done", "-"):
+            clear_state(c)
+            cat = c.user_data.get("shop_cat", "")
+            n = sum(1 for s in d.get("shop", []) if (s.get("category") or "") == cat)
+            await u.message.reply_text(f"✅ دسته «{cat}» — {n} کارت.", reply_markup=akb())
+            return
+        c.user_data["si"] = {"category": c.user_data.get("shop_cat") or "عمومی", "name": t0}
+        set_state(c, "adm_shop_desc")
+        await u.message.reply_text("توضیح کارت:", reply_markup=cancel_kb())
+        return
     # ---- کالکشن ----
     if kind == "adm_col_name":
         c.user_data["col"] = {"id": code(4), "name": text, "card_codes": [], "cards_data": [], "groups": []}
@@ -939,9 +969,23 @@ async def on_photo(u, c):
         await u.message.reply_text("اسم کارت:", reply_markup=cancel_kb()); return
     if kind == "adm_shop_ph":
         si = c.user_data.get("si", {})
-        si["file_id"] = fid; si["code"] = code(); si.setdefault("category", "عمومی"); si["rarity"] = si.get("category") or "فروشگاهی"; si["points"] = si.get("price", 0) // 2
-        d["shop"].append(si); save(d); clear_state(c)
-        await u.message.reply_text(f"✅ {si['name']}", reply_markup=akb()); return
+        si["file_id"] = fid
+        si["code"] = code()
+        si["category"] = c.user_data.get("shop_cat") or si.get("category") or "عمومی"
+        si["rarity"] = si["category"]
+        si["points"] = si.get("price", 0) // 2
+        d.setdefault("shop", []).append(dict(si))
+        save(d)
+        n = sum(1 for s in d["shop"] if (s.get("category") or "") == si["category"])
+        set_state(c, "adm_shop_more")
+        await u.message.reply_text(
+            f"✅ «{si.get('name')}» اضافه شد ({n} کارت در دسته {si['category']})\n\n"
+            f"نام کارت بعدی همین دسته را بفرست\n"
+            f"یا بنویس: <b>پایان</b>",
+            parse_mode="HTML",
+            reply_markup=cancel_kb(),
+        )
+        return
     if kind == "adm_col_photos":
         col = c.user_data.setdefault("col", {"name": "کالکشن", "cards_data": [], "card_codes": []})
         col.setdefault("cards_data", [])
@@ -1024,14 +1068,21 @@ async def on_cb(u, c):
     cb = q.data
     uid = str(user.id)
 
-    # پنل پروفایل فقط برای صاحبش
-    if ":" in cb and cb.split(":")[0] in ("myc", "setp", "shop", "cols", "game", "exch", "back_p", "myc_br", "cols_prev", "sell", "scat", "sitem", "sbuy", "scancel"):
-        ok, action = panel_owner_ok(q)
-        if not ok:
-            await q.answer("این پنل مال تو نیست ❌", show_alert=True)
-            return
-        cb = action  # از این به بعد مثل قبل با action کار می‌کنیم
-        # برای back_p و ... owner در data هست
+    # پنل فقط برای صاحبش — داده کامل برای scat/sitem/sbuy حفظ می‌شود
+    if ":" in cb:
+        action = cb.split(":")[0]
+        protected = (
+            "myc", "setp", "shop", "cols", "game", "exch", "back_p", "myc_br",
+            "cols_prev", "sell", "scat", "sitem", "sbuy", "scancel",
+        )
+        if action in protected:
+            ok, _ = panel_owner_ok(q)
+            if not ok:
+                await q.answer("این پنل مال تو نیست ❌", show_alert=True)
+                return
+            # فقط اکشن‌های ساده را کوتاه کن؛ scat/sitem/sbuy کامل بمانند
+            if action in ("myc", "setp", "shop", "cols", "game", "exch", "back_p", "myc_br", "cols_prev", "sell"):
+                cb = action
 
     await q.answer()
 
@@ -1160,17 +1211,22 @@ async def on_cb(u, c):
         )
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("✅ خرید", callback_data=f"sbuy:{uid}:{item['code']}")],
-            [InlineKeyboardButton("🔙", callback_data=f"scat:{uid}:{item.get('category') or 'عمومی'}")],
+            [InlineKeyboardButton("🔙 لیست دسته", callback_data=f"scat:{uid}:{item.get('category') or 'عمومی'}")],
             [InlineKeyboardButton("❌ انصراف", callback_data=f"scancel:{uid}")],
         ])
+        # سعی برای ادیت همان پیام به عکس+جزئیات
         try:
-            await q.message.reply_photo(item["file_id"], caption=cap, parse_mode="HTML", reply_markup=kb)
-            await q.answer()
+            await c.bot.edit_message_media(
+                chat_id=q.message.chat_id,
+                message_id=q.message.message_id,
+                media=InputMediaPhoto(media=item["file_id"], caption=cap, parse_mode="HTML"),
+                reply_markup=kb,
+            )
         except Exception:
             try:
-                await q.edit_message_text(cap, parse_mode="HTML", reply_markup=kb)
+                await q.message.reply_photo(item["file_id"], caption=cap, parse_mode="HTML", reply_markup=kb)
             except Exception:
-                await q.message.reply_text(cap, parse_mode="HTML", reply_markup=kb)
+                await q.edit_message_text(cap, parse_mode="HTML", reply_markup=kb)
         return
 
     if cb.startswith("sbuy:"):
@@ -1184,45 +1240,65 @@ async def on_cb(u, c):
         if uu.get("points", 0) < price:
             msg = f"❌ پوینت کافی ندارید\nلازم: {price} | داری: {uu.get('points', 0)}"
             try:
-                await q.edit_message_caption(caption=msg)
+                await q.edit_message_caption(caption=msg, reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙", callback_data=f"scat:{uid}:{item.get('category') or 'عمومی'}")],
+                    [InlineKeyboardButton("❌ بستن", callback_data=f"scancel:{uid}")],
+                ]))
             except Exception:
                 await q.answer(msg, show_alert=True)
             return
         uu["points"] -= price
         item["stock"] -= 1
         cat_name = item.get("category") or "عمومی"
-        uu["cards"].append({
-            "code": code(), "file_id": item["file_id"], "name": item["name"],
+        uu["cards"].append(give_card({
+            "file_id": item["file_id"],
+            "name": item["name"],
             "description": item.get("description", ""),
             "rarity": cat_name,
-            "points": item.get("points", price // 2), "emoji": "🛒",
-        })
-        # اگر موجودی صفر شد، از فروشگاه حذف شود
+            "points": item.get("points", price // 2),
+            "emoji": "🛒",
+            "code": item.get("code"),
+        }))
         if item.get("stock", 0) <= 0:
             d["shop"] = [s for s in d.get("shop", []) if s.get("code") != item.get("code")]
-        # اگر دیگر کالایی در این دسته نماند، دسته خودکار از لیست فروشگاه محو می‌شود
         upd(d, uid)
         save(d)
-        left_in_cat = sum(1 for s in d.get("shop", []) if (s.get("category") or "عمومی") == cat_name and s.get("stock", 0) > 0)
+        left_in_cat = sum(
+            1 for s in d.get("shop", [])
+            if (s.get("category") or "عمومی") == cat_name and s.get("stock", 0) > 0
+        )
         extra = ""
         if left_in_cat == 0:
             extra = f"\n📁 دسته «{cat_name}» تمام شد و از فروشگاه برداشته شد."
         done = f"✅ خریده شد: {item.get('name')}\nامتیاز باقی: {uu['points']}{extra}"
         try:
-            await q.edit_message_caption(caption=done)
+            await q.edit_message_caption(
+                caption=done,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🛒 ادامه خرید", callback_data=f"shop:{uid}")],
+                    [InlineKeyboardButton("❌ بستن", callback_data=f"scancel:{uid}")],
+                ]),
+            )
         except Exception:
             try:
-                await q.edit_message_text(done)
+                await q.edit_message_text(done, reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🛒 فروشگاه", callback_data=f"shop:{uid}")],
+                ]))
             except Exception:
                 await q.message.reply_text(done)
         await q.answer("✅ خرید شد", show_alert=True)
         return
 
     if cb.startswith("scancel:"):
+        txt = profile(d, uid)
         try:
-            await q.edit_message_text(profile(d, uid), parse_mode="HTML", reply_markup=pkb(user.id))
+            await q.edit_message_text(txt, parse_mode="HTML", reply_markup=pkb(user.id))
         except Exception:
-            await q.message.reply_text(profile(d, uid), parse_mode="HTML", reply_markup=pkb(user.id))
+            try:
+                await q.edit_message_caption(caption="بسته شد ✅")
+            except Exception:
+                pass
+            await q.message.reply_text(txt, parse_mode="HTML", reply_markup=pkb(user.id))
         return
 
     if cb == "sell":
@@ -1378,7 +1454,26 @@ async def on_cb(u, c):
     if cb == "a_tit_b":
         set_state(c, "adm_tit"); await q.edit_message_text("• غول (از 2000 امتیاز)", reply_markup=cancel_kb()); return
     if cb == "a_shop":
-        await q.edit_message_text("فروشگاه", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("➕", callback_data="a_shop_add")], [InlineKeyboardButton("🔙", callback_data="a_back")]])); return
+        shop = d.get("shop", [])
+        cats = {}
+        for s in shop:
+            cat = s.get("category") or "عمومی"
+            cats.setdefault(cat, 0)
+            cats[cat] += 1
+        lines = [f"🛒 فروشگاه — {len(shop)} کالا"]
+        for cat, n in sorted(cats.items()):
+            lines.append(f"📁 {cat}: {n} کارت")
+        if not cats:
+            lines.append("خالی است.")
+        await q.edit_message_text(
+            "\n".join(lines),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("➕ افزودن به دسته / دسته جدید", callback_data="a_shop_add")],
+                [InlineKeyboardButton("🔙", callback_data="a_back")],
+            ]),
+        )
+        return
+
     if cb == "a_shop_add":
         set_state(c, "adm_shop_cat"); await q.edit_message_text("نام دسته (مثلاً ناروتو یا دراگون بال):", reply_markup=cancel_kb()); return
     if cb == "a_col":
