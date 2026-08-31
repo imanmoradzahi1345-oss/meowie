@@ -9,7 +9,7 @@ from telegram.ext import (
 )
 from telegram.constants import ChatMemberStatus, ChatType
 
-BOT_TOKEN = "8273833935:AAHm3q_XxEBXm84PISUfP8L0TTwsUv4bu38"
+BOT_TOKEN = "8273833935:AAHhFdBf7OaD4oqDEkJCRv5wIUvSJWycilM"
 MAIN_ADMIN = 7530457395
 DATA = "card_data.json"
 DAILY = 100
