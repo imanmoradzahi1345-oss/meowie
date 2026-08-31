@@ -9,7 +9,7 @@ from telegram.ext import (
 )
 from telegram.constants import ChatMemberStatus, ChatType
 
-BOT_TOKEN = "8975007734:AAHbW89ze3BnAIZnUq6SdDbFUX-b5iJq0tM"
+BOT_TOKEN = "8273833935:AAHm3q_XxEBXm84PISUfP8L0TTwsUv4bu38"
 MAIN_ADMIN = 7530457395
 DATA = "card_data.json"
 DAILY = 100
@@ -56,6 +56,26 @@ def load():
             b = D()
             for k, v in b.items():
                 d.setdefault(k, v)
+            # تعمیر کدهای تکراری کارت‌های کاربران
+            fixed = False
+            seen_global = set()
+            for uid, u in d.get("users", {}).items():
+                for card in u.get("cards", []):
+                    c0 = card.get("code")
+                    if not c0 or c0 in seen_global:
+                        if c0 and not card.get("base_code"):
+                            card["base_code"] = c0
+                        card["code"] = code()
+                        fixed = True
+                    seen_global.add(card["code"])
+                    if not card.get("base_code"):
+                        card["base_code"] = card["code"]
+            if fixed:
+                try:
+                    with open(DATA, "w", encoding="utf-8") as f:
+                        json.dump(d, f, ensure_ascii=False, indent=2)
+                except Exception:
+                    pass
             return d
         except Exception as e:
             log.error(e)
@@ -353,6 +373,32 @@ async def dist(c, chat_id, d=None):
     g["pending"] = card
     save(d)
 
+def give_card(src):
+    """کپی کارت با کد یکتای جدید برای هر بار دریافت"""
+    base = src.get("base_code") or src.get("code") or code()
+    return {
+        "code": code(),
+        "base_code": base,
+        "file_id": src.get("file_id"),
+        "name": src.get("name"),
+        "description": src.get("description", ""),
+        "rarity": src.get("rarity", ""),
+        "points": int(src.get("points", 0) or 0),
+        "emoji": src.get("emoji", ""),
+        "collection": src.get("collection"),
+    }
+
+
+def find_user_cards(uu, query):
+    """جستجو با اولویت کد دقیق، بعد اسم"""
+    q = (query or "").strip().lstrip("`")
+    ql = q.lower()
+    by_code = [x for x in uu.get("cards", []) if x.get("code") == q]
+    if by_code:
+        return by_code
+    return [x for x in uu.get("cards", []) if ql and ql in (x.get("name") or "").lower()]
+
+
 async def claim(u, c, d):
     user = u.effective_user
     ch = u.effective_chat
@@ -367,18 +413,15 @@ async def claim(u, c, d):
     eu(d, user)
     x = d["users"][uid]
     old = x.get("points", 0)
-    x["cards"].append({
-        "code": card["code"], "file_id": card["file_id"], "name": card.get("name"),
-        "description": card.get("description", ""), "rarity": card.get("rarity"),
-        "points": card.get("points", 0), "emoji": card.get("emoji", ""),
-    })
+    inst = give_card(card)
+    x["cards"].append(inst)
     gain = int(card.get("points", 0))
     x["points"] = old + gain
     upd(d, uid)
     await check_collections(c, d, uid, user)
     save(d)
     tag = f"@{user.username}" if user.username else user.full_name
-    nc = f"✅ {tag}\n{card.get('name')} | +{gain} ({old}→{x['points']})"
+    nc = f"✅ {tag}\n{card.get('name')} | کد: {inst['code']} | +{gain} ({old}→{x['points']})"
     try:
         await c.bot.edit_message_caption(ch.id, rp.message_id, caption=nc)
     except Exception:
@@ -390,7 +433,12 @@ async def check_collections(c, d, uid, user):
     u = d["users"].get(uid)
     if not u:
         return
-    have = {x["code"] for x in u.get("cards", [])}
+    # تطبیق با base_code یا code
+    have = set()
+    for x in u.get("cards", []):
+        have.add(x.get("code"))
+        if x.get("base_code"):
+            have.add(x["base_code"])
     for col in d.get("collections", []):
         cid = col.get("id")
         if not cid or cid in u.get("collections_done", []):
@@ -399,10 +447,8 @@ async def check_collections(c, d, uid, user):
         if not need or not need.issubset(have):
             continue
         u.setdefault("collections_done", []).append(cid)
-        # کارت جایزه
         if col.get("prize"):
-            pr = dict(col["prize"])
-            pr["code"] = code()
+            pr = give_card(col["prize"])
             u["cards"].append(pr)
             u["points"] = u.get("points", 0) + int(pr.get("points", 0))
         # امتیاز جایزه متنی
@@ -473,21 +519,35 @@ async def on_text(u, c):
         if kind == "sell":
             clear_state(c)
             uu = d["users"][uid]
-            ql = text.lower()
-            ms = [x for x in uu.get("cards", []) if x["code"] == text or ql in x.get("name", "").lower()]
+            ms = find_user_cards(uu, text)
             if not ms:
-                await u.message.reply_text("پیدا نشد"); return
+                await u.message.reply_text("پیدا نشد")
+                return
             if len(ms) > 1:
-                await u.message.reply_text("کد دقیق:\n" + "\n".join(f"{x['name']} <code>{x['code']}</code>" for x in ms[:8]), parse_mode="HTML")
-                set_state(c, "sell"); return
+                await u.message.reply_text(
+                    "چند کارت شبیه — کد دقیق یکی را بفرست:\n"
+                    + "\n".join(f"• {x.get('name')} | <code>{x['code']}</code>" for x in ms[:10]),
+                    parse_mode="HTML",
+                )
+                set_state(c, "sell")
+                return
             card = ms[0]
             gain = int(card.get("points", 0) * d.get("sell_mult", 2.0))
-            uu["cards"] = [x for x in uu["cards"] if x["code"] != card["code"]]
+            # فقط همین یک نمونه با کد یکتا حذف شود
+            removed = False
+            new_cards = []
+            for x in uu["cards"]:
+                if not removed and x.get("code") == card["code"]:
+                    removed = True
+                    continue
+                new_cards.append(x)
+            uu["cards"] = new_cards
             if uu.get("profile_code") == card["code"]:
                 uu["profile_code"] = None
             uu["points"] = uu.get("points", 0) + gain
-            upd(d, uid); save(d)
-            await u.message.reply_text(f"✅ فروش +{gain} → {uu['points']}", reply_markup=pkb(user.id))
+            upd(d, uid)
+            save(d)
+            await u.message.reply_text(f"✅ فروش {card.get('name')} +{gain} → {uu['points']}", reply_markup=pkb(user.id))
             return
         if kind == "exch":
             clear_state(c)
@@ -519,7 +579,7 @@ async def on_text(u, c):
             prize["remain_dist"] = prize.get("remain_dist", 1) - 1
             if prize.get("remain_dist", 0) <= 0:
                 d["pool"] = [x for x in d["pool"] if x["code"] != prize["code"]]
-            uu["cards"].append({k: prize.get(k) for k in ("code","file_id","name","description","rarity","points","emoji")})
+            uu["cards"].append(give_card(prize))
             uu["points"] = uu.get("points", 0) + int(prize.get("points", 0))
             upd(d, uid); save(d)
             await u.message.reply_photo(prize["file_id"], caption=f"🔄 {prize.get('name')}", reply_markup=pkb(user.id))
@@ -533,14 +593,14 @@ async def on_text(u, c):
                 await u.message.reply_text("بازی منقضی شده")
                 return
             uu = d["users"][uid]
-            ql = text.lower()
-            ms = [x for x in uu.get("cards", []) if x["code"] == text or ql in (x.get("name") or "").lower()]
+            ms = find_user_cards(uu, text)
             if not ms:
-                await u.message.reply_text("این کارت مال تو نیست — کد یا اسم دقیق‌تر")
+                await u.message.reply_text("این کارت مال تو نیست — کد یکتای کارت را بفرست (از لیست کارت‌هام)")
                 return
             if len(ms) > 1:
                 await u.message.reply_text(
-                    "چند کارت شبیه هم:\n" + "\n".join(f"• {x['name']} <code>{x['code']}</code>" for x in ms[:8]),
+                    "چند کارت شبیه — کد دقیق یکی را بفرست:\n"
+                    + "\n".join(f"• {x.get('name')} | <code>{x['code']}</code>" for x in ms[:10]),
                     parse_mode="HTML",
                 )
                 return
