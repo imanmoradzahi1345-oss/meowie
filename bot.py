@@ -494,6 +494,58 @@ async def on_text(u, c):
             upd(d, uid); save(d)
             await u.message.reply_photo(prize["file_id"], caption=f"🔄 {prize.get('name')}", reply_markup=pkb(user.id))
             return
+        if kind == "game_card":
+            st_extra = st.get("extra") or {}
+            gid = st_extra.get("gid")
+            g = d.get("games", {}).get(gid)
+            if not g:
+                clear_state(c)
+                await u.message.reply_text("بازی منقضی شده")
+                return
+            uu = d["users"][uid]
+            ql = text.lower()
+            ms = [x for x in uu.get("cards", []) if x["code"] == text or ql in (x.get("name") or "").lower()]
+            if not ms:
+                await u.message.reply_text("این کارت مال تو نیست — کد یا اسم دقیق‌تر")
+                return
+            if len(ms) > 1:
+                await u.message.reply_text(
+                    "چند کارت شبیه هم:\n" + "\n".join(f"• {x['name']} <code>{x['code']}</code>" for x in ms[:8]),
+                    parse_mode="HTML",
+                )
+                return
+            card = ms[0]
+            g.setdefault("plays", {})[uid] = {
+                "code": card["code"],
+                "name": card.get("name"),
+                "points": int(card.get("points", 0)),
+                "rarity": card.get("rarity", ""),
+                "user_name": user.full_name,
+            }
+            save(d)
+            clear_state(c)
+            need = int(g.get("players", 2))
+            nplay = len(g["plays"])
+            await u.message.reply_text(f"✅ کارت ثبت شد: {card.get('name')} ({card.get('points')} امتیاز)\nوضعیت: {nplay}/{need}")
+            if nplay >= need:
+                ranked = sorted(g["plays"].items(), key=lambda x: x[1].get("points", 0), reverse=True)
+                win_uid, win = ranked[0]
+                vals = [p.get("points", 0) for _, p in ranked]
+                avg_others = sum(vals[1:]) // max(1, len(vals) - 1) if len(vals) > 1 else 0
+                bonus = max(50, abs(win.get("points", 0) - avg_others))
+                d["users"][win_uid]["points"] = d["users"][win_uid].get("points", 0) + bonus
+                upd(d, win_uid)
+                d["games"].pop(gid, None)
+                save(d)
+                lines = [f"🎮 <b>نتیجه بازی</b>\n🏆 برنده: {win.get('user_name')}\n🃏 {win.get('name')} ({win.get('points')})\n💰 +{bonus} امتیاز\n"]
+                for i, (pu, pv) in enumerate(ranked, 1):
+                    lines.append(f"{i}. {pv.get('user_name')} — {pv.get('name')} ({pv.get('points')})")
+                chat_id = g.get("chat_id") or u.effective_chat.id
+                try:
+                    await c.bot.send_message(chat_id, "\n".join(lines), parse_mode="HTML")
+                except Exception:
+                    await u.message.reply_text("\n".join(lines), parse_mode="HTML")
+            return
         if kind and kind.startswith("adm_"):
             await admin_text(u, c, d, text)
             return
@@ -668,71 +720,62 @@ async def admin_text(u, c, d, text):
         set_state(c, "adm_shop_ph"); await u.message.reply_text("عکس:", reply_markup=cancel_kb()); return
     # ---- کالکشن ----
     if kind == "adm_col_name":
-        c.user_data["col"] = {"id": code(4), "name": text, "card_codes": [], "groups": []}
+        c.user_data["col"] = {"id": code(4), "name": text, "card_codes": [], "cards_data": [], "groups": []}
         set_state(c, "adm_col_desc")
         await u.message.reply_text("توضیحات کالکشن را بفرست:", reply_markup=cancel_kb())
         return
     if kind == "adm_col_desc":
         c.user_data["col"]["desc"] = text
-        set_state(c, "adm_col_codes")
+        c.user_data["col"]["cards_data"] = []
+        c.user_data["col"]["card_codes"] = []
+        set_state(c, "adm_col_photos")
         await u.message.reply_text(
-            "کد کارت‌های عضو را با فاصله بفرست:\n"
-            "مثال: <code>cabc123 cdef456 cghi789</code>",
+            "حالا عکس‌های کالکشن را یکی‌یکی بفرست.\n"
+            "زیر هر عکس (کپشن) توضیحات همان کارت را بنویس.\n"
+            "ربات خودکار شماره‌گذاری می‌کند: ۱، ۲، ۳...\n\n"
+            "وقتی تمام شد بنویس: <b>پایان</b>",
             parse_mode="HTML",
             reply_markup=cancel_kb(),
         )
         return
-    if kind == "adm_col_codes":
-        codes = [x.lstrip("`") for x in text.replace(",", " ").split() if x]
-        if not codes:
-            await u.message.reply_text("حداقل یک کد بفرست")
+    if kind == "adm_col_photos":
+        if text.strip() in ("پایان", "تمام", "done", "پایان کالکشن"):
+            col = c.user_data.get("col", {})
+            if not col.get("cards_data"):
+                await u.message.reply_text("حداقل یک عکس بفرست، بعد پایان")
+                return
+            set_state(c, "adm_col_reward")
+            await u.message.reply_text(
+                f"✅ {len(col['cards_data'])} کارت ثبت شد.\n"
+                "متن جایزه / اعلام را بفرست:",
+                reply_markup=cancel_kb(),
+            )
             return
-        c.user_data["col"]["card_codes"] = codes
-        set_state(c, "adm_col_reward")
-        await u.message.reply_text(
-            "متن جایزه / اعلام را بفرست (وقتی کسی کامل کرد نشان داده می‌شود):",
-            reply_markup=cancel_kb(),
-        )
+        await u.message.reply_text("عکس بفرست یا برای اتمام بنویس: پایان")
         return
     if kind == "adm_col_reward":
         c.user_data["col"]["reward_text"] = text
         set_state(c, "adm_col_bonus")
-        await u.message.reply_text(
-            "امتیاز جایزه عددی (اگر نمی‌خوای ۰ بفرست):",
-            reply_markup=cancel_kb(),
-        )
+        await u.message.reply_text("امتیاز جایزه (عدد، یا ۰):", reply_markup=cancel_kb())
         return
     if kind == "adm_col_bonus":
         try:
             c.user_data["col"]["bonus_points"] = int(text)
         except ValueError:
-            await u.message.reply_text("عدد بفرست (مثلاً ۰ یا ۵۰۰)")
+            await u.message.reply_text("عدد بفرست")
             return
-        set_state(c, "adm_col_prize")
+        set_state(c, "adm_col_preview")
         await u.message.reply_text(
-            "کد کارت جایزه از استخر را بفرست (اگر نمی‌خوای بنویس: - )",
+            "عکس پیش‌نمایش کالکشن را بفرست:\n"
+            "(یا بنویس: همان — تا عکس اول به‌عنوان پیش‌نمایش استفاده شود)",
             reply_markup=cancel_kb(),
         )
         return
-    if kind == "adm_col_prize":
-        col = c.user_data.get("col", {})
-        t = text.strip().lstrip("`")
-        if t != "-":
-            pr = next((x for x in d["pool"] if x["code"] == t), None)
-            if not pr:
-                await u.message.reply_text("این کد تو استخر نیست. دوباره بفرست یا -")
-                return
-            col["prize"] = {
-                "file_id": pr["file_id"],
-                "name": pr.get("name", "جایزه"),
-                "description": pr.get("description", ""),
-                "rarity": pr.get("rarity", "جایزه"),
-                "points": pr.get("points", 0),
-                "emoji": pr.get("emoji", "🎁"),
-            }
-            # از استخر کم نکن مگر بخوای — جایزه کپی می‌شود
-        set_state(c, "adm_col_preview")
-        await u.message.reply_text("عکس پیش‌نمایش کالکشن را بفرست:", reply_markup=cancel_kb())
+    if kind == "adm_col_preview":
+        if text.strip() in ("همان", "همون", "اول", "-"):
+            await finish_collection(u, c, d, None)
+        else:
+            await u.message.reply_text("عکس پیش‌نمایش بفرست یا بنویس: همان")
         return
 
 async def on_photo(u, c):
@@ -752,39 +795,80 @@ async def on_photo(u, c):
         si["file_id"] = fid; si["code"] = code(); si["rarity"] = "فروشگاهی"; si["points"] = si.get("price", 0) // 2
         d["shop"].append(si); save(d); clear_state(c)
         await u.message.reply_text(f"✅ {si['name']}", reply_markup=akb()); return
-    if kind == "adm_col_preview":
-        col = c.user_data.get("col", {})
-        col["preview"] = fid
-        col["done_text"] = (
-            f"🏆 کالکشن <b>{col.get('name')}</b> کامل شد!\n"
-            f"{col.get('reward_text', '')}"
-        )
-        d.setdefault("collections", []).append(col)
+    if kind == "adm_col_photos":
+        col = c.user_data.setdefault("col", {"name": "کالکشن", "cards_data": [], "card_codes": []})
+        col.setdefault("cards_data", [])
+        col.setdefault("card_codes", [])
+        n = len(col["cards_data"]) + 1
+        cap = (u.message.caption or "").strip() or f"کارت {n}"
+        cd0 = code()
+        card = {
+            "code": cd0,
+            "file_id": fid,
+            "name": f"{col.get('name', 'کالکشن')} #{n}",
+            "description": cap,
+            "rarity": "کالکشن",
+            "points": 20,
+            "emoji": "📦",
+            "remain_dist": 5,
+            "max_dist": 5,
+            "collection": col.get("id"),
+        }
+        col["cards_data"].append(card)
+        col["card_codes"].append(cd0)
+        d.setdefault("pool", []).append(dict(card))
         save(d)
-        clear_state(c)
-        # اعلام ساخت در همه گپ‌ها
-        announce = (
-            f"📦 <b>کالکشن جدید</b>\n"
-            f"نام: {col.get('name')}\n"
-            f"{col.get('desc', '')}\n"
-            f"تعداد کارت: {len(col.get('card_codes', []))}\n"
-            f"جایزه: {col.get('reward_text', '-')}\n"
-            f"امتیاز جایزه: {col.get('bonus_points', 0)}"
-        )
-        for gid in list(d.get("groups", {}).keys())[:30]:
-            try:
-                await c.bot.send_photo(int(gid), photo=fid, caption=announce, parse_mode="HTML")
-            except Exception:
-                try:
-                    await c.bot.send_message(int(gid), announce, parse_mode="HTML")
-                except Exception:
-                    pass
+        set_state(c, "adm_col_photos")  # تمدید مهلت
         await u.message.reply_text(
-            f"✅ کالکشن «{col.get('name')}» ثبت و اعلام شد\n"
-            f"کارت‌ها: {len(col.get('card_codes', []))}",
-            reply_markup=akb(),
+            f"✅ کارت #{n} ثبت شد\n"
+            f"اسم: {card['name']}\n"
+            f"کد: <code>{cd0}</code>\n"
+            f"عکس بعدی را بفرست یا بنویس: <b>پایان</b>",
+            parse_mode="HTML",
+            reply_markup=cancel_kb(),
         )
         return
+    if kind == "adm_col_preview":
+        await finish_collection(u, c, d, fid)
+        return
+
+
+async def finish_collection(u, c, d, preview_fid=None):
+    col = c.user_data.get("col", {})
+    if preview_fid:
+        col["preview"] = preview_fid
+    elif col.get("cards_data"):
+        col["preview"] = col["cards_data"][0]["file_id"]
+    col["done_text"] = (
+        f"🏆 کالکشن <b>{col.get('name')}</b> کامل شد!\n"
+        f"{col.get('reward_text', '')}"
+    )
+    col["card_codes"] = [x["code"] for x in col.get("cards_data", [])]
+    d.setdefault("collections", []).append(col)
+    save(d)
+    clear_state(c)
+    fid = col.get("preview")
+    announce = (
+        f"📦 <b>کالکشن جدید</b>\n"
+        f"نام: {col.get('name')}\n"
+        f"{col.get('desc', '')}\n"
+        f"تعداد کارت: {len(col.get('card_codes', []))}\n"
+        f"جایزه: {col.get('reward_text', '-')}\n"
+        f"امتیاز جایزه: {col.get('bonus_points', 0)}"
+    )
+    for gid in list(d.get("groups", {}).keys())[:30]:
+        try:
+            if fid:
+                await c.bot.send_photo(int(gid), photo=fid, caption=announce, parse_mode="HTML")
+            else:
+                await c.bot.send_message(int(gid), announce, parse_mode="HTML")
+        except Exception:
+            pass
+    await u.message.reply_text(
+        f"✅ کالکشن «{col.get('name')}» ثبت شد\n"
+        f"کارت‌ها: {len(col.get('card_codes', []))}",
+        reply_markup=akb(),
+    )
 
 async def on_cb(u, c):
     q = u.callback_query
@@ -982,20 +1066,53 @@ async def on_cb(u, c):
         return
 
     if cb == "game":
-        await q.message.reply_text("تعداد:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("۲", callback_data="gp_2"), InlineKeyboardButton("۴", callback_data="gp_4")]]))
+        await q.message.reply_text(
+            "🎮 تعداد بازیکن را انتخاب کن:",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("۲ نفر", callback_data="gp_2"),
+                InlineKeyboardButton("۴ نفر", callback_data="gp_4"),
+                InlineKeyboardButton("۶ نفر", callback_data="gp_6"),
+            ]]),
+        )
         return
     if cb.startswith("gp_"):
-        n = int(cb[3:]); gid = code(5)
-        d.setdefault("games", {})[gid] = {"players": n, "plays": {}, "chat_id": q.message.chat_id}
+        n = int(cb[3:])
+        gid = code(5)
+        d.setdefault("games", {})[gid] = {
+            "players": n,
+            "plays": {},
+            "chat_id": q.message.chat_id,
+            "creator": uid,
+        }
         save(d)
-        await q.edit_message_text(f"بازی {n} نفره", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("شرکت", callback_data=f"gj_{gid}")]]))
+        await q.edit_message_text(
+            f"🎮 بازی {n} نفره ساخته شد\n"
+            f"هر کس «شرکت» را بزند و کد/اسم کارت را با ریپلای بفرستد.\n"
+            f"کارت با امتیاز بالاتر برنده است.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ شرکت در بازی", callback_data=f"gj_{gid}")],
+            ]),
+        )
         return
     if cb.startswith("gj_"):
         gid = cb[3:]
-        if gid not in d.get("games", {}):
-            await q.answer("تمام", show_alert=True); return
-        set_state(c, "exch")  # reuse pattern - actually game needs separate; simple: tell user send card code as claim later
-        await q.message.reply_text("فعلاً کارت را با امتیاز بالاتر در /top ببین — بازی کامل در آپدیت بعدی", reply_markup=cancel_kb())
+        g = d.get("games", {}).get(gid)
+        if not g:
+            await q.answer("این بازی تمام شده", show_alert=True)
+            return
+        if uid in g.get("plays", {}):
+            await q.answer("قبلاً شرکت کردی", show_alert=True)
+            return
+        if len(g.get("plays", {})) >= g.get("players", 2):
+            await q.answer("ظرفیت پر است", show_alert=True)
+            return
+        set_state(c, "game_card", {"gid": gid})
+        await q.message.reply_text(
+            f"🃏 کد یا اسم کارت خودت را با <b>ریپلای روی این پیام</b> بفرست\n"
+            f"مهلت {STATE_TTL} ثانیه",
+            parse_mode="HTML",
+            reply_markup=cancel_kb(),
+        )
         return
 
     if cb in ("br_l", "br_r"):
